@@ -15,7 +15,8 @@
 		exportSkills,
 		createNewSkill,
 		deleteSkillById,
-		toggleSkillById
+		toggleSkillById,
+		uploadSkillZip
 	} from '$lib/apis/skills';
 	import { capitalizeFirstLetter, parseFrontmatter, formatSkillName } from '$lib/utils';
 	import TagInput from '$lib/components/common/Tags/TagInput.svelte';
@@ -199,9 +200,9 @@
 					bind:this={importInputElement}
 					bind:files={importFiles}
 					type="file"
-					accept=".md,.json"
+					accept=".md,.json,.zip"
 					hidden
-					on:change={() => {
+					on:change={async () => {
 						if (importFiles && importFiles.length > 0) {
 							const file = importFiles[0];
 							const ext = file.name.split('.').pop()?.toLowerCase();
@@ -232,6 +233,21 @@
 									}
 								};
 								reader.readAsText(file);
+							} else if (ext === 'zip') {
+								// Agent skill zip import
+								const formData = new FormData();
+								formData.append('file', file);
+								try {
+									const res = await uploadSkillZip(localStorage.token, formData);
+									if (res) {
+										toast.success($i18n.t('Agent skill imported successfully'));
+										page = 1;
+										loadSkillItems();
+										_skills.set(await getSkills(localStorage.token));
+									}
+								} catch (err) {
+									toast.error(`${err}`);
+								}
 							} else {
 								// Markdown import: parse frontmatter and open in editor
 								const reader = new FileReader();
@@ -392,6 +408,9 @@
 													{#if !skill.is_active}
 														<Badge type="muted" content={$i18n.t('Inactive')} />
 													{/if}
+													{#if skill.meta?.type === 'agent_skill'}
+														<Badge type="info" content={$i18n.t('Agent')} />
+													{/if}
 												</div>
 											</Tooltip>
 											<div class="px-0.5">
@@ -424,6 +443,9 @@
 														</div>
 														{#if !skill.is_active}
 															<Badge type="muted" content={$i18n.t('Inactive')} />
+														{/if}
+														{#if skill.meta?.type === 'agent_skill'}
+															<Badge type="info" content={$i18n.t('Agent')} />
 														{/if}
 													</div>
 												</Tooltip>

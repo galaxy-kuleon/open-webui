@@ -1064,3 +1064,9 @@ _default_group_share = (
 DEFAULT_GROUP_SHARE_PERMISSION = (
     "members" if _default_group_share == "members" else _default_group_share == "true"
 )
+
+####################################
+# OPENCODE
+####################################
+
+OPENCODE_PATH = os.environ.get("OPENCODE_PATH", shutil.which("opencode") or "opencode")

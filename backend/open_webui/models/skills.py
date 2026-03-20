@@ -35,6 +35,8 @@ class Skill(Base):
 
 class SkillMeta(BaseModel):
     tags: Optional[list[str]] = []
+    type: Optional[str] = None  # None = markdown (default), "agent_skill" = opencode skill
+    disk_path: Optional[str] = None  # e.g. "/Users/x/.claude/skills/my-skill/"
 
 
 class SkillModel(BaseModel):

@@ -2411,6 +2411,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     all_skill_ids = user_skill_ids | model_skill_ids
     available_skills = []
+    agent_skill_ids = []
     if all_skill_ids:
         from open_webui.models.skills import Skills as SkillsModel
 
@@ -2426,8 +2427,26 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         ]
 
         skill_descriptions = ""
+        agent_skill_ids = []
         for skill in available_skills:
-            if skill.id in user_skill_ids:
+            # Check if this is an agent skill
+            skill_meta = skill.meta
+            if hasattr(skill_meta, "model_dump"):
+                skill_meta = skill_meta.model_dump()
+            is_agent_skill = skill_meta and skill_meta.get("type") == "agent_skill"
+
+            if is_agent_skill:
+                # Agent skill: inject instruction to use run_agent_skill tool
+                agent_skill_ids.append(skill.id)
+                form_data["messages"] = add_or_update_system_message(
+                    f'<agent_skill name="{skill.name}" id="{skill.id}">'
+                    f"\nThis is an executable agent skill. Use the run_agent_skill tool with "
+                    f'skill_name="{skill.name}" to execute it.\n'
+                    f"Description: {skill.description or ''}\n</agent_skill>",
+                    form_data["messages"],
+                    append=True,
+                )
+            elif skill.id in user_skill_ids:
                 # User-selected: inject full content
                 form_data["messages"] = add_or_update_system_message(
                     f'<skill name="{skill.name}">\n{skill.content}\n</skill>',
@@ -2705,6 +2724,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     "__skill_ids__": [
                         s.id for s in available_skills if s.id not in user_skill_ids
                     ],
+                    "__agent_skill_ids__": agent_skill_ids if agent_skill_ids else [],
                 },
                 features,
                 model,

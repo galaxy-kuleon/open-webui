@@ -3,6 +3,7 @@
 	const i18n = getContext('i18n');
 	import WebSearchResults from '../WebSearchResults.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
+	import AgentSkillStatus from './AgentSkillStatus.svelte';
 	import { t } from 'i18next';
 
 	export let status = null;
@@ -122,6 +123,8 @@
 					{/if}
 				</div>
 			</div>
+		{:else if status?.action === "agent_skill"}
+			<AgentSkillStatus {status} {done} />
 		{:else}
 			<div class="flex flex-col justify-center -space-y-0.5">
 				<div
