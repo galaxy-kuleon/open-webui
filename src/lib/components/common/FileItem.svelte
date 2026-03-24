@@ -22,6 +22,7 @@
 	export let dismissible = false;
 	export let modal = false;
 	export let loading = false;
+	export let statusText = '';
 
 	export let item = null;
 	export let edit = false;
@@ -129,7 +130,9 @@
 					{/if}
 				</Tooltip>
 			{:else}
-				<Spinner />
+				<Tooltip content={statusText || $i18n.t('Processing...')} placement="top">
+					<Spinner />
+				</Tooltip>
 			{/if}
 		</div>
 	{/if}
@@ -139,6 +142,12 @@
 			<div class=" dark:text-gray-100 text-sm font-medium line-clamp-1 mb-1">
 				{decodeString(name)}
 			</div>
+
+			{#if statusText}
+				<div class="text-xs text-blue-500 dark:text-blue-400 mb-0.5">
+					{statusText}
+				</div>
+			{/if}
 
 			<div
 				class=" flex justify-between text-xs line-clamp-1 {($settings?.highContrastMode ?? false)

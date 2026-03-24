@@ -36,10 +36,7 @@
 		</div>
 	{:else if subAction === 'thinking'}
 		<!-- Thinking -->
-		<button
-			class="flex items-start gap-2 w-full text-left"
-			on:click={() => (expanded = !expanded)}
-		>
+		<button class="flex items-start gap-2 w-full text-left" on:click={() => (expanded = !expanded)}>
 			<div class="flex-shrink-0 mt-0.5 text-purple-500 dark:text-purple-400">
 				<LightBulb className="size-3.5" />
 			</div>
@@ -62,18 +59,13 @@
 		</button>
 	{:else if subAction === 'tool_use'}
 		<!-- Tool usage -->
-		<button
-			class="flex items-start gap-2 w-full text-left"
-			on:click={() => (expanded = !expanded)}
-		>
+		<button class="flex items-start gap-2 w-full text-left" on:click={() => (expanded = !expanded)}>
 			<div class="flex-shrink-0 mt-0.5 text-amber-500 dark:text-amber-400">
 				<CommandLine className="size-3.5" />
 			</div>
 			<div class="flex flex-col min-w-0 flex-1">
 				<div class="flex items-center gap-1.5">
-					<div
-						class="{isActive ? 'shimmer' : ''} text-sm text-amber-600 dark:text-amber-400"
-					>
+					<div class="{isActive ? 'shimmer' : ''} text-sm text-amber-600 dark:text-amber-400">
 						{toolName || $i18n.t('Tool')}
 					</div>
 				</div>
@@ -92,10 +84,7 @@
 		</button>
 	{:else if subAction === 'output'}
 		<!-- Text output -->
-		<button
-			class="flex items-start gap-2 w-full text-left"
-			on:click={() => (expanded = !expanded)}
-		>
+		<button class="flex items-start gap-2 w-full text-left" on:click={() => (expanded = !expanded)}>
 			<div class="flex-shrink-0 mt-0.5 text-green-500 dark:text-green-400">
 				<Bolt className="size-3.5" />
 			</div>

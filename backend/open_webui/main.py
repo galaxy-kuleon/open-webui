@@ -229,10 +229,24 @@ from open_webui.config import (
     RAG_TEMPLATE,
     DEFAULT_RAG_TEMPLATE,
     RAG_FULL_CONTEXT,
+    RAG_FULL_DOCUMENT_CONTEXT,
+    RAG_FULL_DOCUMENT_MAX_TOKENS,
+    RAG_SUBCHAT_CONCURRENCY,
+    RAG_DOCUMENT_INDEX_GENERATION,
+    RAG_DOCUMENT_INDEX_MODEL,
+    RAG_DOCUMENT_INDEX_TIMEOUT,
+    RAG_KNOWLEDGE_EXPORT_ENABLED,
+    RAG_KNOWLEDGE_EXPORT_DIR,
+    RAG_RESEARCH_MODEL,
+    RAG_KNOWLEDGE_ORGANIZER_MODEL,
+    RAG_USER_COLLECTION_ENABLED,
     BYPASS_EMBEDDING_AND_RETRIEVAL,
     RAG_EMBEDDING_MODEL,
     RAG_EMBEDDING_MODEL_AUTO_UPDATE,
     RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
+    RAG_EMBEDDING_QUERY_PREFIX,
+    RAG_EMBEDDING_CONTENT_PREFIX,
+    RAG_EMBEDDING_PREFIX_FIELD_NAME,
     RAG_RERANKING_ENGINE,
     RAG_RERANKING_MODEL,
     RAG_EXTERNAL_RERANKER_URL,
@@ -279,6 +293,13 @@ from open_webui.config import (
     MINERU_API_KEY,
     MINERU_API_TIMEOUT,
     MINERU_PARAMS,
+    KG1_GLMOCR_PROJECT_DIR,
+    KG1_OLLAMA_HOST,
+    KG1_OLLAMA_PORT,
+    KG1_LAYOUT_DEVICE,
+    KG1_SOFFICE_PATH,
+    KG1_TIMEOUT,
+    KG1_GLM_OCR_CONCURRENCY,
     DATALAB_MARKER_USE_LLM,
     EXTERNAL_DOCUMENT_LOADER_URL,
     EXTERNAL_DOCUMENT_LOADER_API_KEY,
@@ -507,6 +528,7 @@ from open_webui.env import (
     WEBUI_ADMIN_NAME,
     ENABLE_EASTER_EGGS,
     LOG_FORMAT,
+    OPENCODE_PATH,
 )
 
 
@@ -586,7 +608,8 @@ class SPAStaticFiles(StaticFiles):
 
 
 if LOG_FORMAT != "json":
-    print(rf"""
+    print(
+        rf"""
  ██████╗ ██████╗ ███████╗███╗   ██╗    ██╗    ██╗███████╗██████╗ ██╗   ██╗██╗
 ██╔═══██╗██╔══██╗██╔════╝████╗  ██║    ██║    ██║██╔════╝██╔══██╗██║   ██║██║
 ██║   ██║██████╔╝█████╗  ██╔██╗ ██║    ██║ █╗ ██║█████╗  ██████╔╝██║   ██║██║
@@ -598,7 +621,8 @@ if LOG_FORMAT != "json":
 v{VERSION} - building the best AI user interface.
 {f"Commit: {WEBUI_BUILD_HASH}" if WEBUI_BUILD_HASH != "dev-build" else ""}
 https://github.com/open-webui/open-webui
-""")
+"""
+    )
 
 
 @asynccontextmanager
@@ -701,10 +725,50 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Failed to initialize tool/terminal servers at startup: {e}")
 
+    # Check if KB inbox has unorganized files and trigger organizer
+    try:
+        kb_dir = app.state.config.RAG_KNOWLEDGE_EXPORT_DIR
+        if kb_dir and app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED:
+            import glob as _glob
+
+            inbox_files = _glob.glob(os.path.join(kb_dir, "inbox", "*.md"))
+            if inbox_files:
+                from open_webui.utils.knowledge_export import enqueue_organization
+
+                log.info(
+                    f"Startup: found {len(inbox_files)} files in KB inbox, "
+                    f"triggering organizer"
+                )
+                enqueue_organization(
+                    export_dir=kb_dir,
+                    opencode_path=OPENCODE_PATH,
+                    model=app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL,
+                )
+    except Exception as e:
+        log.warning(f"Startup: KB inbox check failed: {e}")
+
     yield
+
+    # Shutdown: kill all OpenCode subprocesses
+    _kill_all_subprocesses()
 
     if hasattr(app.state, "redis_task_command_listener"):
         app.state.redis_task_command_listener.cancel()
+
+
+def _kill_all_subprocesses():
+    """Kill all tracked OpenCode/organizer/research subprocesses."""
+    from open_webui.utils.opencode import kill_all_opencode_processes
+    from open_webui.utils.knowledge_export import kill_all_organizer_processes
+    from open_webui.utils.research import kill_all_research_processes
+
+    kill_all_opencode_processes()
+    kill_all_organizer_processes()
+    kill_all_research_processes()
+
+
+# Note: atexit handler removed — it was killing organizer processes prematurely
+# during normal operation. Lifespan shutdown handler is sufficient.
 
 
 app = FastAPI(
@@ -952,6 +1016,17 @@ app.state.config.FILE_IMAGE_COMPRESSION_HEIGHT = FILE_IMAGE_COMPRESSION_HEIGHT
 
 
 app.state.config.RAG_FULL_CONTEXT = RAG_FULL_CONTEXT
+app.state.config.RAG_FULL_DOCUMENT_CONTEXT = RAG_FULL_DOCUMENT_CONTEXT
+app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS = RAG_FULL_DOCUMENT_MAX_TOKENS
+app.state.config.RAG_SUBCHAT_CONCURRENCY = RAG_SUBCHAT_CONCURRENCY
+app.state.config.RAG_DOCUMENT_INDEX_GENERATION = RAG_DOCUMENT_INDEX_GENERATION
+app.state.config.RAG_DOCUMENT_INDEX_MODEL = RAG_DOCUMENT_INDEX_MODEL
+app.state.config.RAG_DOCUMENT_INDEX_TIMEOUT = RAG_DOCUMENT_INDEX_TIMEOUT
+app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED = RAG_KNOWLEDGE_EXPORT_ENABLED
+app.state.config.RAG_KNOWLEDGE_EXPORT_DIR = RAG_KNOWLEDGE_EXPORT_DIR
+app.state.config.RAG_RESEARCH_MODEL = RAG_RESEARCH_MODEL
+app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL = RAG_KNOWLEDGE_ORGANIZER_MODEL
+app.state.config.RAG_USER_COLLECTION_ENABLED = RAG_USER_COLLECTION_ENABLED
 app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL = BYPASS_EMBEDDING_AND_RETRIEVAL
 app.state.config.ENABLE_RAG_HYBRID_SEARCH = ENABLE_RAG_HYBRID_SEARCH
 app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS = (
@@ -989,6 +1064,13 @@ app.state.config.MINERU_API_URL = MINERU_API_URL
 app.state.config.MINERU_API_KEY = MINERU_API_KEY
 app.state.config.MINERU_API_TIMEOUT = MINERU_API_TIMEOUT
 app.state.config.MINERU_PARAMS = MINERU_PARAMS
+app.state.config.KG1_GLMOCR_PROJECT_DIR = KG1_GLMOCR_PROJECT_DIR
+app.state.config.KG1_OLLAMA_HOST = KG1_OLLAMA_HOST
+app.state.config.KG1_OLLAMA_PORT = KG1_OLLAMA_PORT
+app.state.config.KG1_LAYOUT_DEVICE = KG1_LAYOUT_DEVICE
+app.state.config.KG1_SOFFICE_PATH = KG1_SOFFICE_PATH
+app.state.config.KG1_TIMEOUT = KG1_TIMEOUT
+app.state.config.KG1_GLM_OCR_CONCURRENCY = KG1_GLM_OCR_CONCURRENCY
 
 app.state.config.TEXT_SPLITTER = RAG_TEXT_SPLITTER
 app.state.config.ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER = (
@@ -1007,6 +1089,9 @@ app.state.config.RAG_EMBEDDING_MODEL = RAG_EMBEDDING_MODEL
 app.state.config.RAG_EMBEDDING_BATCH_SIZE = RAG_EMBEDDING_BATCH_SIZE
 app.state.config.ENABLE_ASYNC_EMBEDDING = ENABLE_ASYNC_EMBEDDING
 app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS = RAG_EMBEDDING_CONCURRENT_REQUESTS
+app.state.config.RAG_EMBEDDING_QUERY_PREFIX = RAG_EMBEDDING_QUERY_PREFIX
+app.state.config.RAG_EMBEDDING_CONTENT_PREFIX = RAG_EMBEDDING_CONTENT_PREFIX
+app.state.config.RAG_EMBEDDING_PREFIX_FIELD_NAME = RAG_EMBEDDING_PREFIX_FIELD_NAME
 
 app.state.config.RAG_RERANKING_ENGINE = RAG_RERANKING_ENGINE
 app.state.config.RAG_RERANKING_MODEL = RAG_RERANKING_MODEL

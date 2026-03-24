@@ -47,7 +47,7 @@ from open_webui.routers.audio import transcribe
 from open_webui.storage.provider import Storage
 
 
-from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
+from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, RAG_USER_COLLECTION_ENABLED
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import strict_match_mime_type
 from pydantic import BaseModel
@@ -852,6 +852,16 @@ async def delete_file_by_id(
                     )
             except Exception as e:
                 log.debug(f"KB embedding cleanup for {knowledge.id}: {e}")
+
+        # Clean up user collection embeddings
+        if RAG_USER_COLLECTION_ENABLED.value:
+            try:
+                user_collection = f"user-{file.user_id}"
+                VECTOR_DB_CLIENT.delete(
+                    collection_name=user_collection, filter={"file_id": id}
+                )
+            except Exception as e:
+                log.debug(f"User collection cleanup for {id}: {e}")
 
         result = Files.delete_file_by_id(id, db=db)
         if result:

@@ -1893,6 +1893,12 @@ async def query_knowledge_files(
             )
             collection_names = [knowledge_base.id for knowledge_base in result.items]
 
+        # Include user collection if enabled
+        if __request__.app.state.config.RAG_USER_COLLECTION_ENABLED:
+            user_collection = f"user-{user_id}"
+            if user_collection not in collection_names:
+                collection_names.append(user_collection)
+
         chunks = []
 
         # Add note results first

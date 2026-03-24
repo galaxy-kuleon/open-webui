@@ -22,8 +22,30 @@ log = logging.getLogger(__name__)
 # Concurrency limit per user
 _user_semaphores: dict[str, asyncio.Semaphore] = {}
 MAX_CONCURRENT_PER_USER = 2
-DEFAULT_TIMEOUT = 300  # seconds
+DEFAULT_IDLE_TIMEOUT = 600  # seconds — kill only if idle (no output) for this long
 MAX_UNCOMPRESSED_SIZE = 50 * 1024 * 1024  # 50MB
+
+# Global registry of active OpenCode subprocesses (for cleanup on shutdown)
+_active_processes: set[asyncio.subprocess.Process] = set()
+
+
+def kill_all_opencode_processes():
+    """Kill all tracked OpenCode subprocesses. Called on server shutdown."""
+    import signal
+
+    if not _active_processes:
+        return
+    log.info(f"Shutting down: killing {len(_active_processes)} OpenCode subprocess(es)")
+    for proc in list(_active_processes):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            log.info(f"Killed OpenCode process group PID {proc.pid}")
+        except (ProcessLookupError, OSError):
+            try:
+                proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
+    _active_processes.clear()
 
 
 def _get_user_semaphore(user_id: str) -> asyncio.Semaphore:
@@ -83,6 +105,46 @@ def generate_opencode_config(
     return config
 
 
+def sync_opencode_config_to_dir(target_dir: str) -> None:
+    """
+    Sync OpenCode config to a project directory's opencode.json.
+
+    Reads the global config (~/.config/opencode/opencode.json) which has
+    the user's provider/model settings, merges with permission: allow,
+    and writes to {target_dir}/opencode.json.
+    """
+    global_config_path = Path.home() / ".config" / "opencode" / "opencode.json"
+    target_path = Path(target_dir) / "opencode.json"
+
+    # Start with existing project config or empty
+    project_config = {}
+    if target_path.exists():
+        try:
+            project_config = json.loads(target_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Read global config for provider settings
+    if global_config_path.exists():
+        try:
+            global_config = json.loads(global_config_path.read_text())
+            # Merge provider from global into project
+            if "provider" in global_config:
+                project_config["provider"] = global_config["provider"]
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning(f"Failed to read global opencode config: {e}")
+
+    # Ensure permission is set
+    project_config.setdefault("$schema", "https://opencode.ai/config.json")
+    project_config["permission"] = "allow"
+
+    try:
+        target_path.write_text(json.dumps(project_config, indent=2))
+        log.debug(f"Synced opencode config to {target_path}")
+    except OSError as e:
+        log.warning(f"Failed to write opencode config to {target_path}: {e}")
+
+
 def setup_sandbox(skill_id: str, skill_disk_path: str, skill_name: str = "") -> str:
     """
     Create a sandbox directory for opencode execution.
@@ -126,7 +188,7 @@ async def run_opencode(
     model: str,
     skill_name: str,
     event_emitter: Optional[Callable] = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
 ) -> str:
     """
     Execute opencode CLI in the sandbox and stream events to the chat.
@@ -151,8 +213,10 @@ async def run_opencode(
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
+        start_new_session=True,
         stderr=asyncio.subprocess.PIPE,
     )
+    _active_processes.add(proc)
 
     collected_text = []
     stderr_output = []
@@ -162,121 +226,152 @@ async def run_opencode(
             line = await proc.stderr.readline()
             if not line:
                 break
-            stderr_output.append(line.decode("utf-8", errors="replace"))
+            text = line.decode("utf-8", errors="replace")
+            stderr_output.append(text)
+            log.info(f"[opencode:stderr] {text.rstrip()[:2500] + ' ... ' + text.rstrip()[-2500:] if len(text.rstrip()) > 5000 else text.rstrip()}")
 
     stderr_task = asyncio.create_task(_read_stderr())
 
     try:
-        async with asyncio.timeout(timeout):
+        last_activity = time.monotonic()
+
+        async def _read_line_with_idle_check():
+            """Read a line, raising TimeoutError if idle too long."""
+            nonlocal last_activity
             while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-
-                line_str = line.decode("utf-8", errors="replace").strip()
-                if not line_str:
-                    continue
-
+                remaining = idle_timeout - (time.monotonic() - last_activity)
+                if remaining <= 0:
+                    raise TimeoutError(f"idle for {idle_timeout}s")
                 try:
-                    event = json.loads(line_str)
-                except json.JSONDecodeError:
-                    log.debug(f"Non-JSON line from opencode: {line_str}")
-                    continue
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=min(remaining, 30)
+                    )
+                    if line:
+                        last_activity = time.monotonic()
+                    return line
+                except asyncio.TimeoutError:
+                    # No data yet — check if still within idle window
+                    if time.monotonic() - last_activity >= idle_timeout:
+                        raise TimeoutError(f"idle for {idle_timeout}s")
+                    # Otherwise loop and keep waiting
 
-                event_type = event.get("type", "")
+        while True:
+            line = await _read_line_with_idle_check()
+            if not line:
+                break
 
-                if event_type == "text" or event_type == "content":
-                    text = event.get("content", event.get("text", ""))
-                    if text:
-                        collected_text.append(text)
-                    if event_emitter:
-                        await event_emitter({
-                            "type": "status",
-                            "data": {
-                                "action": "agent_skill",
-                                "sub_action": "output",
-                                "description": text[:500] if text else "",
-                                "done": False,
-                            },
-                        })
+            line_str = line.decode("utf-8", errors="replace").strip()
+            if not line_str:
+                continue
 
-                elif event_type == "thinking":
-                    thinking_text = event.get("content", event.get("thinking", ""))
-                    if event_emitter and thinking_text:
-                        await event_emitter({
-                            "type": "status",
-                            "data": {
-                                "action": "agent_skill",
-                                "sub_action": "thinking",
-                                "description": thinking_text[:500],
-                                "done": False,
-                            },
-                        })
+            log.info(f"[opencode:stdout] {line_str[:2500] + ' ... ' + line_str[-2500:] if len(line_str) > 5000 else line_str}")
 
-                elif event_type == "tool_use":
-                    tool_name = event.get("name", event.get("tool", ""))
-                    tool_input = event.get("input", event.get("args", ""))
-                    if isinstance(tool_input, dict):
-                        tool_input = json.dumps(tool_input, ensure_ascii=False)[:500]
-                    elif isinstance(tool_input, str):
-                        tool_input = tool_input[:500]
-                    else:
-                        tool_input = str(tool_input)[:500]
-                    if event_emitter:
-                        await event_emitter({
-                            "type": "status",
-                            "data": {
-                                "action": "agent_skill",
-                                "sub_action": "tool_use",
-                                "description": f"{tool_name}: {tool_input}",
-                                "tool_name": tool_name,
-                                "tool_input": tool_input,
-                                "done": False,
-                            },
-                        })
+            try:
+                event = json.loads(line_str)
+            except json.JSONDecodeError:
+                continue
 
-                elif event_type == "tool_result":
-                    result_text = event.get("content", event.get("output", ""))
-                    if isinstance(result_text, str) and result_text:
-                        collected_text.append(result_text)
+            event_type = event.get("type", "")
 
-                elif event_type == "error":
-                    error_msg = event.get("error", event.get("message", "Unknown error"))
-                    if event_emitter:
-                        await event_emitter({
-                            "type": "status",
-                            "data": {
-                                "action": "agent_skill",
-                                "sub_action": "error",
-                                "description": str(error_msg)[:500],
-                                "done": False,
-                            },
-                        })
+            if event_type == "text" or event_type == "content":
+                text = event.get("content", event.get("text", ""))
+                if text:
+                    collected_text.append(text)
+                if event_emitter:
+                    await event_emitter({
+                        "type": "status",
+                        "data": {
+                            "action": "agent_skill",
+                            "sub_action": "output",
+                            "description": text[:500] if text else "",
+                            "done": False,
+                        },
+                    })
 
-                elif event_type == "result":
-                    # Final result event
-                    result_text = event.get("result", event.get("content", ""))
-                    if result_text:
-                        collected_text.append(result_text)
+            elif event_type == "thinking":
+                thinking_text = event.get("content", event.get("thinking", ""))
+                if event_emitter and thinking_text:
+                    await event_emitter({
+                        "type": "status",
+                        "data": {
+                            "action": "agent_skill",
+                            "sub_action": "thinking",
+                            "description": thinking_text[:500],
+                            "done": False,
+                        },
+                    })
 
-            await proc.wait()
+            elif event_type == "tool_use":
+                tool_name = event.get("name", event.get("tool", ""))
+                tool_input = event.get("input", event.get("args", ""))
+                if isinstance(tool_input, dict):
+                    tool_input = json.dumps(tool_input, ensure_ascii=False)[:500]
+                elif isinstance(tool_input, str):
+                    tool_input = tool_input[:500]
+                else:
+                    tool_input = str(tool_input)[:500]
+                if event_emitter:
+                    await event_emitter({
+                        "type": "status",
+                        "data": {
+                            "action": "agent_skill",
+                            "sub_action": "tool_use",
+                            "description": f"{tool_name}: {tool_input}",
+                            "tool_name": tool_name,
+                            "tool_input": tool_input,
+                            "done": False,
+                        },
+                    })
+
+            elif event_type == "tool_result":
+                result_text = event.get("content", event.get("output", ""))
+                if isinstance(result_text, str) and result_text:
+                    collected_text.append(result_text)
+
+            elif event_type == "error":
+                error_msg = event.get("error", event.get("message", "Unknown error"))
+                if event_emitter:
+                    await event_emitter({
+                        "type": "status",
+                        "data": {
+                            "action": "agent_skill",
+                            "sub_action": "error",
+                            "description": str(error_msg)[:500],
+                            "done": False,
+                        },
+                    })
+
+            elif event_type == "result":
+                # Final result event
+                result_text = event.get("result", event.get("content", ""))
+                if result_text:
+                    collected_text.append(result_text)
+
+        await proc.wait()
 
     except TimeoutError:
-        log.warning(f"opencode timed out after {timeout}s, killing process")
-        proc.kill()
+        elapsed = int(time.monotonic() - last_activity)
+        import signal
+
+        log.warning(f"opencode idle-timed out (no output for {elapsed}s), killing process group")
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            proc.kill()
         await proc.wait()
         if event_emitter:
             await event_emitter({
                 "type": "status",
                 "data": {
                     "action": "agent_skill",
-                    "description": f"Agent skill timed out after {timeout}s",
+                    "description": f"Agent skill idle-timed out (no activity for {idle_timeout}s)",
                     "done": True,
                 },
             })
-        return f"Error: opencode execution timed out after {timeout} seconds."
+        return f"Error: opencode idle-timed out (no output for {idle_timeout} seconds)."
 
     finally:
+        _active_processes.discard(proc)
         await stderr_task
 
     if proc.returncode != 0 and not collected_text:

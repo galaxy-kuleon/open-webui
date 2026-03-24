@@ -612,7 +612,16 @@
 				}
 
 				// During the file upload, file content is automatically extracted.
-				const uploadedFile = await uploadFile(localStorage.token, file, metadata, process);
+				const uploadedFile = await uploadFile(
+					localStorage.token,
+					file,
+					metadata,
+					process,
+					(status) => {
+						fileItem.status = status;
+						files = files;
+					}
+				);
 
 				if (uploadedFile) {
 					console.log('File upload completed:', {
@@ -1306,7 +1315,19 @@
 												name={file.name}
 												type={file.type}
 												size={file?.size}
-												loading={file.status === 'uploading'}
+												loading={file.status === 'uploading' ||
+													(file.status && file.status.startsWith('processing'))}
+												statusText={file.status?.startsWith('processing:extracting')
+													? (file.status.includes('(')
+														? file.status.replace('processing:extracting ', '')
+														: $i18n.t('Extracting content...'))
+													: file.status === 'processing:embedding'
+														? $i18n.t('Embedding...')
+														: file.status === 'processing:indexing'
+															? $i18n.t('Generating index...')
+															: file.status === 'uploading'
+																? $i18n.t('Uploading...')
+																: ''}
 												dismissible={true}
 												edit={true}
 												small={true}

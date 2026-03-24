@@ -43,6 +43,8 @@
 	let RAG_EMBEDDING_BATCH_SIZE = 1;
 	let ENABLE_ASYNC_EMBEDDING = true;
 	let RAG_EMBEDDING_CONCURRENT_REQUESTS = 0;
+	let RAG_EMBEDDING_QUERY_PREFIX = '';
+	let RAG_EMBEDDING_CONTENT_PREFIX = '';
 
 	let rerankingModel = '';
 
@@ -116,6 +118,8 @@
 			RAG_EMBEDDING_BATCH_SIZE: RAG_EMBEDDING_BATCH_SIZE,
 			ENABLE_ASYNC_EMBEDDING: ENABLE_ASYNC_EMBEDDING,
 			RAG_EMBEDDING_CONCURRENT_REQUESTS: RAG_EMBEDDING_CONCURRENT_REQUESTS,
+			RAG_EMBEDDING_QUERY_PREFIX: RAG_EMBEDDING_QUERY_PREFIX,
+			RAG_EMBEDDING_CONTENT_PREFIX: RAG_EMBEDDING_CONTENT_PREFIX,
 			ollama_config: {
 				key: OllamaKey,
 				url: OllamaUrl
@@ -251,6 +255,8 @@
 			RAG_EMBEDDING_BATCH_SIZE = embeddingConfig.RAG_EMBEDDING_BATCH_SIZE ?? 1;
 			ENABLE_ASYNC_EMBEDDING = embeddingConfig.ENABLE_ASYNC_EMBEDDING ?? true;
 			RAG_EMBEDDING_CONCURRENT_REQUESTS = embeddingConfig.RAG_EMBEDDING_CONCURRENT_REQUESTS ?? 0;
+			RAG_EMBEDDING_QUERY_PREFIX = embeddingConfig.RAG_EMBEDDING_QUERY_PREFIX ?? '';
+			RAG_EMBEDDING_CONTENT_PREFIX = embeddingConfig.RAG_EMBEDDING_CONTENT_PREFIX ?? '';
 
 			OpenAIKey = embeddingConfig.openai_config.key;
 			OpenAIUrl = embeddingConfig.openai_config.url;
@@ -357,6 +363,7 @@
 									<option value="document_intelligence">{$i18n.t('Document Intelligence')}</option>
 									<option value="mistral_ocr">{$i18n.t('Mistral OCR')}</option>
 									<option value="mineru">{$i18n.t('MinerU')}</option>
+									<option value="kg1">{$i18n.t('KG1 (GLM-OCR)')}</option>
 								</select>
 							</div>
 						</div>
@@ -742,6 +749,88 @@
 									/>
 								</div>
 							</div>
+						{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'kg1'}
+							<!-- GLM-OCR Project Directory -->
+							<div class="flex w-full mt-2">
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('Enter GLM-OCR Project Directory Path')}
+									bind:value={RAGConfig.KG1_GLMOCR_PROJECT_DIR}
+								/>
+							</div>
+
+							<!-- Ollama Host / Port -->
+							<div class="my-0.5 flex gap-2 pr-2 mt-2">
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('Ollama Host (default: 127.0.0.1)')}
+									bind:value={RAGConfig.KG1_OLLAMA_HOST}
+								/>
+								<input
+									class="w-24 text-sm bg-transparent outline-hidden text-right"
+									type="number"
+									placeholder="11434"
+									bind:value={RAGConfig.KG1_OLLAMA_PORT}
+								/>
+							</div>
+
+							<!-- Layout Device -->
+							<div class="flex w-full mt-2">
+								<div class="flex-1 flex justify-between">
+									<div class="self-center text-xs font-medium">
+										{$i18n.t('Layout Device')}
+									</div>
+									<select
+										class="w-fit pr-8 rounded-sm px-2 text-xs bg-transparent outline-hidden"
+										bind:value={RAGConfig.KG1_LAYOUT_DEVICE}
+									>
+										<option value="cpu">{$i18n.t('CPU')}</option>
+										<option value="mps">{$i18n.t('MPS (Apple Silicon)')}</option>
+										<option value="cuda">{$i18n.t('CUDA')}</option>
+									</select>
+								</div>
+							</div>
+
+							<!-- LibreOffice Path -->
+							<div class="flex w-full mt-2">
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('LibreOffice Path (default: soffice)')}
+									bind:value={RAGConfig.KG1_SOFFICE_PATH}
+								/>
+							</div>
+
+							<!-- Timeout -->
+							<div class="flex w-full mt-2">
+								<div class="flex-1 flex justify-between">
+									<div class="self-center text-xs font-medium">
+										{$i18n.t('Timeout (seconds)')}
+									</div>
+									<input
+										class="w-16 text-sm bg-transparent outline-hidden text-right"
+										type="number"
+										min="1"
+										bind:value={RAGConfig.KG1_TIMEOUT}
+										placeholder="600"
+									/>
+								</div>
+							</div>
+
+							<!-- Concurrency -->
+							<div class="flex w-full mt-2">
+								<div class="flex-1 flex justify-between">
+									<div class="self-center text-xs font-medium">
+										{$i18n.t('GLM-OCR Concurrency')}
+									</div>
+									<input
+										class="w-16 text-sm bg-transparent outline-hidden text-right"
+										type="number"
+										min="1"
+										bind:value={RAGConfig.KG1_GLM_OCR_CONCURRENCY}
+										placeholder="1"
+									/>
+								</div>
+							</div>
 						{/if}
 					</div>
 
@@ -775,6 +864,7 @@
 									bind:value={RAGConfig.TEXT_SPLITTER}
 								>
 									<option value="">{$i18n.t('Default')} ({$i18n.t('Character')})</option>
+									<option value="markdown">{$i18n.t('Markdown')}</option>
 									<option value="token">{$i18n.t('Token')} ({$i18n.t('Tiktoken')})</option>
 								</select>
 							</div>
@@ -882,11 +972,18 @@
 										placeholder={$i18n.t('Select an embedding model engine')}
 										on:change={(e) => {
 											if (e.target.value === 'ollama') {
-												RAG_EMBEDDING_MODEL = '';
+												RAG_EMBEDDING_MODEL = 'qwen3-embedding:4b-fp16';
+												RAG_EMBEDDING_QUERY_PREFIX =
+													'Instruct: Given a web search query, retrieve relevant passages that answer the query.\nQuery: ';
+												RAG_EMBEDDING_CONTENT_PREFIX = '';
 											} else if (e.target.value === 'openai') {
 												RAG_EMBEDDING_MODEL = 'text-embedding-3-small';
+												RAG_EMBEDDING_QUERY_PREFIX = '';
+												RAG_EMBEDDING_CONTENT_PREFIX = '';
 											} else if (e.target.value === 'azure_openai') {
 												RAG_EMBEDDING_MODEL = 'text-embedding-3-small';
+												RAG_EMBEDDING_QUERY_PREFIX = '';
+												RAG_EMBEDDING_CONTENT_PREFIX = '';
 											} else if (e.target.value === '') {
 												RAG_EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2';
 											}
@@ -961,11 +1058,16 @@
 									<div class="flex w-full">
 										<div class="flex-1 mr-2">
 											<input
+												list="ollama-embedding-model-list"
 												class="flex-1 w-full text-sm bg-transparent outline-hidden"
 												bind:value={RAG_EMBEDDING_MODEL}
 												placeholder={$i18n.t('Set embedding model')}
 												required
 											/>
+											<datalist id="ollama-embedding-model-list">
+												<option value="qwen3-embedding:4b-fp16">Qwen3 Embedding 4B (FP16)</option>
+												<option value="qwen3-embedding:8b-fp16">Qwen3 Embedding 8B (FP16)</option>
+											</datalist>
 										</div>
 									</div>
 								{:else}
@@ -1037,6 +1139,42 @@
 							</div>
 						</div>
 
+						<div class="  mb-2.5 flex flex-col w-full">
+							<div class=" mb-1 text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Prefix prepended to query text during embedding. Required for instruction-sensitive models like Qwen3 Embedding. Format: Instruct: ...\\nQuery: '
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Embedding Query Prefix')}
+								</Tooltip>
+							</div>
+							<input
+								class="flex-1 w-full text-sm bg-transparent outline-hidden"
+								placeholder={$i18n.t('e.g. Instruct: Given a web search query...\\nQuery: ')}
+								bind:value={RAG_EMBEDDING_QUERY_PREFIX}
+							/>
+						</div>
+
+						<div class="  mb-2.5 flex flex-col w-full">
+							<div class=" mb-1 text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Prefix prepended to document text during embedding. Leave empty for most models.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Embedding Content Prefix')}
+								</Tooltip>
+							</div>
+							<input
+								class="flex-1 w-full text-sm bg-transparent outline-hidden"
+								placeholder={$i18n.t('Leave empty for most models')}
+								bind:value={RAG_EMBEDDING_CONTENT_PREFIX}
+							/>
+						</div>
+
 						{#if RAG_EMBEDDING_ENGINE === 'ollama' || RAG_EMBEDDING_ENGINE === 'openai' || RAG_EMBEDDING_ENGINE === 'azure_openai'}
 							<div class="  mb-2.5 flex w-full justify-between">
 								<div class="self-center text-xs font-medium">
@@ -1101,6 +1239,167 @@
 						</div>
 
 						{#if !RAGConfig.RAG_FULL_CONTEXT}
+							<div class="  mb-2.5 flex w-full justify-between">
+								<div class=" self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'After chunk retrieval, expand results to include full source documents instead of individual chunks. Best for 256K+ context models.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Full Document Context')}
+									</Tooltip>
+								</div>
+								<div class="flex items-center relative">
+									<Switch bind:state={RAGConfig.RAG_FULL_DOCUMENT_CONTEXT} />
+								</div>
+							</div>
+
+							{#if RAGConfig.RAG_FULL_DOCUMENT_CONTEXT}
+								<div class="  mb-2.5 flex w-full justify-between">
+									<div class=" self-center text-xs font-medium">
+										<Tooltip
+											content={$i18n.t(
+												'Maximum total tokens for full document injection. If exceeded, sub-chat extraction compresses documents. Set 0 to disable.'
+											)}
+											placement="top-start"
+										>
+											{$i18n.t('Max Document Tokens')}
+										</Tooltip>
+									</div>
+									<input
+										class="w-24 text-sm bg-transparent outline-hidden text-right"
+										type="number"
+										min="0"
+										bind:value={RAGConfig.RAG_FULL_DOCUMENT_MAX_TOKENS}
+										placeholder="128000"
+									/>
+								</div>
+
+								<div class="  mb-2.5 flex w-full justify-between">
+									<div class=" self-center text-xs font-medium">
+										{$i18n.t('Sub-Chat Concurrency')}
+									</div>
+									<input
+										class="w-16 text-sm bg-transparent outline-hidden text-right"
+										type="number"
+										min="1"
+										bind:value={RAGConfig.RAG_SUBCHAT_CONCURRENCY}
+										placeholder="3"
+									/>
+								</div>
+							{/if}
+
+							<div class="  mb-2.5 flex w-full justify-between">
+								<div class=" self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Generate a structured index (entities, events, relationships, timeline) for each uploaded document using AI. Improves search accuracy by creating an additional embedding anchor.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Document Index Generation')}
+									</Tooltip>
+								</div>
+								<div class="flex items-center relative">
+									<Switch bind:state={RAGConfig.RAG_DOCUMENT_INDEX_GENERATION} />
+								</div>
+							</div>
+
+							{#if RAGConfig.RAG_DOCUMENT_INDEX_GENERATION}
+								<div class="  mb-2.5 flex flex-col w-full">
+									<div class=" mb-1 text-xs font-medium">
+										{$i18n.t('Index Generation Model')}
+									</div>
+									<input
+										class="flex-1 w-full text-sm bg-transparent outline-hidden"
+										placeholder={$i18n.t('Leave empty to use first available model')}
+										bind:value={RAGConfig.RAG_DOCUMENT_INDEX_MODEL}
+									/>
+								</div>
+
+								<div class="  mb-2.5 flex flex-col w-full">
+									<div class=" mb-1 text-xs font-medium">
+										{$i18n.t('Index Generation Timeout (seconds)')}
+									</div>
+									<input
+										class="flex-1 w-full text-sm bg-transparent outline-hidden"
+										type="number"
+										min="60"
+										step="60"
+										placeholder="600"
+										bind:value={RAGConfig.RAG_DOCUMENT_INDEX_TIMEOUT}
+									/>
+								</div>
+							{/if}
+
+							<div class="  mb-2.5 flex w-full justify-between">
+								<div class=" self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Export processed markdown files to a directory for external tools (e.g., OpenCode) to browse and organize. Files are auto-sorted by topic.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Knowledge Export')}
+									</Tooltip>
+								</div>
+								<div class="flex items-center relative">
+									<Switch bind:state={RAGConfig.RAG_KNOWLEDGE_EXPORT_ENABLED} />
+								</div>
+							</div>
+
+							{#if RAGConfig.RAG_KNOWLEDGE_EXPORT_ENABLED}
+								<div class="  mb-2.5 flex flex-col w-full">
+									<div class=" mb-1 text-xs font-medium">
+										{$i18n.t('Export Directory')}
+									</div>
+									<input
+										class="flex-1 w-full text-sm bg-transparent outline-hidden"
+										placeholder={$i18n.t('Enter export directory path')}
+										bind:value={RAGConfig.RAG_KNOWLEDGE_EXPORT_DIR}
+									/>
+								</div>
+
+								<div class="  mb-2.5 flex flex-col w-full">
+									<div class=" mb-1 text-xs font-medium">
+										{$i18n.t('Research Model')}
+									</div>
+									<input
+										class="flex-1 w-full text-sm bg-transparent outline-hidden"
+										placeholder={$i18n.t('e.g. lmstudio.unsloth/qwen3.5-35b-a3b')}
+										bind:value={RAGConfig.RAG_RESEARCH_MODEL}
+									/>
+								</div>
+
+								<div class="  mb-2.5 flex flex-col w-full">
+									<div class=" mb-1 text-xs font-medium">
+										{$i18n.t('Knowledge Organizer Model')}
+									</div>
+									<input
+										class="flex-1 w-full text-sm bg-transparent outline-hidden"
+										placeholder={$i18n.t('e.g. lmstudio.qwen3.5-9b')}
+										bind:value={RAGConfig.RAG_KNOWLEDGE_ORGANIZER_MODEL}
+									/>
+								</div>
+							{/if}
+
+							<div class="  mb-2.5 flex w-full justify-between">
+								<div class=" self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Automatically index all uploaded files into a per-user collection, enabling cross-chat RAG search across all your documents.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('User Collection')}
+									</Tooltip>
+								</div>
+								<div class="flex items-center relative">
+									<Switch bind:state={RAGConfig.RAG_USER_COLLECTION_ENABLED} />
+								</div>
+							</div>
+
 							<div class="  mb-2.5 flex w-full justify-between">
 								<div class=" self-center text-xs font-medium">{$i18n.t('Hybrid Search')}</div>
 								<div class="flex items-center relative">

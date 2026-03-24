@@ -14,6 +14,7 @@
 	import { getBanners } from '$lib/apis/configs';
 	import { getTerminalServers } from '$lib/apis/terminal';
 	import { getUserSettings } from '$lib/apis/users';
+	import { getOllamaVersion } from '$lib/apis/ollama';
 
 	import { WEBUI_VERSION, WEBUI_API_BASE_URL } from '$lib/constants';
 	import { compareVersion } from '$lib/utils';
@@ -212,6 +213,16 @@
 				]);
 			}).catch((e) => console.error('Failed to load user settings:', e))
 		]);
+
+		// Check Ollama connection — notify user if unreachable
+		getOllamaVersion(localStorage.token).catch(() => {
+			toast.warning(
+				$i18n.t(
+					'Ollama is not reachable. Make sure Ollama is running at the configured URL.'
+				),
+				{ duration: 8000 }
+			);
+		});
 
 		// Helper function to check if the pressed keys match the shortcut definition
 		const isShortcutMatch = (event: KeyboardEvent, shortcut): boolean => {

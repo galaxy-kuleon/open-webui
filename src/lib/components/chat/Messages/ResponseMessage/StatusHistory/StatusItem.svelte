@@ -123,7 +123,7 @@
 					{/if}
 				</div>
 			</div>
-		{:else if status?.action === "agent_skill"}
+		{:else if status?.action === 'agent_skill'}
 			<AgentSkillStatus {status} {done} />
 		{:else}
 			<div class="flex flex-col justify-center -space-y-0.5">

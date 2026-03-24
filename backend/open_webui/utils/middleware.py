@@ -30,6 +30,7 @@ from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.chats import Chats
 from open_webui.models.folders import Folders
 from open_webui.models.users import Users
+from open_webui.models.files import Files
 from open_webui.socket.main import (
     get_event_call,
     get_event_emitter,
@@ -888,6 +889,159 @@ def handle_responses_streaming_event(
 
     else:
         return current_output, None
+
+
+####################################
+# Full Document Context (Phase A) + Sub-Chat Extraction (Phase B)
+####################################
+
+
+def expand_sources_to_full_documents(sources: list) -> list:
+    """
+    Trace chunk-level sources back to their source files via file_id in metadata,
+    load full document content, deduplicate by file_id, and return document-level sources.
+    """
+    if not sources:
+        return sources
+
+    seen_files = {}  # file_id -> { source_info, name }
+    for source in sources:
+        metadatas = source.get("metadata", [])
+        source_info = source.get("source", {})
+        for meta in metadatas:
+            file_id = meta.get("file_id")
+            if file_id and file_id not in seen_files:
+                seen_files[file_id] = {
+                    "source_info": source_info,
+                    "name": meta.get("name")
+                    or meta.get("source")
+                    or source_info.get("name", ""),
+                }
+
+    if not seen_files:
+        return sources
+
+    expanded = []
+    for file_id, info in seen_files.items():
+        file_obj = Files.get_file_by_id(file_id)
+        if file_obj and file_obj.data:
+            full_content = file_obj.data.get("content", "")
+            index_content = file_obj.data.get("index_content", "")
+            if full_content:
+                # Combine content + index for richer context
+                combined = full_content
+                if index_content:
+                    combined = (
+                        f"{full_content}\n\n---\n\n## Document Index\n\n{index_content}"
+                    )
+                log.info(
+                    f"[RAG] expand {info['name']}: "
+                    f"content={len(full_content)} chars, "
+                    f"index={len(index_content)} chars, "
+                    f"combined={len(combined)} chars"
+                )
+                expanded.append(
+                    {
+                        "source": info["source_info"],
+                        "document": [combined],
+                        "metadata": [
+                            {
+                                "file_id": file_id,
+                                "name": info["name"],
+                                "source": info["name"],
+                            }
+                        ],
+                    }
+                )
+            else:
+                log.warning(f"[RAG] expand: file {file_id} ({info['name']}) has no content")
+        else:
+            log.warning(f"[RAG] expand: could not load file {file_id}")
+
+    log.info(f"[RAG] expand_sources: {len(seen_files)} files -> {len(expanded)} sources")
+    return expanded if expanded else sources
+
+
+def estimate_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
+    """Estimate token count using tiktoken, with character-based fallback."""
+    try:
+        import tiktoken
+
+        encoding = tiktoken.get_encoding(encoding_name)
+        return len(encoding.encode(text))
+    except Exception:
+        return len(text) // 4
+
+
+def estimate_sources_total_tokens(
+    sources: list, encoding_name: str = "cl100k_base"
+) -> int:
+    """Sum token estimates across all source documents."""
+    total = 0
+    for source in sources:
+        for doc in source.get("document", []):
+            total += estimate_tokens(
+                doc if isinstance(doc, str) else str(doc), encoding_name
+            )
+    return total
+
+
+async def extract_relevant_content_from_document(
+    request: Request,
+    model_id: str,
+    user_query: str,
+    document_content: str,
+    document_name: str,
+    user,
+    extraction_template: str = "",
+) -> str:
+    """
+    Spawn a sub-completion to extract query-relevant content from a document.
+    Falls back to original content on failure.
+    """
+    from open_webui.config import DEFAULT_RAG_SUBCHAT_EXTRACTION_TEMPLATE
+
+    if not extraction_template or not extraction_template.strip():
+        extraction_template = DEFAULT_RAG_SUBCHAT_EXTRACTION_TEMPLATE
+
+    payload = {
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": extraction_template},
+            {
+                "role": "user",
+                "content": (
+                    f"Query: {user_query}\n\n"
+                    f"Document ({document_name}):\n"
+                    f"{document_content}\n\n"
+                    f"Extract the relevant information:"
+                ),
+            },
+        ],
+        "stream": False,
+        "metadata": {"task": "rag_subchat_extraction"},
+    }
+
+    try:
+        response = await generate_chat_completion(
+            request, form_data=payload, user=user, bypass_filter=True
+        )
+        if hasattr(response, "body_iterator"):
+            content = None
+            async for chunk in response.body_iterator:
+                data = json.loads(chunk.decode("utf-8", "replace"))
+                if "choices" in data and data["choices"]:
+                    content = data["choices"][0].get("message", {}).get("content")
+            if hasattr(response, "background") and response.background is not None:
+                await response.background()
+            return content or document_content
+        elif isinstance(response, dict) and "choices" in response:
+            return response["choices"][0]["message"]["content"]
+        else:
+            return document_content
+    except Exception as e:
+        log.error(f"Sub-chat extraction failed for {document_name}: {e}")
+        return document_content
 
 
 def get_source_context(
@@ -1894,9 +2048,12 @@ async def chat_completion_files_handler(
     __event_emitter__ = extra_params["__event_emitter__"]
     sources = []
 
-    if files := body.get("metadata", {}).get("files", None):
+    files = body.get("metadata", {}).get("files", None) or []
+    user_collection_enabled = request.app.state.config.RAG_USER_COLLECTION_ENABLED
+
+    if files or user_collection_enabled:
         # Check if all files are in full context mode
-        all_full_context = all(item.get("context") == "full" for item in files)
+        all_full_context = all(item.get("context") == "full" for item in files) if files else False
 
         queries = []
         if not all_full_context:
@@ -1940,8 +2097,38 @@ async def chat_completion_files_handler(
                 }
             )
 
+        # If model returned no queries, decide whether to fallback
+        skip_user_collection = False
         if len(queries) == 0:
+            if files:
+                # Has attached files — always search them with user message
+                queries = [get_last_user_message(body["messages"])]
+            elif user_collection_enabled:
+                # Only user collection, no attached files —
+                # model decided no retrieval needed, skip user collection search
+                skip_user_collection = True
+                log.info("[RAG] model determined no retrieval needed, skipping user collection")
+
+        if not queries and not skip_user_collection:
             queries = [get_last_user_message(body["messages"])]
+
+        log.info(f"[RAG] queries: {queries} skip_user_collection={skip_user_collection}")
+
+        # Inject user collection for cross-chat RAG if enabled
+        if request.app.state.config.RAG_USER_COLLECTION_ENABLED and not skip_user_collection:
+            user_collection_name = f"user-{user.id}"
+            # Avoid duplicating if already present
+            existing_collections = {
+                item.get("collection_name") for item in files if item.get("collection_name")
+            }
+            if user_collection_name not in existing_collections:
+                files.append(
+                    {
+                        "collection_name": user_collection_name,
+                        "name": "User Collection",
+                        "type": "user_collection",
+                    }
+                )
 
         try:
             # Directly await async get_sources_from_items (no thread needed - fully async now)
@@ -1973,7 +2160,108 @@ async def chat_completion_files_handler(
         except Exception as e:
             log.exception(e)
 
-        log.debug(f"rag_contexts:sources: {sources}")
+        # Log retrieval results
+        for i, src in enumerate(sources):
+            metas = src.get("metadata", [])
+            docs = src.get("document", [])
+            name = metas[0].get("name", "?") if metas else "?"
+            doc_lens = [len(d) if isinstance(d, str) else 0 for d in docs]
+            meta_types = [m.get("type", "-") for m in metas]
+            log.info(
+                f"[RAG] retrieval hit [{i}]: {name} "
+                f"chunks={len(docs)} lens={doc_lens} types={meta_types}"
+            )
+
+        # Phase A: Expand chunk-level sources to full document-level sources
+        if request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT and sources:
+            sources = expand_sources_to_full_documents(sources)
+            log.info(
+                f"[RAG] Phase A: expanded to {len(sources)} full document sources"
+            )
+
+            # Phase B: Sub-chat extraction fallback if total tokens exceed budget
+            max_tokens = request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS
+            if max_tokens and max_tokens > 0:
+                total_tokens = estimate_sources_total_tokens(sources)
+                log.info(
+                    f"[RAG] Phase B check: total_tokens={total_tokens}, budget={max_tokens}"
+                )
+
+                if total_tokens > max_tokens:
+                    log.info(
+                        f"Sources exceed token budget ({total_tokens} > {max_tokens}), "
+                        f"activating sub-chat extraction"
+                    )
+                    try:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "action": "subchat_extraction",
+                                    "description": f"Extracting relevant content from {len(sources)} documents...",
+                                    "done": False,
+                                },
+                            }
+                        )
+
+                        model_id = body["model"]
+                        user_query = get_last_user_message(body["messages"])
+                        concurrency = (
+                            request.app.state.config.RAG_SUBCHAT_CONCURRENCY or 3
+                        )
+                        semaphore = asyncio.Semaphore(concurrency)
+
+                        async def _extract(src_idx, doc_idx, doc_text, doc_name):
+                            async with semaphore:
+                                return (
+                                    src_idx,
+                                    doc_idx,
+                                    await extract_relevant_content_from_document(
+                                        request=request,
+                                        model_id=model_id,
+                                        user_query=user_query,
+                                        document_content=doc_text,
+                                        document_name=doc_name,
+                                        user=user,
+                                    ),
+                                )
+
+                        tasks = []
+                        for src_idx, source in enumerate(sources):
+                            for doc_idx, doc in enumerate(source.get("document", [])):
+                                meta = source.get("metadata", [{}])[
+                                    min(doc_idx, len(source.get("metadata", [])) - 1)
+                                ]
+                                doc_name = (
+                                    meta.get("name")
+                                    or meta.get("source")
+                                    or f"doc_{src_idx}"
+                                )
+                                tasks.append(_extract(src_idx, doc_idx, doc, doc_name))
+
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                        for result in results:
+                            if isinstance(result, Exception):
+                                log.error(f"Sub-chat extraction failed: {result}")
+                                continue
+                            src_idx, doc_idx, extracted = result
+                            sources[src_idx]["document"][doc_idx] = extracted
+
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "action": "subchat_extraction",
+                                    "description": "Content extraction complete",
+                                    "done": True,
+                                },
+                            }
+                        )
+                    except Exception as e:
+                        log.exception(
+                            f"Phase B sub-chat extraction failed, using full content: {e}"
+                        )
 
         unique_ids = set()
         for source in sources or []:
@@ -1994,6 +2282,11 @@ async def chat_completion_files_handler(
                 unique_ids.add(_id)
 
         sources_count = len(unique_ids)
+        total_ctx_tokens = estimate_sources_total_tokens(sources) if sources else 0
+        log.info(
+            f"[RAG] final: {sources_count} sources, "
+            f"~{total_ctx_tokens} tokens injected into context"
+        )
         await __event_emitter__(
             {
                 "type": "status",
@@ -2750,6 +3043,64 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     sources.extend(flags.get("sources", []))
                 except Exception as e:
                     log.exception(e)
+
+    # /research command: intercept before normal RAG pipeline
+    user_msg_for_research = get_last_user_message(form_data["messages"])
+    if (
+        user_msg_for_research
+        and user_msg_for_research.strip().startswith("/research")
+        and request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED
+        and request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR
+    ):
+        try:
+            from open_webui.utils.research import run_research
+            from open_webui.env import OPENCODE_PATH
+
+            research_query = user_msg_for_research.strip()[len("/research") :].strip()
+            if research_query:
+                log.info(f"/research command: {research_query[:80]}")
+
+                # Replace the /research message with the actual query
+                set_last_user_message_content(research_query, form_data["messages"])
+
+                research_model = (
+                    request.app.state.config.RAG_RESEARCH_MODEL
+                    or form_data.get("model")
+                )
+                research_result = await run_research(
+                    query=research_query,
+                    kb_dir=request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR,
+                    opencode_path=OPENCODE_PATH,
+                    model=research_model,
+                    event_emitter=event_emitter,
+                )
+
+                if research_result["success"] and research_result["report"]:
+                    # Inject report as a source for context
+                    report_source = {
+                        "source": {
+                            "name": f"Research Report: {research_query[:50]}",
+                            "type": "research",
+                        },
+                        "document": [research_result["report"]],
+                        "metadata": [
+                            {
+                                "name": f"Research Report: {research_query[:50]}",
+                                "source": research_result.get(
+                                    "report_path", "research_report"
+                                ),
+                                "type": "research",
+                            }
+                        ],
+                    }
+                    sources.append(report_source)
+                    log.info(
+                        f"/research: report injected ({len(research_result['report'])} chars)"
+                    )
+                elif research_result["error"]:
+                    log.error(f"/research failed: {research_result['error']}")
+        except Exception as e:
+            log.exception(f"/research command failed: {e}")
 
     # Check if file context extraction is enabled for this model (default True)
     file_context_enabled = (
@@ -4615,7 +4966,8 @@ async def streaming_chat_response_handler(response, ctx):
                                 code = sanitize_code(code)
 
                                 if CODE_INTERPRETER_BLOCKED_MODULES:
-                                    blocking_code = textwrap.dedent(f"""
+                                    blocking_code = textwrap.dedent(
+                                        f"""
                                         import builtins
     
                                         BLOCKED_MODULES = {CODE_INTERPRETER_BLOCKED_MODULES}
@@ -4631,7 +4983,8 @@ async def streaming_chat_response_handler(response, ctx):
                                             return _real_import(name, globals, locals, fromlist, level)
     
                                         builtins.__import__ = restricted_import
-                                    """)
+                                    """
+                                    )
                                     code = blocking_code + "\n" + code
 
                                 if (
