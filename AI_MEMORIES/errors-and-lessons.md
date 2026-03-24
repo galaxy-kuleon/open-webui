@@ -180,3 +180,22 @@
 - **Pattern:** repeated `OCR API request error` / `Error during recognition` lines dominate the tail after large-PDF processing starts.
 - **How to avoid misdiagnosis:** If organization succeeds and the log is still noisy, separate organizer issues from KG1 / Ollama OCR issues.
 - **Where:** `server.log` lines 2118-2203
+
+## Document Index Generation Can Timeout on Oversized Chunks Even When OCR Succeeds
+
+- **When:** 2026-03-24
+- **What:** `generate_document_index()` was feeding very large OCR-derived documents to the index model in `128k` token chunks with `32k` overlap.
+- **Symptom:** Large PDFs hit the exact `RAG_DOCUMENT_INDEX_TIMEOUT` (`600s`) on `Part 1/2`, logging `Document index generation failed ... TimeoutError`.
+- **Why this mattered:** The live index model was `lmstudio.qwen3.5-9b`, so the first chunk was too large/slow for the configured timeout.
+- **Fix:** Reduce the initial chunk size to `48k` with `8k` overlap, add adaptive recursive splitting down to `24k`, and cancel the in-flight future on timeout.
+- **Where:** `backend/open_webui/routers/retrieval.py`
+- **How to avoid:** Do not assume a large advertised context window is practical for synchronous background indexing on local models; chunk for real throughput, not theoretical max context.
+
+## GLM-OCR Self-Hosted Defaults Can Overwhelm Local Ollama
+
+- **When:** 2026-03-24
+- **What:** glm-ocr's self-hosted layout pipeline defaults to high parallel OCR fan-out (`max_workers: 32`) while each upstream OCR request uses a `300s` timeout and 3 total attempts.
+- **Symptom:** `/tmp/owui-test.log` shows large bursts of `OCR API request error (attempt 1/3|2/3): ... Read timed out. (read timeout=300)` followed by `Error during recognition`.
+- **Why it happens:** Open WebUI launches a single glm-ocr process per document, but inside that process glm-ocr fans out many region requests concurrently to Ollama; the document-level semaphore does not limit this region-level concurrency.
+- **Config evidence:** `glm-ocr-latest-test/glmocr/config.yaml`, `glm-ocr-latest-test/glmocr/pipeline/pipeline.py`, `glm-ocr-latest-test/glmocr/ocr_client.py`
+- **How to avoid:** For Ollama-backed self-hosted runs, tune glm-ocr `pipeline.max_workers` way down and make self-hosted `request_timeout` configurable from the integration layer.

@@ -2042,6 +2042,63 @@ async def chat_image_generation_handler(
     return form_data
 
 
+def _build_direct_file_sources(
+    items: list[dict],
+) -> Optional[list[dict]]:
+    """
+    Build RAG sources directly from file DB content (.md + .index.md),
+    bypassing vector search entirely.
+
+    Returns None if any file lacks content (caller should fall back to
+    the normal vector-search path).
+    """
+    sources = []
+    for item in items:
+        file_id = item.get("id")
+        if not file_id:
+            return None
+
+        file_obj = Files.get_file_by_id(file_id)
+        if not file_obj or not file_obj.data:
+            return None
+
+        content = (file_obj.data.get("content") or "").strip()
+        if not content:
+            return None
+
+        # Combine extracted content and AI-generated index
+        index_content = (file_obj.data.get("index_content") or "").strip()
+        if index_content:
+            combined = (
+                f"{content}\n\n"
+                f"---\n"
+                f"## Document Index\n\n"
+                f"{index_content}"
+            )
+        else:
+            combined = content
+
+        sources.append(
+            {
+                "source": {
+                    "id": file_id,
+                    "name": item.get("name") or file_obj.filename,
+                    "type": "file",
+                },
+                "document": [combined],
+                "metadata": [
+                    {
+                        "file_id": file_id,
+                        "name": item.get("name") or file_obj.filename,
+                        "source": item.get("name") or file_obj.filename,
+                    }
+                ],
+            }
+        )
+
+    return sources if sources else None
+
+
 async def chat_completion_files_handler(
     request: Request, body: dict, extra_params: dict, user: UserModel
 ) -> tuple[dict, dict[str, list]]:
@@ -2050,6 +2107,110 @@ async def chat_completion_files_handler(
 
     files = body.get("metadata", {}).get("files", None) or []
     user_collection_enabled = request.app.state.config.RAG_USER_COLLECTION_ENABLED
+
+    # ── Direct Content Mode ──────────────────────────────────────
+    # In a new chat where the user only uploaded files (no collections),
+    # bypass vector search and inject full .md + .index.md content directly.
+    # This gives the LLM complete document context instead of top-k chunks.
+    only_uploaded_files = (
+        files
+        and all(item.get("type") == "file" for item in files)
+    )
+    user_messages = [m for m in body.get("messages", []) if m.get("role") == "user"]
+    is_new_chat = len(user_messages) <= 1
+
+    if only_uploaded_files and is_new_chat:
+        direct_sources = _build_direct_file_sources(files)
+        if direct_sources is not None:
+            log.info(
+                f"[RAG] direct content mode: {len(direct_sources)} files, "
+                f"bypassing vector search for new-chat uploaded files"
+            )
+            sources = direct_sources
+
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "action": "direct_content",
+                        "description": "Using full document content for uploaded files",
+                        "done": True,
+                    },
+                }
+            )
+
+            # Still apply full-document token budget & sub-chat extraction (Phase B)
+            max_tokens = request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS
+            if max_tokens and max_tokens > 0:
+                total_tokens = estimate_sources_total_tokens(sources)
+                log.info(
+                    f"[RAG] direct content token check: {total_tokens} vs budget {max_tokens}"
+                )
+                if total_tokens > max_tokens:
+                    log.info(
+                        f"[RAG] direct content exceeds budget, activating sub-chat extraction"
+                    )
+                    try:
+                        model_id = body["model"]
+                        user_query = get_last_user_message(body["messages"])
+                        concurrency = request.app.state.config.RAG_SUBCHAT_CONCURRENCY or 3
+                        semaphore = asyncio.Semaphore(concurrency)
+
+                        async def _extract_direct(src_idx, doc_idx, doc_text, doc_name):
+                            async with semaphore:
+                                return (
+                                    src_idx,
+                                    doc_idx,
+                                    await extract_relevant_content_from_document(
+                                        request=request,
+                                        model_id=model_id,
+                                        user_query=user_query,
+                                        document_content=doc_text,
+                                        document_name=doc_name,
+                                        user=user,
+                                    ),
+                                )
+
+                        tasks = []
+                        for src_idx, source in enumerate(sources):
+                            for doc_idx, doc in enumerate(source.get("document", [])):
+                                meta = source.get("metadata", [{}])[
+                                    min(doc_idx, len(source.get("metadata", [])) - 1)
+                                ]
+                                doc_name = meta.get("name") or f"doc_{src_idx}"
+                                tasks.append(_extract_direct(src_idx, doc_idx, doc, doc_name))
+
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        for result in results:
+                            if isinstance(result, Exception):
+                                log.error(f"Direct content sub-chat extraction failed: {result}")
+                                continue
+                            src_idx, doc_idx, extracted = result
+                            sources[src_idx]["document"][doc_idx] = extracted
+                    except Exception as e:
+                        log.exception(f"Direct content sub-chat extraction failed: {e}")
+
+            # Emit final source count
+            unique_ids = set()
+            for source in sources:
+                for meta in source.get("metadata", []):
+                    unique_ids.add(meta.get("source") or meta.get("file_id") or "N/A")
+            total_ctx_tokens = estimate_sources_total_tokens(sources)
+            log.info(
+                f"[RAG] direct content final: {len(unique_ids)} sources, "
+                f"~{total_ctx_tokens} tokens"
+            )
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "action": "sources_retrieved",
+                        "count": len(unique_ids),
+                        "done": True,
+                    },
+                }
+            )
+            return body, {"sources": sources}
 
     if files or user_collection_enabled:
         # Check if all files are in full context mode
@@ -2098,7 +2259,11 @@ async def chat_completion_files_handler(
             )
 
         # If model returned no queries, decide whether to fallback
-        skip_user_collection = False
+        # Skip user collection when the user has attached files — the user is
+        # asking about *those* files, not their entire cross-chat collection.
+        has_attached_files = any(item.get("type") == "file" for item in files)
+        skip_user_collection = has_attached_files
+
         if len(queries) == 0:
             if files:
                 # Has attached files — always search them with user message

@@ -96,3 +96,4 @@ Without this, uv finds the wrong Python environment.
 - Graceful stop: send `SIGTERM` to the PID listening on `28080`
 - Current known-good launch command from repo root: `WEBUI_SECRET_KEY=$(cat knowledge-base/.webui_secret_key) .venv/bin/open-webui serve --port 28080`
 - Important: launching from repo root without setting `WEBUI_SECRET_KEY` loads `.webui_secret_key` from the repo root instead of `knowledge-base/.webui_secret_key`, which invalidates existing JWTs and causes `401 Unauthorized`
+- Verified again on `2026-03-24`: graceful restart succeeded; server came back on PID `71341` and responded on `http://127.0.0.1:28080/api/version`; active log path was `/tmp/owui-test.log`

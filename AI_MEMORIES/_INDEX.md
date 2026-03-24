@@ -27,12 +27,16 @@
 | [2026-03-23_idle-timeout-and-cleanup.md](2026-03-23_idle-timeout-and-cleanup.md)                     | COMPLETED | Idle-based subprocess timeout, Ollama notification, shutdown cleanup          |
 | [2026-03-24_organizer-planner-and-27b-defaults.md](2026-03-24_organizer-planner-and-27b-defaults.md) | COMPLETED | Planner-only organizer refactor and default RAG model switch to Unsloth 27B   |
 | [2026-03-24_server-log-30-round-observation.md](2026-03-24_server-log-30-round-observation.md)       | COMPLETED | 30 x 60s server.log observation shows organizer success but KG1/OCR timeouts  |
+| [2026-03-24_direct-content-mode.md](2026-03-24_direct-content-mode.md)                               | COMPLETED | New chat + uploaded files → bypass vector search, inject full .md + .index.md |
 
 ## Incident Investigations
 
-| File                                                                                                     | Status       | Description                                                                           |
-| -------------------------------------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------- |
-| [2026-03-24_0020_opencode-qwen-organizer-failure.md](2026-03-24_0020_opencode-qwen-organizer-failure.md) | INVESTIGATED | Qwen-based OpenCode organizer loops on CJK filename drift and shell-state assumptions |
+| File                                                                                                       | Status       | Description                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| [2026-03-24_0020_opencode-qwen-organizer-failure.md](2026-03-24_0020_opencode-qwen-organizer-failure.md)   | INVESTIGATED | Qwen-based OpenCode organizer loops on CJK filename drift and shell-state assumptions                                                 |
+| [2026-03-24_2255_document-index-timeout-hardening.md](2026-03-24_2255_document-index-timeout-hardening.md) | COMPLETED    | Document index timeout traced to oversized 128k chunks; hardened with smaller initial chunks, adaptive retry, and future cancellation |
+| [2026-03-24_2310_glm-ocr-timeout-root-cause.md](2026-03-24_2310_glm-ocr-timeout-root-cause.md)             | COMPLETED    | /tmp log + glm-ocr source confirm dominant failure is glm-ocr self-hosted OCR timeout/retry pressure against Ollama                   |
+| [2026-03-24_2320_glmocr-defaults-tuned.md](2026-03-24_2320_glmocr-defaults-tuned.md)                       | COMPLETED    | Tuned glm-ocr defaults to `max_workers=2` and `600s` timeout defaults across SDK, YAML, tests, docs, and skill CLIs                   |
 
 ## Research Archives [ARCHIVED]
 

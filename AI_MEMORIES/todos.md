@@ -25,7 +25,9 @@
 - **What:** Post-restart server observation shows the organizer succeeding, but large-PDF processing repeatedly times out against the OCR backend on `127.0.0.1:11434`
 - **Added:** 2026-03-24
 - **Evidence:** `server.log:2132` onward shows repeated `OCR API request error`; `server.log:2168` shows document index generation failing with `TimeoutError`
-- **Next step:** inspect the OCR service / Ollama path on `127.0.0.1:11434`, request duration, concurrency, and retry behavior in KG1
+- **Update 2026-03-24:** the user-reported `Document index generation failed ... TimeoutError` was hardened separately in `backend/open_webui/routers/retrieval.py` via smaller initial index chunks (`48k/8k`), adaptive retry splitting, and timeout cancellation.
+- **Update 2026-03-24 23:10:** `/tmp/owui-test.log` plus `glm-ocr-latest-test` source confirm the dominant remaining issue is glm-ocr self-hosted OCR fan-out (`max_workers: 32`) with `300s` request timeouts / retries against local Ollama.
+- **Remaining next step:** patch either glm-ocr or the KG1 integration so Open WebUI can lower self-hosted `pipeline.max_workers` and raise/tune self-hosted `pipeline.ocr_api.request_timeout`
 
 ### P0: Commit All Unstaged Changes
 
