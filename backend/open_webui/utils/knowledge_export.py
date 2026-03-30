@@ -2,27 +2,28 @@
 Knowledge Export System
 
 Exports processed markdown files (.md + .index.md) to a filesystem directory
-and uses OpenCode to choose destination directories for them.
+and uses an LLM (via OpenWebUI's internal generate_chat_completion) to choose
+destination directories for them.
 The backend then performs exact filesystem moves in Python, which keeps
 weaker models away from brittle filename and shell-state handling.
 
 Features:
 - Export hook: writes .md and .index.md after document processing
-- Background organizer: asks OpenCode for a directory plan
+- Background organizer: asks LLM for a directory plan via internal API
 - Exact file moves happen in Python, not in model-written shell commands
 - Job queue with threading to avoid blocking the frontend
 """
 
+import asyncio
 import json
 import logging
 import os
 import queue
 import re
-import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
@@ -31,13 +32,11 @@ _org_queue: queue.Queue = queue.Queue()
 _org_worker: Optional[threading.Thread] = None
 _org_worker_lock = threading.Lock()
 
-# Track active subprocesses for cleanup on shutdown
-_active_processes: set[subprocess.Popen] = set()
-_active_processes_lock = threading.Lock()
-
+# Filesystem artifacts that may appear in the export directory from other
+# subsystems (e.g., research utils, agent tooling).  Exclude them from the
+# knowledge-base catalog so they don't pollute the directory tree listing.
 CATALOG_EXCLUDED_DIRS = {".opencode", "_reports"}
 CATALOG_EXCLUDED_FILES = {"opencode.json", ".webui_secret_key"}
-ORGANIZER_PERMISSION_CONFIG = {"*": "deny"}
 ORGANIZER_BATCH_SIZE = 12
 
 ORGANIZE_PLANNER_PROMPT = """You are a knowledge-base filing planner.
@@ -50,6 +49,7 @@ Rules:
 - Destination paths must be relative to the knowledge-base root.
 - Use 1-4 path components.
 - Each path component must use lowercase letters, numbers, and hyphens only.
+- NEVER use spaces in path components. Use hyphens instead.
 - Do not include filenames in the destination.
 - Keep each document's .md and .index.md files together.
 - Prefer a reasonable broad category over an overly specific new directory.
@@ -60,28 +60,151 @@ Return exactly this JSON shape:
 """
 
 
-def kill_all_organizer_processes():
-    """Kill all tracked knowledge-organizer subprocesses. Called on server shutdown."""
-    import signal
+async def _async_llm_completion(
+    app: Any,
+    messages: list[dict],
+    model_id: str,
+) -> str:
+    """
+    Async inner function: build a synthetic Request, fetch an admin user,
+    call generate_chat_completion (non-streaming), and return the response text.
 
-    with _active_processes_lock:
-        if not _active_processes:
-            return
-        log.info(
-            f"Shutting down: killing {len(_active_processes)} organizer subprocess(es)"
+    Runs on the main event loop — never call this directly from a sync thread.
+    """
+    from starlette.datastructures import Headers
+    from starlette.requests import Request
+
+    from open_webui.models.users import Users
+    from open_webui.utils.chat import generate_chat_completion
+
+    # Get an admin user for authorization.
+    # The organizer is a system-level task, not user-initiated.
+    admin_user = Users.get_super_admin_user()
+    if admin_user is None:
+        admin_user = Users.get_first_user()
+    if admin_user is None:
+        raise RuntimeError("No admin user available for LLM completion")
+
+    # Synthetic Request — same pattern as main.py startup (mock_request).
+    # generate_chat_completion reads request.app.state.MODELS and request.state.
+    request = Request(
+        {
+            "type": "http",
+            "asgi.version": "3.0",
+            "asgi.spec_version": "2.0",
+            "method": "POST",
+            "path": "/internal/knowledge-organizer",
+            "query_string": b"",
+            "headers": Headers({}).raw,
+            "client": ("127.0.0.1", 0),
+            "server": ("127.0.0.1", 80),
+            "scheme": "http",
+            "app": app,
+        }
+    )
+
+    payload = {
+        "model": model_id,
+        "messages": messages,
+        "stream": False,
+        "metadata": {"task": "knowledge_organizer"},
+    }
+
+    response = await generate_chat_completion(
+        request, form_data=payload, user=admin_user, bypass_filter=True
+    )
+
+    # Response is either a dict (most common for stream=False) or a
+    # StreamingResponse/JSONResponse. Handle both following the pattern
+    # from middleware.py extract_relevant_content_from_document.
+    if isinstance(response, dict) and "choices" in response:
+        content = (
+            response["choices"][0].get("message", {}).get("content", "")
+            if response["choices"]
+            else ""
         )
-        for proc in list(_active_processes):
-            try:
-                # Kill entire process group (node + .opencode child)
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                log.info(f"Killed organizer process group PID {proc.pid}")
-            except (ProcessLookupError, OSError):
-                # Fallback: try killing just the process
-                try:
-                    proc.kill()
-                except (ProcessLookupError, OSError):
-                    pass
-        _active_processes.clear()
+    elif hasattr(response, "body_iterator"):
+        # StreamingResponse — drain it and extract content
+        content = None
+        async for chunk in response.body_iterator:
+            data = json.loads(chunk.decode("utf-8", "replace"))
+            if "choices" in data and data["choices"]:
+                content = data["choices"][0].get("message", {}).get("content")
+        if hasattr(response, "background") and response.background is not None:
+            await response.background()
+        content = content or ""
+    elif hasattr(response, "body"):
+        # JSONResponse — parse the body
+        data = json.loads(response.body.decode("utf-8", "replace"))
+        content = (
+            data["choices"][0].get("message", {}).get("content", "")
+            if data.get("choices")
+            else ""
+        )
+    else:
+        raise RuntimeError(f"Unexpected response type from LLM: {type(response)}")
+
+    if not content:
+        raise RuntimeError("LLM returned empty content")
+
+    return content
+
+
+def call_llm_completion(
+    app: Any,
+    system_prompt: str,
+    user_prompt: str,
+    model_id: str,
+    timeout: float = 300.0,
+) -> str:
+    """
+    Synchronous bridge: call generate_chat_completion from a non-async thread.
+
+    Uses asyncio.run_coroutine_threadsafe to schedule the async call on the
+    main event loop (app.state.main_loop), then blocks until the result is
+    ready or the timeout expires.
+
+    Args:
+        app:           The FastAPI application instance (carries state.MODELS, etc.)
+        system_prompt: System message content
+        user_prompt:   User message content
+        model_id:      OpenWebUI model ID (e.g. "lmstudio.qwen3.5-9b")
+        timeout:       Maximum seconds to wait for the LLM response
+
+    Returns:
+        The LLM response text (str).
+
+    Raises:
+        RuntimeError: If the event loop is unavailable, the LLM fails, or timeout.
+        TimeoutError: If the LLM call exceeds the timeout.
+    """
+    loop = getattr(getattr(app, "state", None), "main_loop", None)
+    if loop is None or loop.is_closed():
+        raise RuntimeError(
+            "Main event loop not available (app.state.main_loop). "
+            "Server may still be starting up."
+        )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    future = asyncio.run_coroutine_threadsafe(
+        _async_llm_completion(app, messages, model_id),
+        loop,
+    )
+
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        raise TimeoutError(
+            f"LLM completion timed out after {timeout}s (model={model_id})"
+        )
+    except Exception:
+        # Re-raise the original exception from the async side
+        raise
 
 
 def _sanitize_filename(name: str) -> str:
@@ -243,93 +366,18 @@ def _build_organizer_context(export_dir: str, documents: list[dict]) -> dict:
     }
 
 
-def _build_organizer_prompt(export_dir: str, documents: list[dict]) -> str:
+def _build_organizer_prompt(export_dir: str, documents: list[dict]) -> tuple[str, str]:
+    """Return (system_prompt, user_prompt) for the organizer planner LLM call.
+
+    system_prompt = the ORGANIZE_PLANNER_PROMPT instructions
+    user_prompt   = the context JSON describing documents and existing directories
+    """
     context_json = json.dumps(
         _build_organizer_context(export_dir, documents),
         ensure_ascii=False,
         indent=2,
     )
-    return f"{ORGANIZE_PLANNER_PROMPT}\nContext JSON:\n{context_json}\n"
-
-
-def _extract_text_from_opencode_output(output: str) -> str:
-    if not output:
-        return ""
-
-    text_chunks = []
-    for line in output.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        if not isinstance(event, dict):
-            continue
-
-        event_type = event.get("type", "")
-
-        if event_type == "text" and isinstance(event.get("part"), dict):
-            part = event["part"]
-            text = part.get("text", "") or part.get("content", "")
-            if text:
-                text_chunks.append(text)
-                continue
-
-        if event_type in ("text", "content"):
-            text = event.get("content", "") or event.get("text", "")
-            if text:
-                text_chunks.append(text)
-                continue
-
-        if event_type == "result":
-            text = event.get("result", "") or event.get("content", "")
-            if text:
-                text_chunks.append(text)
-                continue
-
-        if event.get("role") == "assistant" and event.get("content"):
-            text_chunks.append(event["content"])
-            continue
-
-        if isinstance(event.get("message"), dict):
-            message = event["message"]
-            if message.get("role") == "assistant" and message.get("content"):
-                text_chunks.append(message["content"])
-
-    return "".join(text_chunks)
-
-
-def _extract_opencode_error(output: str) -> str:
-    if not output:
-        return ""
-
-    for line in output.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        if not isinstance(event, dict) or event.get("type") != "error":
-            continue
-
-        error = event.get("error")
-        if isinstance(error, dict):
-            data = error.get("data")
-            if isinstance(data, dict) and data.get("message"):
-                return str(data["message"])
-            if error.get("message"):
-                return str(error["message"])
-
-        if error:
-            return str(error)
-
-    return ""
+    return ORGANIZE_PLANNER_PROMPT, f"Context JSON:\n{context_json}"
 
 
 def _extract_json_payload(text: str):
@@ -681,32 +729,25 @@ def export_document_files(
     return result
 
 
-def enqueue_organization(
-    export_dir: str,
-    opencode_path: str = "opencode",
-    model: str = "",
-):
+def enqueue_organization(app: Any):
     """
     Enqueue a background organization job.
-    OpenCode will be asked for directory choices, then Python will move the
-    exact files into topic directories.
+    The LLM will be asked for directory choices via the internal API bridge,
+    then Python will move the exact files into topic directories.
 
-    Deduplicates: if a job for the same export_dir is already queued or running,
-    the new request is skipped to avoid spawning redundant opencode processes.
+    All configuration (export_dir, model) is read from app.state.config
+    inside the worker, so callers just pass the app instance.
+
+    Deduplicates: if a job is already queued, the new request is skipped
+    to avoid redundant LLM calls.
     """
     if not _org_queue.empty():
         log.info("Knowledge organizer: job already queued, skipping")
         return
-    with _active_processes_lock:
-        if _active_processes:
-            log.info("Knowledge organizer: opencode already running, skipping")
-            return
 
     _org_queue.put(
         {
-            "export_dir": export_dir,
-            "opencode_path": opencode_path,
-            "model": model,
+            "app": app,
             "enqueued_at": time.time(),
         }
     )
@@ -741,11 +782,7 @@ def _organization_worker():
             return
 
         try:
-            _organize_with_opencode(
-                export_dir=job["export_dir"],
-                opencode_path=job.get("opencode_path", "opencode"),
-                model=job.get("model", ""),
-            )
+            _organize_inbox(app=job["app"])
         except Exception as e:
             log.error(f"Knowledge organizer job failed: {e}")
         finally:
@@ -753,151 +790,63 @@ def _organization_worker():
 
 
 def _run_organizer_planner(
-    export_dir: str,
-    opencode_path: str,
+    app: Any,
     model: str,
-    prompt: str,
-    idle_timeout: int,
+    system_prompt: str,
+    user_prompt: str,
+    timeout: float = 300.0,
 ) -> str:
-    cmd = [
-        opencode_path,
-        "run",
-        "--format",
-        "json",
-        "--dir",
-        export_dir,
-    ]
-    if model:
-        opencode_model = model.replace(".", "/", 1) if "." in model else model
-        cmd.extend(["--model", opencode_model])
-    cmd.append(prompt)
+    """Call the LLM via the internal bridge to get an organization plan.
 
-    env = os.environ.copy()
-    for key in [
-        "VIRTUAL_ENV",
-        "CONDA_PREFIX",
-        "CONDA_DEFAULT_ENV",
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "UV_PROJECT_ENVIRONMENT",
-    ]:
-        env.pop(key, None)
+    Uses call_llm_completion() which schedules the async generate_chat_completion
+    on the main event loop from this background worker thread.
 
-    from open_webui.utils.opencode import sync_opencode_config_to_dir
+    Args:
+        app:           FastAPI application instance (carries state.MODELS, main_loop)
+        model:         OpenWebUI model ID for the organizer LLM
+        system_prompt: ORGANIZE_PLANNER_PROMPT instructions
+        user_prompt:   Context JSON describing documents and existing directories
+        timeout:       Maximum seconds to wait for the LLM response
 
-    sync_opencode_config_to_dir(export_dir)
-
-    planner_config = {
-        "$schema": "https://opencode.ai/config.json",
-        "permission": ORGANIZER_PERMISSION_CONFIG,
-    }
-    config_path = Path(export_dir) / "opencode.json"
-    if config_path.exists():
-        try:
-            planner_config = json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError) as e:
-            log.warning(f"Knowledge organizer: failed to read opencode config: {e}")
-    planner_config.setdefault("$schema", "https://opencode.ai/config.json")
-    planner_config["permission"] = ORGANIZER_PERMISSION_CONFIG
-    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(planner_config)
-
-    proc = subprocess.Popen(
-        cmd,
-        cwd=export_dir,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
+    Returns:
+        The raw LLM response text (expected to contain JSON).
+    """
+    return call_llm_completion(
+        app=app,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        model_id=model,
+        timeout=timeout,
     )
-    with _active_processes_lock:
-        _active_processes.add(proc)
-
-    activity = {"last": time.monotonic()}
-    stdout_chunks = []
-    stderr_chunks = []
-
-    def _drain(stream, dest, label):
-        for line in iter(stream.readline, b""):
-            activity["last"] = time.monotonic()
-            text = line.decode("utf-8", errors="replace")
-            dest.append(text)
-            preview = (
-                text.rstrip()[:2500] + " ... " + text.rstrip()[-2500:]
-                if len(text.rstrip()) > 5000
-                else text.rstrip()
-            )
-            log.info(f"[organizer:{label}] {preview}")
-        stream.close()
-
-    t_out = threading.Thread(
-        target=_drain,
-        args=(proc.stdout, stdout_chunks, "stdout"),
-        daemon=True,
-    )
-    t_err = threading.Thread(
-        target=_drain,
-        args=(proc.stderr, stderr_chunks, "stderr"),
-        daemon=True,
-    )
-    t_out.start()
-    t_err.start()
-
-    try:
-        while proc.poll() is None:
-            time.sleep(10)
-            idle_secs = time.monotonic() - activity["last"]
-            if idle_secs >= idle_timeout:
-                import signal
-
-                log.error(
-                    "Knowledge organizer: OpenCode idle-timed out "
-                    f"(no output for {int(idle_secs)}s), killing process group"
-                )
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    proc.kill()
-                proc.wait()
-                raise TimeoutError(f"Knowledge organizer idle for {int(idle_secs)}s")
-
-        stdout_all = "".join(stdout_chunks)
-        stderr_all = "".join(stderr_chunks)
-        planner_error = _extract_opencode_error(stdout_all) or _extract_opencode_error(
-            stderr_all
-        )
-
-        if planner_error:
-            raise RuntimeError(planner_error)
-
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"OpenCode exited with code {proc.returncode}: {(stderr_all or stdout_all)[:500]}"
-            )
-
-        text_output = _extract_text_from_opencode_output(stdout_all)
-        if not text_output:
-            raise RuntimeError(
-                f"OpenCode returned no planner text: {(stdout_all or stderr_all)[:500]}"
-            )
-
-        return text_output
-    finally:
-        t_out.join(timeout=10)
-        t_err.join(timeout=10)
-        with _active_processes_lock:
-            _active_processes.discard(proc)
 
 
-def _organize_with_opencode(
-    export_dir: str,
-    opencode_path: str = "opencode",
-    model: str = "",
-    idle_timeout: int = 600,
+def _organize_inbox(
+    app: Any,
+    timeout: float = 300.0,
 ):
     """
-    Ask OpenCode for directory destinations, then move the exact inbox files in
-    Python so weak models never have to spell or move CJK filenames themselves.
+    Ask the LLM for directory destinations via the internal API bridge,
+    then move the exact inbox files in Python so weak models never have to
+    spell or move CJK filenames themselves.
+
+    Reads export_dir and model from app.state.config:
+      - RAG_KNOWLEDGE_EXPORT_DIR
+      - RAG_KNOWLEDGE_ORGANIZER_MODEL
     """
+    config = getattr(getattr(app, "state", None), "config", None)
+    if config is None:
+        raise RuntimeError("app.state.config is not available")
+
+    export_dir = getattr(config, "RAG_KNOWLEDGE_EXPORT_DIR", "") or ""
+    if not export_dir:
+        log.warning("Knowledge organizer: RAG_KNOWLEDGE_EXPORT_DIR is not configured, skipping")
+        return
+
+    model = getattr(config, "RAG_KNOWLEDGE_ORGANIZER_MODEL", "") or ""
+    if not model:
+        log.warning("Knowledge organizer: RAG_KNOWLEDGE_ORGANIZER_MODEL is not configured, skipping")
+        return
+
     inbox_dir = os.path.join(export_dir, "inbox")
     if not os.path.isdir(inbox_dir):
         return
@@ -916,12 +865,13 @@ def _organize_with_opencode(
     try:
         while documents:
             batch = documents[:ORGANIZER_BATCH_SIZE]
+            system_prompt, user_prompt = _build_organizer_prompt(export_dir, batch)
             planner_text = _run_organizer_planner(
-                export_dir=export_dir,
-                opencode_path=opencode_path,
+                app=app,
                 model=model,
-                prompt=_build_organizer_prompt(export_dir, batch),
-                idle_timeout=idle_timeout,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                timeout=timeout,
             )
             plan = _parse_organizer_plan(planner_text, batch)
             move_plan = _build_move_plan(export_dir, batch, plan)
@@ -951,10 +901,5 @@ def _organize_with_opencode(
             documents = _collect_inbox_documents(inbox_dir)
 
         log.info("Knowledge organizer: organization plan applied successfully")
-    except FileNotFoundError:
-        log.error(
-            f"Knowledge organizer: opencode not found at '{opencode_path}'. "
-            "Install opencode or set OPENCODE_PATH."
-        )
     except Exception as e:
         log.error(f"Knowledge organizer: unexpected error: {e}")

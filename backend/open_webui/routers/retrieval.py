@@ -2375,13 +2375,7 @@ def process_file(
                                     content=text_content,
                                     index_content=index_content,
                                 )
-                                from open_webui.env import OPENCODE_PATH
-
-                                enqueue_organization(
-                                    export_dir=export_dir,
-                                    opencode_path=OPENCODE_PATH,
-                                    model=request.app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL,
-                                )
+                                enqueue_organization(app=request.app)
                             except Exception as e:
                                 log.error(
                                     f"Knowledge export failed for {file.filename}: {e}"

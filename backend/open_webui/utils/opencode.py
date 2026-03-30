@@ -58,23 +58,69 @@ def generate_opencode_config(
     openai_api_base_urls: list[str],
     openai_api_keys: list[str],
     ollama_base_urls: list[str],
+    openai_api_configs: dict | None = None,
 ) -> dict:
     """
     Generate opencode.json config from OpenWebUI's connected providers.
+    Merges with existing config to preserve manually-added model lists.
     Write to ~/.config/opencode/opencode.json.
     Returns the config dict.
     """
+    # Read existing config to preserve manual additions (e.g. model lists)
+    config_dir = Path.home() / ".config" / "opencode"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "opencode.json"
+
+    existing_config = {}
+    if config_path.exists():
+        try:
+            existing_config = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    existing_providers = existing_config.get("provider", {})
     providers = {}
 
-    # Map OpenAI-compatible providers
+    # Map OpenAI-compatible providers, using prefix_id from api_configs if available
+    api_configs = openai_api_configs or {}
     for i, (url, key) in enumerate(zip(openai_api_base_urls, openai_api_keys)):
         if not url:
             continue
-        provider_id = f"openai_{i}" if i > 0 else "openai"
-        providers[provider_id] = {
-            "baseURL": url.rstrip("/"),
-            "apiKey": key or "",
+
+        # Use prefix_id from OpenWebUI api_configs (e.g. "lmstudio")
+        cfg = api_configs.get(str(i), {})
+        prefix_id = cfg.get("prefix_id", "")
+        if prefix_id:
+            provider_id = prefix_id
+        else:
+            provider_id = f"openai_{i}" if i > 0 else "openai"
+
+        base_url = url.rstrip("/")
+
+        # Build provider entry, preserving existing model list if present
+        provider_entry = {
+            "baseURL": base_url,
+            "apiKey": key or provider_id,  # Use provider_id as fallback key
         }
+
+        # Preserve existing models/npm/options from manual config
+        if provider_id in existing_providers:
+            existing = existing_providers[provider_id]
+            if "models" in existing:
+                provider_entry["models"] = existing["models"]
+            if "npm" in existing:
+                provider_entry["npm"] = existing["npm"]
+            if "name" in existing:
+                provider_entry["name"] = existing["name"]
+            # Merge options but update baseURL/apiKey
+            if "options" in existing:
+                opts = existing["options"].copy()
+                opts["baseURL"] = base_url
+                if key:
+                    opts["apiKey"] = key
+                provider_entry["options"] = opts
+
+        providers[provider_id] = provider_entry
 
     # Map Ollama providers (use /v1 endpoint for OpenAI compat)
     for i, url in enumerate(ollama_base_urls):
@@ -95,10 +141,6 @@ def generate_opencode_config(
         "provider": providers,
     }
 
-    # Write to global config location
-    config_dir = Path.home() / ".config" / "opencode"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "opencode.json"
     config_path.write_text(json.dumps(config, indent=2))
 
     log.debug(f"Wrote opencode config to {config_path}")
@@ -172,7 +214,14 @@ def setup_sandbox(skill_id: str, skill_disk_path: str, skill_name: str = "") -> 
         f"# Agent Instructions\n\n"
         f"You have access to the **{skill_name or skill_id}** skill.\n"
         f"The skill files are located in `.claude/skills/{skill_id}/`.\n"
-        f"Read the SKILL.md file for detailed instructions and follow them.\n"
+        f"Read the SKILL.md file for detailed instructions and follow them.\n\n"
+        f"## Critical Rules\n\n"
+        f"- **File paths MUST NEVER contain spaces.** Replace spaces with hyphens or underscores.\n"
+        f"- When handling CJK (Chinese/Japanese/Korean) filenames, ALWAYS quote paths "
+        f'in shell commands with double quotes: `"path/to/中文檔名.pdf"`\n'
+        f"- Never insert spaces into CJK filenames or directory names.\n"
+        f"- When creating new files or directories, use only ASCII lowercase, "
+        f"numbers, hyphens, and underscores in path components.\n"
     )
     agents_path = os.path.join(sandbox_dir, "AGENTS.md")
     with open(agents_path, "w") as f:

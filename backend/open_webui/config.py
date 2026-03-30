@@ -3079,7 +3079,7 @@ Format: Use compact key-value pairs grouped by dimension. Preserve original lang
 RAG_DOCUMENT_INDEX_MODEL = PersistentConfig(
     "RAG_DOCUMENT_INDEX_MODEL",
     "rag.document_index_model",
-    os.environ.get("RAG_DOCUMENT_INDEX_MODEL", "lmstudio.unsloth/qwen3.5-27b"),
+    os.environ.get("RAG_DOCUMENT_INDEX_MODEL", "lmstudio.qwen3.5-9b"),
 )
 
 RAG_DOCUMENT_INDEX_TIMEOUT = PersistentConfig(
@@ -3103,13 +3103,13 @@ RAG_KNOWLEDGE_EXPORT_DIR = PersistentConfig(
 RAG_RESEARCH_MODEL = PersistentConfig(
     "RAG_RESEARCH_MODEL",
     "rag.research_model",
-    os.environ.get("RAG_RESEARCH_MODEL", "lmstudio.unsloth/qwen3.5-27b"),
+    os.environ.get("RAG_RESEARCH_MODEL", "lmstudio.qwen3.5-9b"),
 )
 
 RAG_KNOWLEDGE_ORGANIZER_MODEL = PersistentConfig(
     "RAG_KNOWLEDGE_ORGANIZER_MODEL",
     "rag.knowledge_organizer_model",
-    os.environ.get("RAG_KNOWLEDGE_ORGANIZER_MODEL", "lmstudio.unsloth/qwen3.5-27b"),
+    os.environ.get("RAG_KNOWLEDGE_ORGANIZER_MODEL", "lmstudio.qwen3.5-9b"),
 )
 
 RAG_USER_COLLECTION_ENABLED = PersistentConfig(

@@ -3219,7 +3219,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     ):
         try:
             from open_webui.utils.research import run_research
-            from open_webui.env import OPENCODE_PATH
 
             research_query = user_msg_for_research.strip()[len("/research") :].strip()
             if research_query:
@@ -3235,7 +3234,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 research_result = await run_research(
                     query=research_query,
                     kb_dir=request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR,
-                    opencode_path=OPENCODE_PATH,
+                    app=request.app,
                     model=research_model,
                     event_emitter=event_emitter,
                 )

@@ -169,12 +169,12 @@ class KG1Loader:
             return None
 
     def _calculate_timeout(self, ocr_input_path: str) -> int:
-        """Calculate dynamic timeout based on PDF page count. ~30s per page, min 300s."""
+        """Calculate dynamic timeout based on PDF page count. ~60s per page, min 300s."""
         page_count = self._get_pdf_page_count(ocr_input_path)
         if page_count is None:
             return self.timeout
 
-        dynamic = max(300, page_count * 30)
+        dynamic = max(300, page_count * 60)
         log.info(f"KG1: {page_count} pages detected, timeout set to {dynamic}s")
         return dynamic
 

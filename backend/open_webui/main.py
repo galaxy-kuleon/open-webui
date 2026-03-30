@@ -528,7 +528,6 @@ from open_webui.env import (
     WEBUI_ADMIN_NAME,
     ENABLE_EASTER_EGGS,
     LOG_FORMAT,
-    OPENCODE_PATH,
 )
 
 
@@ -739,11 +738,7 @@ async def lifespan(app: FastAPI):
                     f"Startup: found {len(inbox_files)} files in KB inbox, "
                     f"triggering organizer"
                 )
-                enqueue_organization(
-                    export_dir=kb_dir,
-                    opencode_path=OPENCODE_PATH,
-                    model=app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL,
-                )
+                enqueue_organization(app=app)
     except Exception as e:
         log.warning(f"Startup: KB inbox check failed: {e}")
 
@@ -757,14 +752,10 @@ async def lifespan(app: FastAPI):
 
 
 def _kill_all_subprocesses():
-    """Kill all tracked OpenCode/organizer/research subprocesses."""
+    """Kill all tracked OpenCode subprocesses (used by agent skills)."""
     from open_webui.utils.opencode import kill_all_opencode_processes
-    from open_webui.utils.knowledge_export import kill_all_organizer_processes
-    from open_webui.utils.research import kill_all_research_processes
 
     kill_all_opencode_processes()
-    kill_all_organizer_processes()
-    kill_all_research_processes()
 
 
 # Note: atexit handler removed — it was killing organizer processes prematurely

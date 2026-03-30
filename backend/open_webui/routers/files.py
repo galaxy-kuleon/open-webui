@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+import unicodedata
 import uuid
 import json
 from pathlib import Path
@@ -213,6 +215,23 @@ def upload_file_handler(
         unsanitized_filename = file.filename
         filename = os.path.basename(unsanitized_filename)
 
+        # Sanitize filename for safe filesystem paths:
+        # - Normalize Unicode (NFKC collapses fullwidth chars and compatibility forms)
+        # - Replace ALL whitespace (spaces, tabs, NBSP, ideographic space U+3000,
+        #   zero-width spaces, etc.) with hyphens
+        # - Replace shell-hostile chars with hyphens
+        # - Collapse consecutive hyphens
+        # - Preserve CJK characters, alphanumeric, dots, underscores, hyphens
+        stem, ext = os.path.splitext(filename)
+        stem = unicodedata.normalize("NFKC", stem)
+        stem = re.sub(r"[\s\u00a0\u2000-\u200f\u2028-\u202f\u205f\u3000\ufeff]+", "-", stem)
+        stem = re.sub(r"[<>:\"/\\|?*(){}[\]!@#$%^&+=~`',;]+", "-", stem)
+        stem = re.sub(r"-{2,}", "-", stem)
+        stem = stem.strip("-")
+        if not stem:
+            stem = "unnamed"
+        filename = f"{stem}{ext}"
+
         file_extension = os.path.splitext(filename)[1]
         # Remove the leading dot from the file extension
         file_extension = file_extension[1:] if file_extension else ""
@@ -232,7 +251,8 @@ def upload_file_handler(
 
         # replace filename with uuid
         id = str(uuid.uuid4())
-        name = filename
+        # Display name preserves original filename; disk path uses sanitized version
+        name = os.path.basename(unsanitized_filename)
         filename = f"{id}_{filename}"
         contents, file_path = Storage.upload_file(
             file.file,

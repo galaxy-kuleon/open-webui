@@ -2151,7 +2151,8 @@ async def run_agent_skill(
                 openai_urls = getattr(__request__.app.state.config, "OPENAI_API_BASE_URLS", [])
                 openai_keys = getattr(__request__.app.state.config, "OPENAI_API_KEYS", [])
                 ollama_urls = getattr(__request__.app.state.config, "OLLAMA_BASE_URLS", [])
-                generate_opencode_config(openai_urls, openai_keys, ollama_urls)
+                openai_api_configs = getattr(__request__.app.state.config, "OPENAI_API_CONFIGS", {})
+                generate_opencode_config(openai_urls, openai_keys, ollama_urls, openai_api_configs)
             except Exception as e:
                 log.warning(f"Failed to generate opencode config: {e}")
 

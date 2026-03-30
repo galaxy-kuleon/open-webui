@@ -1,56 +1,329 @@
 """
-/research command handler
+/research command handler — direct LLM path (no subprocess).
 
-Spawns OpenCode subprocess to research the knowledge export directory,
-generates a report, and returns it for injection into chat context.
-
-The report is also saved as a downloadable file.
+Loads knowledge base .md content from the export directory with query-aware
+relevance scoring, builds a system prompt with KB context, calls the LLM
+via _async_llm_completion, and saves the report to _reports/.
 """
 
-import asyncio
-import json
 import logging
 import os
-import subprocess
-import tempfile
+import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-import threading as _threading
+# ---------------------------------------------------------------------------
+# KB content loader — pure function, no side effects
+# ---------------------------------------------------------------------------
+
+# Directories and files to exclude from KB content loading.
+# These are filesystem artifacts from other subsystems, not knowledge content.
+_KB_EXCLUDED_DIRS = frozenset({".opencode", "_reports", "inbox", ".git"})
+_KB_EXCLUDED_FILES = frozenset({"opencode.json", ".webui_secret_key", "_catalog.md"})
+
+# Default token budget (~32k tokens, roughly 128k chars at 4 chars/token)
+DEFAULT_TOKEN_BUDGET = 32_000
+
+
+def estimate_tokens(text: str) -> int:
+    """Fast token estimation: character count / 4.
+
+    This is a rough but fast approximation that avoids requiring tiktoken.
+    For CJK-heavy text it may undercount slightly (CJK chars are ~1-2 tokens
+    each but only 3 bytes in UTF-8), but for budget purposes it's adequate.
+    """
+    return len(text) // 4
+
+
+# ---------------------------------------------------------------------------
+# Query-aware relevance scoring — pure functions, no side effects
+# ---------------------------------------------------------------------------
+
+def _is_cjk_char(ch: str) -> bool:
+    """Check if a character is a CJK ideograph (Chinese/Japanese/Korean).
+
+    Uses Unicode category: Lo (Letter, other) characters in CJK Unified
+    Ideographs ranges. This is faster than checking code point ranges and
+    handles all CJK blocks including extensions.
+    """
+    cp = ord(ch)
+    # CJK Unified Ideographs: U+4E00 to U+9FFF
+    # CJK Extension A: U+3400 to U+4DBF
+    # CJK Extension B+: U+20000 to U+2A6DF (rare, skip for speed)
+    # CJK Compatibility Ideographs: U+F900 to U+FAFF
+    return (0x4E00 <= cp <= 0x9FFF
+            or 0x3400 <= cp <= 0x4DBF
+            or 0xF900 <= cp <= 0xFAFF)
+
+
+def tokenize_query(query: str) -> set[str]:
+    """Tokenize a query into a set of searchable terms.
+
+    For Latin/alphabetic text: split on whitespace, lowercase, strip punctuation.
+    For CJK text: each CJK character is an individual token.
+    Mixed queries produce both kinds of tokens.
+
+    Returns a set (not a list) since we only need membership testing.
+    Drops tokens shorter than 2 characters for Latin words (single letters
+    are too noisy), but keeps all CJK characters (single chars are meaningful).
+
+    Pure function: str in, frozenset out.
+    """
+    if not query or not query.strip():
+        return set()
+
+    tokens: set[str] = set()
+    # Extract CJK characters as individual tokens
+    for ch in query:
+        if _is_cjk_char(ch):
+            tokens.add(ch)
+
+    # Extract Latin/alphabetic words: lowercase, strip non-alphanumeric
+    words = re.findall(r"[a-zA-Z0-9]+", query.lower())
+    for w in words:
+        if len(w) >= 2:  # skip single letters — too noisy
+            tokens.add(w)
+
+    return tokens
+
+
+def score_query_relevance(query_tokens: set[str], text: str, filename: str = "") -> float:
+    """Score how relevant a text is to a set of query tokens.
+
+    Returns a float in [0.0, 1.0]:
+      score = (matching tokens) / (total query tokens)
+
+    A token "matches" if it appears anywhere in the lowercased text or filename.
+    For CJK tokens, this is character-level containment.
+    For Latin tokens, this is substring containment in the lowercased text.
+
+    Pure function: (set, str, str) -> float.
+    """
+    if not query_tokens:
+        return 0.0
+
+    searchable = (text + " " + filename).lower()
+    matching = sum(1 for token in query_tokens if token in searchable)
+    return matching / len(query_tokens)
+
+
+def _should_include_path(path: Path, root: Path) -> bool:
+    """Check if a path should be included in KB content loading.
+
+    Excludes hidden directories/files, excluded dirs/files, and non-.md files.
+    Note: calls path.is_file() for the non-.md extension check, so this is
+    not fully pure — it performs a single stat() call on the path.
+    """
+    # Skip hidden files/dirs (except we check name, not full path)
+    if path.name.startswith("."):
+        return False
+
+    if path.name in _KB_EXCLUDED_FILES:
+        return False
+
+    # Check if any ancestor (relative to root) is in excluded dirs
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+
+    for part in rel.parts[:-1]:  # all parent components
+        if part in _KB_EXCLUDED_DIRS or part.startswith("."):
+            return False
+
+    # Only .md files
+    if path.is_file() and not path.name.endswith(".md"):
+        return False
+
+    return True
+
+
+def _read_file_content(path: Path) -> Optional[str]:
+    """Read file content, returning None on any I/O error.
+
+    Tolerant of encoding issues — uses 'replace' error handler.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _classify_md_file(filename: str) -> str:
+    """Classify a .md file as 'index' or 'full'.
+
+    .index.md files are compact multi-dimensional indices.
+    All other .md files are full document content.
+    """
+    return "index" if filename.endswith(".index.md") else "full"
+
+
+def load_kb_content(
+    kb_dir: str,
+    *,
+    query: Optional[str] = None,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
+) -> list[dict]:
+    """Load knowledge base content from a directory, respecting a token budget.
+
+    Scans kb_dir recursively for .md and .index.md files.
+    Prioritizes .index.md files (compact summaries) over .md files (full docs).
+    If total content exceeds token_budget, index files are kept and full docs
+    are truncated or skipped.
+
+    When ``query`` is provided, full doc entries are sorted by relevance to the
+    query (keyword overlap scoring) instead of alphabetically. This ensures the
+    most relevant files are loaded first when the KB is larger than the budget.
+    Index files are always loaded first in alphabetical order regardless.
+
+    Args:
+        kb_dir:       Path to the knowledge base root directory.
+        query:        Optional research query for relevance-based ordering.
+                      When None, full files are ordered alphabetically (legacy).
+        token_budget: Maximum estimated tokens for all loaded content.
+
+    Returns:
+        List of dicts, each with keys:
+          - filename:      The file's name (e.g., "doc.index.md")
+          - relative_path: Path relative to kb_dir (e.g., "legal/contracts/doc.index.md")
+          - content:       The file's text content (possibly truncated)
+          - type:          "index" or "full"
+          - tokens:        Estimated token count for this entry's content
+
+    The list is sorted: all index files first (alphabetically by relative_path),
+    then full files ordered by relevance (if query provided) or alphabetically.
+    """
+    root = Path(kb_dir)
+    if not root.is_dir():
+        return []
+
+    # Phase 1: Collect all eligible .md files, classified and sorted
+    index_entries: list[dict] = []
+    full_entries: list[dict] = []
+
+    for current_root, dirnames, filenames in os.walk(root):
+        current_path = Path(current_root)
+
+        # Prune excluded directories in-place (os.walk respects this)
+        dirnames[:] = [
+            d for d in sorted(dirnames)
+            if d not in _KB_EXCLUDED_DIRS and not d.startswith(".")
+        ]
+
+        for fname in sorted(filenames):
+            fpath = current_path / fname
+            if not _should_include_path(fpath, root):
+                continue
+
+            content = _read_file_content(fpath)
+            if content is None or not content.strip():
+                continue
+
+            rel_path = fpath.relative_to(root).as_posix()
+            file_type = _classify_md_file(fname)
+            tokens = estimate_tokens(content)
+
+            entry = {
+                "filename": fname,
+                "relative_path": rel_path,
+                "content": content,
+                "type": file_type,
+                "tokens": tokens,
+            }
+
+            if file_type == "index":
+                index_entries.append(entry)
+            else:
+                full_entries.append(entry)
+
+    # Phase 1.5: If query provided, sort full entries by relevance (descending).
+    # Index entries stay alphabetical — they're compact and always prioritized.
+    if query:
+        query_tokens = tokenize_query(query)
+        if query_tokens:
+            full_entries.sort(
+                key=lambda e: score_query_relevance(
+                    query_tokens, e["content"], e["filename"]
+                ),
+                reverse=True,
+            )
+
+    # Phase 2: Budget allocation — index files first, then full docs
+    result: list[dict] = []
+    tokens_used = 0
+
+    # Minimum tokens to bother including an entry (~80 chars, one short paragraph)
+    _MIN_MEANINGFUL_TOKENS = 20
+
+    # Add all index entries (they're compact — prioritized)
+    for entry in index_entries:
+        if tokens_used + entry["tokens"] <= token_budget:
+            result.append(entry)
+            tokens_used += entry["tokens"]
+        else:
+            # Even index files get truncated if budget is very tight
+            remaining_tokens = token_budget - tokens_used
+            if remaining_tokens >= _MIN_MEANINGFUL_TOKENS:
+                truncated_chars = remaining_tokens * 4
+                truncated_content = entry["content"][:truncated_chars]
+                result.append({
+                    **entry,
+                    "content": truncated_content,
+                    "tokens": estimate_tokens(truncated_content),
+                })
+                tokens_used += estimate_tokens(truncated_content)
+            break  # budget exhausted
+
+    # Add full doc entries with remaining budget
+    for entry in full_entries:
+        remaining = token_budget - tokens_used
+        if remaining < _MIN_MEANINGFUL_TOKENS:
+            break  # no meaningful space left
+
+        if entry["tokens"] <= remaining:
+            result.append(entry)
+            tokens_used += entry["tokens"]
+        else:
+            # Truncate this full doc to fit remaining budget
+            truncated_chars = remaining * 4
+            truncated_content = entry["content"][:truncated_chars]
+            result.append({
+                **entry,
+                "content": truncated_content,
+                "tokens": estimate_tokens(truncated_content),
+            })
+            tokens_used += estimate_tokens(truncated_content)
+            break  # budget now exhausted
+
+    return result
+
+
+def format_kb_context(entries: list[dict]) -> str:
+    """Format loaded KB entries into a text block suitable for an LLM prompt.
+
+    Pure function: list of entry dicts in, formatted string out.
+    """
+    if not entries:
+        return ""
+
+    sections = []
+    for entry in entries:
+        header = f"--- {entry['relative_path']} ({entry['type']}) ---"
+        sections.append(f"{header}\n{entry['content']}")
+
+    return "\n\n".join(sections)
 
 log = logging.getLogger(__name__)
 
-# Track active research subprocesses for cleanup on shutdown
-_active_processes: set[subprocess.Popen] = set()
-_active_processes_lock = _threading.Lock()
 
-
-def kill_all_research_processes():
-    """Kill all tracked research subprocesses. Called on server shutdown."""
-    with _active_processes_lock:
-        if not _active_processes:
-            return
-        import signal
-
-        log.info(f"Shutting down: killing {len(_active_processes)} research subprocess(es)")
-        for proc in list(_active_processes):
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                log.info(f"Killed research process group PID {proc.pid}")
-            except (ProcessLookupError, OSError):
-                try:
-                    proc.kill()
-                except (ProcessLookupError, OSError):
-                    pass
-        _active_processes.clear()
-
-RESEARCH_SYSTEM_PROMPT = """You are a research assistant with access to a knowledge base directory containing markdown files.
-Each .md file is a processed document, and each .index.md file is a structured index of that document.
+RESEARCH_SYSTEM_PROMPT = """You are a research assistant. The knowledge base content is provided below.
+Each section is a document from the knowledge base. Sections marked "(index)" are compact structured
+indices; sections marked "(full)" are complete document content.
 
 Your task:
-1. Search through the available markdown files to find information relevant to the user's research query
-2. Cross-reference information across multiple files when applicable
+1. Analyze the provided knowledge base content to find information relevant to the user's research query
+2. Cross-reference information across multiple documents when applicable
 3. Generate a comprehensive research report in markdown format
 
 Report format:
@@ -66,20 +339,20 @@ Be thorough but concise. Cite source filenames."""
 async def run_research(
     query: str,
     kb_dir: str,
-    opencode_path: str = "opencode",
+    app: Any,
     model: Optional[str] = None,
-    idle_timeout: int = 600,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
     event_emitter=None,
 ) -> dict:
     """
-    Run OpenCode research on the knowledge base directory.
+    Research the knowledge base by loading content and calling the LLM directly.
 
     Args:
-        query: The research question
-        kb_dir: Path to the knowledge export directory
-        opencode_path: Path to the opencode CLI binary
-        model: Model to use (provider/model format), None for default
-        idle_timeout: Kill subprocess only if idle (no output) for this many seconds
+        query:        The research question
+        kb_dir:       Path to the knowledge export directory
+        app:          FastAPI application instance (carries state.MODELS, main_loop)
+        model:        Model ID (e.g. "lmstudio.qwen3.5-9b"), None to read from config
+        token_budget: Max estimated tokens for KB content (default: DEFAULT_TOKEN_BUDGET)
         event_emitter: Async event emitter for status updates
 
     Returns:
@@ -105,43 +378,67 @@ async def run_research(
             }
         )
 
-    # Build the opencode command
-    full_prompt = (
-        f"{RESEARCH_SYSTEM_PROMPT}\n\n"
-        f"Research query: {query}\n\n"
-        f"Search through all .md and .index.md files in this directory and subdirectories. "
-        f"Generate a comprehensive research report."
+    # --- Load KB content (query-aware: prioritizes relevant files) ---
+    entries = load_kb_content(kb_dir, query=query, token_budget=token_budget)
+    kb_context = format_kb_context(entries)
+
+    if not kb_context:
+        error_msg = "Knowledge base is empty or contains no .md files"
+        log.warning(f"Research: {error_msg}")
+        if event_emitter:
+            await event_emitter(
+                {
+                    "type": "status",
+                    "data": {
+                        "action": "research",
+                        "description": error_msg,
+                        "done": True,
+                    },
+                }
+            )
+        return {
+            "report": None,
+            "report_path": None,
+            "success": False,
+            "error": error_msg,
+        }
+
+    total_tokens = sum(e["tokens"] for e in entries)
+    log.info(
+        f"Research: loaded {len(entries)} KB entries "
+        f"(~{total_tokens} tokens) for query: {query[:80]}"
     )
 
-    cmd = [
-        opencode_path,
-        "run",
-        "--format",
-        "json",
-        "--dir",
-        kb_dir,
+    # --- Resolve model ---
+    if not model:
+        config = getattr(getattr(app, "state", None), "config", None)
+        model = getattr(config, "RAG_RESEARCH_MODEL", None) or ""
+    if not model:
+        error_msg = "No research model configured (RAG_RESEARCH_MODEL)"
+        log.error(f"Research: {error_msg}")
+        return {
+            "report": None,
+            "report_path": None,
+            "success": False,
+            "error": error_msg,
+        }
+
+    # --- Build messages ---
+    system_content = f"{RESEARCH_SYSTEM_PROMPT}\n\n--- KNOWLEDGE BASE CONTENT ---\n\n{kb_context}"
+    user_content = f"Research query: {query}"
+
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_content},
     ]
-    if model:
-        # Convert Open WebUI format (provider.model) to OpenCode format (provider/model)
-        opencode_model = model.replace(".", "/", 1) if "." in model else model
-        cmd.extend(["--model", opencode_model])
-    cmd.append(full_prompt)
 
-    # Sync provider config to KB dir before spawning
-    from open_webui.utils.opencode import sync_opencode_config_to_dir
-    sync_opencode_config_to_dir(kb_dir)
-
-    # Clean env to avoid venv interference
-    env = os.environ.copy()
-    for key in ["VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME", "PYTHONPATH"]:
-        env.pop(key, None)
-
-    log.info(f"Research: starting opencode subprocess for query: {query[:80]}, model: {model or '(default)'}")
+    # --- Call LLM ---
+    from open_webui.utils.knowledge_export import _async_llm_completion
 
     try:
-        result = await asyncio.to_thread(_run_subprocess, cmd, env, idle_timeout)
+        report = await _async_llm_completion(app, messages, model)
     except Exception as e:
-        log.error(f"Research subprocess failed: {e}")
+        log.error(f"Research LLM call failed: {e}")
         if event_emitter:
             await event_emitter(
                 {
@@ -160,24 +457,16 @@ async def run_research(
             "error": str(e),
         }
 
-    # Parse report from opencode output
-    report = _extract_report_from_output(result.stdout)
-    if not report and result.stdout:
-        log.warning(
-            f"Research: failed to extract text from opencode output "
-            f"({len(result.stdout)} chars raw), likely unparseable JSONL"
-        )
-
-    if not report:
-        error_msg = result.stderr or "OpenCode returned no output"
-        log.error(f"Research: no report generated. stderr: {error_msg}")
+    if not report or not report.strip():
+        error_msg = "LLM returned empty report"
+        log.error(f"Research: {error_msg}")
         if event_emitter:
             await event_emitter(
                 {
                     "type": "status",
                     "data": {
                         "action": "research",
-                        "description": "Research completed but no report generated",
+                        "description": error_msg,
                         "done": True,
                     },
                 }
@@ -189,7 +478,7 @@ async def run_research(
             "error": error_msg,
         }
 
-    # Save report as downloadable file
+    # --- Save report ---
     report_path = _save_report(kb_dir, query, report)
 
     log.info(
@@ -216,133 +505,6 @@ async def run_research(
     }
 
 
-def _run_subprocess(cmd: list, env: dict, idle_timeout: int) -> subprocess.CompletedProcess:
-    """Run the opencode subprocess with idle-based timeout.
-
-    Only kills the process if no stdout/stderr output for `idle_timeout` seconds.
-    Called via asyncio.to_thread (blocking).
-    """
-    proc = subprocess.Popen(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
-    with _active_processes_lock:
-        _active_processes.add(proc)
-
-    activity = {"last": time.monotonic()}
-    stdout_chunks = []
-    stderr_chunks = []
-
-    def _drain(stream, dest, label):
-        for line in iter(stream.readline, b""):
-            activity["last"] = time.monotonic()
-            text = line.decode("utf-8", errors="replace")
-            dest.append(text)
-            log.info(f"[research:{label}] {text.rstrip()[:2500] + ' ... ' + text.rstrip()[-2500:] if len(text.rstrip()) > 5000 else text.rstrip()}")
-        stream.close()
-
-    t_out = _threading.Thread(target=_drain, args=(proc.stdout, stdout_chunks, "stdout"), daemon=True)
-    t_err = _threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks, "stderr"), daemon=True)
-    t_out.start()
-    t_err.start()
-
-    # Poll for idle timeout
-    while proc.poll() is None:
-        time.sleep(10)
-        idle_secs = time.monotonic() - activity["last"]
-        if idle_secs >= idle_timeout:
-            import signal
-
-            log.error(f"Research: OpenCode idle-timed out (no output for {int(idle_secs)}s)")
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                proc.kill()
-            proc.wait()
-            with _active_processes_lock:
-                _active_processes.discard(proc)
-            t_out.join(timeout=5)
-            t_err.join(timeout=5)
-            raise subprocess.TimeoutExpired(cmd, idle_timeout)
-
-    t_out.join(timeout=10)
-    t_err.join(timeout=10)
-
-    with _active_processes_lock:
-        _active_processes.discard(proc)
-
-    return subprocess.CompletedProcess(
-        args=cmd,
-        returncode=proc.returncode,
-        stdout="".join(stdout_chunks),
-        stderr="".join(stderr_chunks),
-    )
-
-
-def _extract_report_from_output(output: str) -> Optional[str]:
-    """
-    Extract the assistant's text from opencode JSON output.
-    opencode --format json outputs one JSON event per line.
-
-    Text content can appear in multiple formats:
-    - {"type": "text", "part": {"type": "text", "text": "..."}}  (opencode v1)
-    - {"type": "text", "content": "..."}
-    - {"role": "assistant", "content": "..."}
-    """
-    if not output:
-        return None
-
-    text_chunks = []
-    for line in output.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-            if not isinstance(event, dict):
-                continue
-
-            event_type = event.get("type", "")
-
-            # opencode v1 format: nested in event.part
-            if event_type == "text" and "part" in event:
-                part = event["part"]
-                if isinstance(part, dict):
-                    text = part.get("text", "") or part.get("content", "")
-                    if text:
-                        text_chunks.append(text)
-                        continue
-
-            # Flat format: type=text with content
-            if event_type in ("text", "content"):
-                text = event.get("content", "") or event.get("text", "")
-                if text:
-                    text_chunks.append(text)
-                    continue
-
-            # Role-based format
-            if event.get("role") == "assistant" and event.get("content"):
-                text_chunks.append(event["content"])
-                continue
-
-            # Nested message format
-            if "message" in event and isinstance(event["message"], dict):
-                msg = event["message"]
-                if msg.get("role") == "assistant" and msg.get("content"):
-                    text_chunks.append(msg["content"])
-
-        except json.JSONDecodeError:
-            pass
-
-    if text_chunks:
-        return "".join(text_chunks)
-
-    return None
-
-
 def _save_report(kb_dir: str, query: str, report: str) -> str:
     """Save the research report to the kb dir's _reports/ subdirectory."""
     reports_dir = os.path.join(kb_dir, "_reports")
@@ -356,10 +518,14 @@ def _save_report(kb_dir: str, query: str, report: str) -> str:
 
     report_path = os.path.join(reports_dir, filename)
 
+    # Quote the query field to prevent YAML injection.
+    # Escape backslashes first, then double quotes, then wrap in double quotes.
+    # This handles queries containing colons, newlines, brackets, etc.
+    escaped_query = query.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     frontmatter = (
         f"---\n"
         f"type: research_report\n"
-        f"query: {query}\n"
+        f'query: "{escaped_query}"\n'
         f"generated_at: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n"
         f"---\n\n"
     )
