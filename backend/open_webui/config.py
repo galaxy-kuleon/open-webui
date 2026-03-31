@@ -2909,6 +2909,28 @@ KG1_GLM_OCR_CONCURRENCY = PersistentConfig(
     os.environ.get("KG1_GLM_OCR_CONCURRENCY", "1"),
 )
 
+####################################
+# Image Analysis Pipeline
+####################################
+
+IMAGE_ANALYSIS_ENABLED = PersistentConfig(
+    "IMAGE_ANALYSIS_ENABLED",
+    "rag.image_analysis_enabled",
+    os.environ.get("IMAGE_ANALYSIS_ENABLED", "false").lower() == "true",
+)
+
+IMAGE_ANALYSIS_CLASSIFIER_MODEL = PersistentConfig(
+    "IMAGE_ANALYSIS_CLASSIFIER_MODEL",
+    "rag.image_analysis_classifier_model",
+    os.environ.get("IMAGE_ANALYSIS_CLASSIFIER_MODEL", "lmstudio.qwen3.5-35b-a3b"),
+)
+
+IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH = PersistentConfig(
+    "IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH",
+    "rag.image_analysis_max_classify_width",
+    int(os.environ.get("IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH", "2000")),
+)
+
 EXTERNAL_DOCUMENT_LOADER_URL = PersistentConfig(
     "EXTERNAL_DOCUMENT_LOADER_URL",
     "rag.external_document_loader_url",
@@ -3079,7 +3101,7 @@ Format: Use compact key-value pairs grouped by dimension. Preserve original lang
 RAG_DOCUMENT_INDEX_MODEL = PersistentConfig(
     "RAG_DOCUMENT_INDEX_MODEL",
     "rag.document_index_model",
-    os.environ.get("RAG_DOCUMENT_INDEX_MODEL", "lmstudio.qwen3.5-9b"),
+    os.environ.get("RAG_DOCUMENT_INDEX_MODEL", "lmstudio.qwen3.5-35b-a3b"),
 )
 
 RAG_DOCUMENT_INDEX_TIMEOUT = PersistentConfig(
@@ -3103,13 +3125,13 @@ RAG_KNOWLEDGE_EXPORT_DIR = PersistentConfig(
 RAG_RESEARCH_MODEL = PersistentConfig(
     "RAG_RESEARCH_MODEL",
     "rag.research_model",
-    os.environ.get("RAG_RESEARCH_MODEL", "lmstudio.qwen3.5-9b"),
+    os.environ.get("RAG_RESEARCH_MODEL", "lmstudio.qwen3.5-35b-a3b"),
 )
 
 RAG_KNOWLEDGE_ORGANIZER_MODEL = PersistentConfig(
     "RAG_KNOWLEDGE_ORGANIZER_MODEL",
     "rag.knowledge_organizer_model",
-    os.environ.get("RAG_KNOWLEDGE_ORGANIZER_MODEL", "lmstudio.qwen3.5-9b"),
+    os.environ.get("RAG_KNOWLEDGE_ORGANIZER_MODEL", "lmstudio.qwen3.5-35b-a3b"),
 )
 
 RAG_USER_COLLECTION_ENABLED = PersistentConfig(

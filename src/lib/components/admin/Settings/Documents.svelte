@@ -834,6 +834,51 @@
 						{/if}
 					</div>
 
+					<!-- Image Analysis Pipeline -->
+					<hr class="border-gray-100 dark:border-gray-850 my-2" />
+
+					<div class="mb-2.5 flex w-full justify-between">
+						<div class="self-center text-xs font-medium">
+							{$i18n.t('Image Analysis')}
+						</div>
+						<div class="flex items-center relative">
+							<Tooltip
+								content={RAGConfig.IMAGE_ANALYSIS_ENABLED
+									? $i18n.t(
+											'Uploaded images are automatically classified and analyzed (OCR or description) for use by all models including non-vision ones.'
+										)
+									: $i18n.t(
+											'Images are only usable by vision-capable models.'
+										)}
+							>
+								<Switch bind:state={RAGConfig.IMAGE_ANALYSIS_ENABLED} />
+							</Tooltip>
+						</div>
+					</div>
+
+					{#if RAGConfig.IMAGE_ANALYSIS_ENABLED}
+						<div class="flex w-full mt-1">
+							<input
+								class="flex-1 w-full text-sm bg-transparent outline-hidden"
+								placeholder={$i18n.t('Classifier Model ID (e.g. lmstudio.qwen3.5-35b-a3b)')}
+								bind:value={RAGConfig.IMAGE_ANALYSIS_CLASSIFIER_MODEL}
+							/>
+						</div>
+						<div class="flex w-full mt-1 gap-2">
+							<div class="flex-1 flex items-center gap-1">
+								<span class="text-xs text-gray-500">{$i18n.t('Max Width (px)')}</span>
+								<input
+									class="w-20 text-sm bg-transparent outline-hidden"
+									type="number"
+									min="256"
+									max="4096"
+									placeholder="2000"
+									bind:value={RAGConfig.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH}
+								/>
+							</div>
+						</div>
+					{/if}
+
 					<div class="  mb-2.5 flex w-full justify-between">
 						<div class=" self-center text-xs font-medium">
 							<Tooltip content={$i18n.t('Full Context Mode')} placement="top-start">

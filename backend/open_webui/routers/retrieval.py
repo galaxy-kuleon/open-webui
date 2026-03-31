@@ -564,6 +564,10 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         "KG1_SOFFICE_PATH": request.app.state.config.KG1_SOFFICE_PATH,
         "KG1_TIMEOUT": request.app.state.config.KG1_TIMEOUT,
         "KG1_GLM_OCR_CONCURRENCY": request.app.state.config.KG1_GLM_OCR_CONCURRENCY,
+        # Image Analysis Pipeline
+        "IMAGE_ANALYSIS_ENABLED": request.app.state.config.IMAGE_ANALYSIS_ENABLED,
+        "IMAGE_ANALYSIS_CLASSIFIER_MODEL": request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL,
+        "IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH": request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH,
         # Reranking settings
         "RAG_RERANKING_MODEL": request.app.state.config.RAG_RERANKING_MODEL,
         "RAG_RERANKING_ENGINE": request.app.state.config.RAG_RERANKING_ENGINE,
@@ -788,6 +792,11 @@ class ConfigForm(BaseModel):
     KG1_SOFFICE_PATH: Optional[str] = None
     KG1_TIMEOUT: Optional[str] = None
     KG1_GLM_OCR_CONCURRENCY: Optional[str] = None
+
+    # Image Analysis Pipeline
+    IMAGE_ANALYSIS_ENABLED: Optional[bool] = None
+    IMAGE_ANALYSIS_CLASSIFIER_MODEL: Optional[str] = None
+    IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH: Optional[int] = None
 
     # Reranking settings
     RAG_RERANKING_MODEL: Optional[str] = None
@@ -1117,6 +1126,23 @@ async def update_rag_config(
         form_data.KG1_GLM_OCR_CONCURRENCY
         if form_data.KG1_GLM_OCR_CONCURRENCY is not None
         else request.app.state.config.KG1_GLM_OCR_CONCURRENCY
+    )
+
+    # Image Analysis Pipeline
+    request.app.state.config.IMAGE_ANALYSIS_ENABLED = (
+        form_data.IMAGE_ANALYSIS_ENABLED
+        if form_data.IMAGE_ANALYSIS_ENABLED is not None
+        else request.app.state.config.IMAGE_ANALYSIS_ENABLED
+    )
+    request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL = (
+        form_data.IMAGE_ANALYSIS_CLASSIFIER_MODEL
+        if form_data.IMAGE_ANALYSIS_CLASSIFIER_MODEL is not None
+        else request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL
+    )
+    request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH = (
+        form_data.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH
+        if form_data.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH is not None
+        else request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH
     )
 
     # Reranking settings
@@ -1451,6 +1477,10 @@ async def update_rag_config(
         "KG1_SOFFICE_PATH": request.app.state.config.KG1_SOFFICE_PATH,
         "KG1_TIMEOUT": request.app.state.config.KG1_TIMEOUT,
         "KG1_GLM_OCR_CONCURRENCY": request.app.state.config.KG1_GLM_OCR_CONCURRENCY,
+        # Image Analysis Pipeline
+        "IMAGE_ANALYSIS_ENABLED": request.app.state.config.IMAGE_ANALYSIS_ENABLED,
+        "IMAGE_ANALYSIS_CLASSIFIER_MODEL": request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL,
+        "IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH": request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH,
         # Reranking settings
         "RAG_RERANKING_MODEL": request.app.state.config.RAG_RERANKING_MODEL,
         "RAG_RERANKING_ENGINE": request.app.state.config.RAG_RERANKING_ENGINE,

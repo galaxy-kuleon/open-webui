@@ -2556,6 +2556,89 @@ async def convert_url_images_to_base64(form_data):
     return form_data
 
 
+def inject_analyzed_images(form_data: dict, model: dict) -> dict:
+    """
+    For images that have been analyzed (file.data.content exists):
+      1. Add to metadata.files so they enter the RAG pipeline (like .pdf/.doc)
+      2. For non-vision models: strip image_url from message content
+
+    Must run BEFORE convert_url_images_to_base64, while image URLs are still
+    file UUIDs (not yet base64).
+    """
+    model_has_vision = (
+        model.get("info", {}).get("meta", {}).get("capabilities", {}).get("vision", True)
+    )
+
+    files_metadata = form_data.get("metadata", {}).get("files", None) or []
+    existing_file_ids = {f.get("id") for f in files_metadata}
+
+    for message in form_data.get("messages", []):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+
+        new_content = []
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "image_url":
+                new_content.append(item)
+                continue
+
+            url = item.get("image_url", {}).get("url", "")
+
+            # Already base64 or external URL — can't look up file
+            if url.startswith("data:") or url.startswith("http"):
+                if model_has_vision:
+                    new_content.append(item)
+                # Non-vision: drop image (no analyzed text available for temp/external)
+                continue
+
+            # URL is a file UUID — look up analyzed content
+            file_obj = Files.get_file_by_id(url)
+
+            # Add analyzed image to files metadata for RAG context injection
+            if (
+                file_obj
+                and file_obj.data
+                and file_obj.data.get("content")
+                and url not in existing_file_ids
+            ):
+                files_metadata.append(
+                    {
+                        "id": url,
+                        "name": file_obj.filename,
+                        "type": "file",
+                        "content_type": (
+                            file_obj.meta.get("content_type") if file_obj.meta else None
+                        ),
+                    }
+                )
+                existing_file_ids.add(url)
+
+            if model_has_vision:
+                # Vision model: keep image_url for direct viewing
+                new_content.append(item)
+            else:
+                # Non-vision: strip image (text will come via RAG context)
+                if not (file_obj and file_obj.data and file_obj.data.get("content")):
+                    # Analysis not complete — add placeholder
+                    filename = file_obj.filename if file_obj else "unknown"
+                    new_content.append(
+                        {
+                            "type": "text",
+                            "text": f"[Image: {filename} — analysis pending]",
+                        }
+                    )
+
+        message["content"] = new_content
+
+    # Write back updated files metadata
+    if "metadata" not in form_data:
+        form_data["metadata"] = {}
+    form_data["metadata"]["files"] = files_metadata
+
+    return form_data
+
+
 def load_messages_from_db(chat_id: str, message_id: str) -> Optional[list[dict]]:
     """
     Load the message chain from DB up to message_id,
@@ -2657,6 +2740,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         except:
             pass
 
+    form_data = inject_analyzed_images(form_data, model)
     form_data = await convert_url_images_to_base64(form_data)
 
     event_emitter = get_event_emitter(metadata)

@@ -723,8 +723,7 @@
 
 			if (file['type'].startsWith('image/')) {
 				if (visionCapableModels.length === 0) {
-					toast.error($i18n.t('Selected model(s) do not support image inputs'));
-					return;
+					toast.info($i18n.t('Images will be analyzed as text for selected model(s)'));
 				}
 
 				const compressImageHandler = async (imageUrl, settings = {}, config = {}) => {
@@ -783,7 +782,7 @@
 						const blob = await (await fetch(imageUrl)).blob();
 						const compressedFile = new File([blob], file.name, { type: file.type });
 
-						uploadFileHandler(compressedFile, false);
+						uploadFileHandler(compressedFile);
 					}
 				};
 

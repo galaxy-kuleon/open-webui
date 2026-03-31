@@ -1941,10 +1941,8 @@
 						!(model.info?.meta?.capabilities?.vision ?? true) &&
 						!imageGenerationEnabled
 					) {
-						toast.error(
-							$i18n.t('Model {{modelName}} is not vision capable', {
-								modelName: model.name ?? model.id
-							})
+						console.log(
+							`Model ${model.name ?? model.id} is not vision capable — images will be analyzed as text`
 						);
 					}
 
