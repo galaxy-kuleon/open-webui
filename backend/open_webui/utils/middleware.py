@@ -3481,21 +3481,46 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         copied_files.append(dest)
                         log.info(f"Copied uploaded file to skill input: {dest}")
 
-                # ── Build skill prompt ──
-                # Pass file path(s) + the user's original message.
-                # The opencode agent reads SKILL.md and extracts args
-                # (--lang, --style, --glossary, --term, --output, etc.)
-                # from the natural language message itself.
-                if copied_files:
-                    files_str = " ".join(f'"{f}"' for f in copied_files)
-                    skill_message = (
-                        f"Input file(s): {files_str}\n\n"
-                        f"User request: {last_user_msg}"
-                    )
-                else:
-                    skill_message = last_user_msg
+                # ── Extract structured params from chat context ──
+                from open_webui.utils.skill_params import (
+                    extract_skill_params,
+                    build_enriched_skill_prompt,
+                )
 
-                log.info(f"Skill prompt: {skill_message}")
+                model_id = form_data.get("model", "")
+
+                if event_emitter:
+                    await event_emitter(
+                        {
+                            "type": "status",
+                            "data": {
+                                "action": "agent_skill",
+                                "sub_action": "extracting_params",
+                                "description": "Analyzing chat context...",
+                                "done": False,
+                            },
+                        }
+                    )
+
+                extracted_params = await extract_skill_params(
+                    request.app,
+                    form_data.get("messages", []),
+                    matched_skill.name,
+                    model_id,
+                )
+
+                skill_message = build_enriched_skill_prompt(
+                    extracted_params,
+                    copied_files,
+                    last_user_msg,
+                    matched_skill.name,
+                )
+
+                log.info(
+                    "Skill prompt (enriched=%s): %s",
+                    bool(extracted_params),
+                    skill_message[:500],
+                )
 
                 skill_result = await run_agent_skill(
                     skill_name=matched_skill.name,
