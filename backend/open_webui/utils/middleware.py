@@ -2566,8 +2566,8 @@ def inject_analyzed_images(form_data: dict, model: dict) -> dict:
     file UUIDs (not yet base64).
     """
     model_has_vision = (
-        model.get("info", {}).get("meta", {}).get("capabilities", {}).get("vision", True)
-    )
+        ((model.get("info") or {}).get("meta") or {}).get("capabilities") or {}
+    ).get("vision", True)
 
     files_metadata = form_data.get("metadata", {}).get("files", None) or []
     existing_file_ids = {f.get("id") for f in files_metadata}
@@ -2803,7 +2803,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     # Model "Knowledge" handling
     user_message = get_last_user_message(form_data["messages"])
-    model_knowledge = model.get("info", {}).get("meta", {}).get("knowledge", False)
+    model_knowledge = ((model.get("info") or {}).get("meta") or {}).get("knowledge", False)
 
     if (
         model_knowledge
@@ -2949,7 +2949,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     # Skills
     user_skill_ids = set(form_data.pop("skill_ids", None) or [])
-    model_skill_ids = set(model.get("info", {}).get("meta", {}).get("skillIds", []))
+    model_skill_ids = set(((model.get("info") or {}).get("meta") or {}).get("skillIds") or [])
 
     all_skill_ids = user_skill_ids | model_skill_ids
     available_skills = []
@@ -3247,7 +3247,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         # Inject builtin tools for native function calling based on enabled features and model capability
         # Check if builtin_tools capability is enabled for this model (defaults to True if not specified)
         builtin_tools_enabled = (
-            model.get("info", {}).get("meta", {}).get("capabilities") or {}
+            ((model.get("info") or {}).get("meta") or {}).get("capabilities") or {}
         ).get("builtin_tools", True)
         if (
             metadata.get("params", {}).get("function_calling") == "native"
@@ -3352,7 +3352,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     # Check if file context extraction is enabled for this model (default True)
     file_context_enabled = (
-        model.get("info", {}).get("meta", {}).get("capabilities") or {}
+        ((model.get("info") or {}).get("meta") or {}).get("capabilities") or {}
     ).get("file_context", True)
 
     if file_context_enabled:
@@ -3403,6 +3403,121 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 },
             }
         )
+
+    # ── Agent Skill Keyword Intercept ──
+    # If user message mentions an available agent skill by name, execute it
+    # directly (bypassing LLM tool-calling) and stream progress via event_emitter.
+    # Uploaded files (PDF, images, etc.) are copied to the skill's work_dir
+    # so opencode can access them as real filesystem paths.
+    if agent_skill_ids and available_skills:
+        last_user_msg = get_last_user_message(form_data["messages"]) or ""
+        last_user_msg_lower = last_user_msg.lower()
+        matched_skill = None
+        matched_meta = None
+        for skill in available_skills:
+            skill_meta = skill.meta
+            if hasattr(skill_meta, "model_dump"):
+                skill_meta = skill_meta.model_dump()
+            if skill_meta and skill_meta.get("type") == "agent_skill":
+                if skill.name.lower() in last_user_msg_lower:
+                    matched_skill = skill
+                    matched_meta = skill_meta
+                    break
+
+        if matched_skill:
+            log.info(
+                f"Agent skill keyword intercept: '{matched_skill.name}' "
+                f"detected in user message, executing directly"
+            )
+            try:
+                import os as _os
+                import shutil as _shutil
+                import json as _json
+                from open_webui.tools.builtin import run_agent_skill
+                from open_webui.models.files import Files
+                from open_webui.storage.provider import UPLOAD_DIR
+
+                work_dir = matched_meta.get("work_dir", "")
+
+                # ── Copy uploaded files to work_dir/input/ ──
+                copied_files = []
+                if work_dir and _os.path.isdir(work_dir):
+                    input_dir = _os.path.join(work_dir, "input")
+                    _os.makedirs(input_dir, exist_ok=True)
+
+                    # Gather file IDs from chat messages and metadata
+                    file_ids = set()
+                    for msg in form_data.get("messages", []):
+                        for f in msg.get("files", []):
+                            fid = f.get("id") or f.get("file_id")
+                            if fid:
+                                file_ids.add(fid)
+                    for f in (form_data.get("metadata", {}).get("files", None) or []):
+                        fid = f.get("id") or f.get("file_id")
+                        if fid:
+                            file_ids.add(fid)
+
+                    # Supported file extensions for skill input
+                    skill_exts = {
+                        ".pdf", ".doc", ".docx", ".md", ".txt",
+                        ".jpg", ".jpeg", ".png", ".bmp", ".gif",
+                        ".webp", ".tiff",
+                    }
+
+                    for fid in file_ids:
+                        file_record = Files.get_file_by_id(fid)
+                        if not file_record:
+                            continue
+                        fname = file_record.filename or ""
+                        ext = _os.path.splitext(fname)[1].lower()
+                        if ext not in skill_exts:
+                            continue
+                        # Resolve storage path
+                        storage_path = _os.path.join(UPLOAD_DIR, file_record.path) if file_record.path else ""
+                        if not storage_path or not _os.path.isfile(storage_path):
+                            continue
+                        dest = _os.path.join(input_dir, fname)
+                        _shutil.copy2(storage_path, dest)
+                        copied_files.append(dest)
+                        log.info(f"Copied uploaded file to skill input: {dest}")
+
+                # ── Build skill prompt ──
+                # Pass file path(s) + the user's original message.
+                # The opencode agent reads SKILL.md and extracts args
+                # (--lang, --style, --glossary, --term, --output, etc.)
+                # from the natural language message itself.
+                if copied_files:
+                    files_str = " ".join(f'"{f}"' for f in copied_files)
+                    skill_message = (
+                        f"Input file(s): {files_str}\n\n"
+                        f"User request: {last_user_msg}"
+                    )
+                else:
+                    skill_message = last_user_msg
+
+                log.info(f"Skill prompt: {skill_message}")
+
+                skill_result = await run_agent_skill(
+                    skill_name=matched_skill.name,
+                    message=skill_message,
+                    __request__=request,
+                    __user__={
+                        "id": user.id,
+                        "role": user.role,
+                    },
+                    __event_emitter__=event_emitter,
+                    __metadata__=metadata,
+                )
+
+                # Store result so caller can skip LLM and return directly
+                try:
+                    result_data = _json.loads(skill_result)
+                except (ValueError, TypeError):
+                    result_data = {"output": skill_result}
+
+                metadata["__agent_skill_result__"] = result_data
+            except Exception as e:
+                log.exception(f"Agent skill keyword intercept failed: {e}")
 
     return form_data, metadata, events
 
@@ -4828,7 +4943,7 @@ async def streaming_chat_response_handler(response, ctx):
 
                 # Check if citations are enabled for this model
                 citations_enabled = (
-                    model.get("info", {}).get("meta", {}).get("capabilities") or {}
+                    ((model.get("info") or {}).get("meta") or {}).get("capabilities") or {}
                 ).get("citations", True)
 
                 # Use the pre-RAG system content captured before the

@@ -1,8 +1,15 @@
 """
-Utilities for running opencode agent skills in sandboxed environments.
+Utilities for running opencode agent skills.
 
-Handles sandbox creation, opencode config generation, execution with streaming,
-output file collection, and cleanup.
+Supports two execution modes:
+  1. Sandbox mode: skill files are copied into a temp dir, opencode runs there,
+     output files are collected by scanning all modified files, then cleaned up.
+  2. Direct-dir (work_dir) mode: opencode runs directly in the user's project
+     directory. Output files are collected ONLY from a well-known `output/`
+     subdirectory (never scanning the full project tree). No cleanup is performed.
+
+Handles config generation, execution with streaming, output file collection,
+and cleanup (sandbox mode only).
 """
 
 import asyncio
@@ -22,7 +29,7 @@ log = logging.getLogger(__name__)
 # Concurrency limit per user
 _user_semaphores: dict[str, asyncio.Semaphore] = {}
 MAX_CONCURRENT_PER_USER = 2
-DEFAULT_IDLE_TIMEOUT = 600  # seconds — kill only if idle (no output) for this long
+DEFAULT_IDLE_TIMEOUT = 1800  # seconds — kill only if idle (no output) for this long (30 min for VLM tasks)
 MAX_UNCOMPRESSED_SIZE = 50 * 1024 * 1024  # 50MB
 
 # Global registry of active OpenCode subprocesses (for cleanup on shutdown)
@@ -59,18 +66,25 @@ def generate_opencode_config(
     openai_api_keys: list[str],
     ollama_base_urls: list[str],
     openai_api_configs: dict | None = None,
+    model_override: str | None = None,
 ) -> dict:
     """
-    Generate opencode.json config from OpenWebUI's connected providers.
-    Merges with existing config to preserve manually-added model lists.
-    Write to ~/.config/opencode/opencode.json.
-    Returns the config dict.
+    Update ~/.config/opencode/opencode.json with provider info from OpenWebUI.
+
+    Reads the existing config and only updates provider connection details
+    (baseURL, apiKey). All other fields (model, small_model, agent configs,
+    sampling parameters, permission, etc.) are preserved as-is.
+
+    If model_override is given (e.g. "lmstudio/qwen3.5-122b-a10b"), it replaces
+    model, and all agent.*.model entries.
+
+    Returns the merged config dict.
     """
-    # Read existing config to preserve manual additions (e.g. model lists)
     config_dir = Path.home() / ".config" / "opencode"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "opencode.json"
 
+    # Read existing config — this is the user's curated template
     existing_config = {}
     if config_path.exists():
         try:
@@ -79,50 +93,33 @@ def generate_opencode_config(
             pass
 
     existing_providers = existing_config.get("provider", {})
-    providers = {}
 
-    # Map OpenAI-compatible providers, using prefix_id from api_configs if available
+    # Update provider connection details from OpenWebUI, preserving everything else
     api_configs = openai_api_configs or {}
     for i, (url, key) in enumerate(zip(openai_api_base_urls, openai_api_keys)):
         if not url:
             continue
 
-        # Use prefix_id from OpenWebUI api_configs (e.g. "lmstudio")
         cfg = api_configs.get(str(i), {})
         prefix_id = cfg.get("prefix_id", "")
-        if prefix_id:
-            provider_id = prefix_id
-        else:
-            provider_id = f"openai_{i}" if i > 0 else "openai"
-
+        provider_id = prefix_id if prefix_id else (f"openai_{i}" if i > 0 else "openai")
         base_url = url.rstrip("/")
 
-        # Build provider entry, preserving existing model list if present
-        provider_entry = {
-            "baseURL": base_url,
-            "apiKey": key or provider_id,  # Use provider_id as fallback key
-        }
-
-        # Preserve existing models/npm/options from manual config
         if provider_id in existing_providers:
+            # Preserve existing entry, only update connection details
             existing = existing_providers[provider_id]
-            if "models" in existing:
-                provider_entry["models"] = existing["models"]
-            if "npm" in existing:
-                provider_entry["npm"] = existing["npm"]
-            if "name" in existing:
-                provider_entry["name"] = existing["name"]
-            # Merge options but update baseURL/apiKey
             if "options" in existing:
-                opts = existing["options"].copy()
-                opts["baseURL"] = base_url
+                existing["options"]["baseURL"] = base_url
                 if key:
-                    opts["apiKey"] = key
-                provider_entry["options"] = opts
+                    existing["options"]["apiKey"] = key
+            else:
+                existing["baseURL"] = base_url
+                if key:
+                    existing["apiKey"] = key
+        # If provider not in existing config, skip — don't pollute user's config
+        # with providers that may not have the correct opencode format.
 
-        providers[provider_id] = provider_entry
-
-    # Map Ollama providers (use /v1 endpoint for OpenAI compat)
+    # Ollama: only update existing entries, don't add new ones
     for i, url in enumerate(ollama_base_urls):
         if not url:
             continue
@@ -130,16 +127,26 @@ def generate_opencode_config(
         base = url.rstrip("/")
         if not base.endswith("/v1"):
             base = f"{base}/v1"
-        providers[provider_id] = {
-            "baseURL": base,
-            "apiKey": "ollama",
-        }
+        if provider_id in existing_providers:
+            existing = existing_providers[provider_id]
+            if "options" in existing:
+                existing["options"]["baseURL"] = base
+            else:
+                existing["baseURL"] = base
 
-    config = {
-        "$schema": "https://opencode.ai/config.json",
-        "permission": {"*": "allow"},
-        "provider": providers,
-    }
+    # Merge: start from existing config, update provider
+    config = existing_config.copy()
+    config["provider"] = existing_providers
+    config.setdefault("$schema", "https://opencode.ai/config.json")
+    config.setdefault("permission", {"*": "allow"})
+
+    # Optional: override model across all agent configs
+    if model_override:
+        config["model"] = model_override
+        if "agent" in config:
+            for agent_cfg in config["agent"].values():
+                if isinstance(agent_cfg, dict) and "model" in agent_cfg:
+                    agent_cfg["model"] = model_override
 
     config_path.write_text(json.dumps(config, indent=2))
 
@@ -253,11 +260,11 @@ async def run_opencode(
         "--thinking",
         "--dir", sandbox_dir,
     ]
-    if model:
+    if model and isinstance(model, str):
         cmd.extend(["--model", model])
     cmd.append(prompt)
 
-    log.info(f"Running opencode: {' '.join(cmd)}")
+    log.info(f"Running opencode: {' '.join(str(c) for c in cmd)}")
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -269,12 +276,16 @@ async def run_opencode(
 
     collected_text = []
     stderr_output = []
+    # Mutable container so both stdout reader and stderr reader can update it.
+    # Any output on either stream counts as activity for idle-timeout purposes.
+    last_activity_ns = [time.monotonic()]
 
     async def _read_stderr():
         while True:
             line = await proc.stderr.readline()
             if not line:
                 break
+            last_activity_ns[0] = time.monotonic()
             text = line.decode("utf-8", errors="replace")
             stderr_output.append(text)
             log.info(f"[opencode:stderr] {text.rstrip()[:2500] + ' ... ' + text.rstrip()[-2500:] if len(text.rstrip()) > 5000 else text.rstrip()}")
@@ -282,13 +293,11 @@ async def run_opencode(
     stderr_task = asyncio.create_task(_read_stderr())
 
     try:
-        last_activity = time.monotonic()
 
         async def _read_line_with_idle_check():
             """Read a line, raising TimeoutError if idle too long."""
-            nonlocal last_activity
             while True:
-                remaining = idle_timeout - (time.monotonic() - last_activity)
+                remaining = idle_timeout - (time.monotonic() - last_activity_ns[0])
                 if remaining <= 0:
                     raise TimeoutError(f"idle for {idle_timeout}s")
                 try:
@@ -296,11 +305,12 @@ async def run_opencode(
                         proc.stdout.readline(), timeout=min(remaining, 30)
                     )
                     if line:
-                        last_activity = time.monotonic()
+                        last_activity_ns[0] = time.monotonic()
                     return line
                 except asyncio.TimeoutError:
                     # No data yet — check if still within idle window
-                    if time.monotonic() - last_activity >= idle_timeout:
+                    # (stderr activity may have extended the window)
+                    if time.monotonic() - last_activity_ns[0] >= idle_timeout:
                         raise TimeoutError(f"idle for {idle_timeout}s")
                     # Otherwise loop and keep waiting
 
@@ -321,61 +331,66 @@ async def run_opencode(
                 continue
 
             event_type = event.get("type", "")
+            # opencode JSON streaming nests data in event["part"]
+            part = event.get("part", {})
 
-            if event_type == "text" or event_type == "content":
-                text = event.get("content", event.get("text", ""))
-                if text:
+            if event_type == "text":
+                text = part.get("text", "") or event.get("content", event.get("text", ""))
+                if text and text.strip():
                     collected_text.append(text)
-                if event_emitter:
-                    await event_emitter({
-                        "type": "status",
-                        "data": {
-                            "action": "agent_skill",
-                            "sub_action": "output",
-                            "description": text[:500] if text else "",
-                            "done": False,
-                        },
-                    })
+                    if event_emitter:
+                        await event_emitter({
+                            "type": "status",
+                            "data": {
+                                "action": "agent_skill",
+                                "sub_action": "output",
+                                "description": text.strip()[:500],
+                                "done": False,
+                            },
+                        })
 
-            elif event_type == "thinking":
-                thinking_text = event.get("content", event.get("thinking", ""))
-                if event_emitter and thinking_text:
+            elif event_type == "reasoning":
+                thinking = part.get("text", "") or event.get("content", "")
+                if thinking and thinking.strip() and event_emitter:
                     await event_emitter({
                         "type": "status",
                         "data": {
                             "action": "agent_skill",
                             "sub_action": "thinking",
-                            "description": thinking_text[:500],
+                            "description": thinking.strip()[:500],
                             "done": False,
                         },
                     })
 
             elif event_type == "tool_use":
-                tool_name = event.get("name", event.get("tool", ""))
-                tool_input = event.get("input", event.get("args", ""))
-                if isinstance(tool_input, dict):
-                    tool_input = json.dumps(tool_input, ensure_ascii=False)[:500]
-                elif isinstance(tool_input, str):
-                    tool_input = tool_input[:500]
-                else:
-                    tool_input = str(tool_input)[:500]
+                # opencode nests tool info in part.state
+                state = part.get("state", {})
+                tool_name = part.get("tool", event.get("name", "tool"))
+                tool_title = state.get("title", "")
+                tool_input_data = state.get("input", {})
+                tool_desc = tool_title or tool_input_data.get("description", "")
+                if isinstance(tool_input_data, dict):
+                    cmd = tool_input_data.get("command", "")
+                    if cmd:
+                        tool_desc = f"{tool_desc}: {cmd[:200]}" if tool_desc else cmd[:300]
+
                 if event_emitter:
                     await event_emitter({
                         "type": "status",
                         "data": {
                             "action": "agent_skill",
                             "sub_action": "tool_use",
-                            "description": f"{tool_name}: {tool_input}",
-                            "tool_name": tool_name,
-                            "tool_input": tool_input,
+                            "description": f"{tool_name}: {tool_desc}"[:500] if tool_desc else tool_name,
                             "done": False,
                         },
                     })
 
-            elif event_type == "tool_result":
-                result_text = event.get("content", event.get("output", ""))
-                if isinstance(result_text, str) and result_text:
-                    collected_text.append(result_text)
+                # Collect tool output if completed
+                tool_output = state.get("output", "")
+                if isinstance(tool_output, str) and tool_output.strip():
+                    # Only collect short outputs to avoid noise
+                    if len(tool_output) < 2000:
+                        collected_text.append(tool_output)
 
             elif event_type == "error":
                 error_msg = event.get("error", event.get("message", "Unknown error"))
@@ -391,15 +406,19 @@ async def run_opencode(
                     })
 
             elif event_type == "result":
-                # Final result event
                 result_text = event.get("result", event.get("content", ""))
+                if not result_text:
+                    result_text = part.get("result", part.get("text", ""))
                 if result_text:
-                    collected_text.append(result_text)
+                    if isinstance(result_text, str):
+                        collected_text.append(result_text)
+                    else:
+                        collected_text.append(json.dumps(result_text, ensure_ascii=False))
 
         await proc.wait()
 
     except TimeoutError:
-        elapsed = int(time.monotonic() - last_activity)
+        elapsed = int(time.monotonic() - last_activity_ns[0])
         import signal
 
         log.warning(f"opencode idle-timed out (no output for {elapsed}s), killing process group")
@@ -428,13 +447,18 @@ async def run_opencode(
         log.error(f"opencode exited with code {proc.returncode}: {stderr_str}")
         return f"Error: opencode exited with code {proc.returncode}. {stderr_str[:500]}"
 
-    return "\n".join(collected_text) or "(No output)"
+    return "\n".join(str(t) for t in collected_text) or "(No output)"
 
 
 def collect_output_files(sandbox_dir: str, start_time: float) -> list[Path]:
     """
-    Walk the sandbox and find files modified after start_time.
-    Skip .claude/, AGENTS.md, and hidden config files.
+    Collect output files from a SANDBOX directory (mode 1).
+
+    Walks the entire sandbox tree and returns files modified after start_time.
+    Safe because the sandbox is a clean temp dir we created.
+    Skips .claude/, AGENTS.md, and hidden config files.
+
+    For work_dir mode, use collect_output_files_from_work_dir() instead.
     """
     output_files = []
     sandbox = Path(sandbox_dir)
@@ -458,6 +482,60 @@ def collect_output_files(sandbox_dir: str, start_time: float) -> list[Path]:
         except OSError:
             continue
 
+    return output_files
+
+
+def collect_output_files_from_work_dir(work_dir: str) -> list[Path]:
+    """
+    Collect output files from a WORK_DIR (direct-dir mode, mode 2).
+
+    Unlike sandbox collection, this does NOT scan the entire project tree.
+    Only files inside {work_dir}/output/ are collected. This is safe because:
+      - work_dir is the user's real project directory (.venv, .git, etc.)
+      - Scanning the full tree would pick up irrelevant/dangerous files
+      - Skills running in work_dir mode are expected to place their outputs
+        in the output/ subdirectory
+
+    No start_time filtering is applied — ALL files in output/ are returned.
+    The output/ directory is the skill's contract for where results go.
+
+    Does NOT clean up the work_dir (it's the user's project, not a temp dir).
+    """
+    output_dir = Path(work_dir) / "output"
+
+    if not output_dir.is_dir():
+        log.debug(f"No output/ directory in work_dir {work_dir}")
+        return []
+
+    # Resolve output_dir to its real path once, so all containment checks
+    # compare against the canonical location (no symlink components).
+    resolved_output_dir = output_dir.resolve()
+
+    output_files = []
+    for path in output_dir.rglob("*"):
+        if not path.is_file():
+            continue
+
+        # SECURITY: resolve() follows all symlinks to the real filesystem path.
+        # We then verify the resolved path is still under output_dir.
+        # This prevents symlink escape (e.g. output/evil -> /etc/passwd).
+        resolved_path = path.resolve()
+        try:
+            resolved_path.relative_to(resolved_output_dir)
+        except ValueError:
+            log.warning(
+                f"Skipping symlink escape: {path} resolves to {resolved_path} "
+                f"which is outside {resolved_output_dir}"
+            )
+            continue
+
+        # Skip hidden files even within output/
+        rel = path.relative_to(output_dir)
+        if any(p.startswith(".") for p in rel.parts):
+            continue
+        output_files.append(path)
+
+    log.info(f"Collected {len(output_files)} output file(s) from {output_dir}")
     return output_files
 
 

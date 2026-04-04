@@ -351,7 +351,7 @@ async def run_research(
         query:        The research question
         kb_dir:       Path to the knowledge export directory
         app:          FastAPI application instance (carries state.MODELS, main_loop)
-        model:        Model ID (e.g. "lmstudio.qwen3.5-35b-a3b"), None to read from config
+        model:        Model ID (e.g. "lmstudio.qwen3.5-122b-a10b"), None to read from config
         token_budget: Max estimated tokens for KB content (default: DEFAULT_TOKEN_BUDGET)
         event_emitter: Async event emitter for status updates
 

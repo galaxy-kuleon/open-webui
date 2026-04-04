@@ -37,6 +37,12 @@ class SkillMeta(BaseModel):
     tags: Optional[list[str]] = []
     type: Optional[str] = None  # None = markdown (default), "agent_skill" = opencode skill
     disk_path: Optional[str] = None  # e.g. "/Users/x/.claude/skills/my-skill/"
+    # When set, opencode runs directly in this directory instead of a temp sandbox.
+    # The work_dir is expected to already contain .claude/skills/, .venv, and any
+    # project-local tooling. disk_path is ignored when work_dir is set — opencode
+    # discovers skills from the work_dir's .claude/skills/ naturally.
+    work_dir: Optional[str] = None
+    idle_timeout: Optional[int] = None  # seconds; overrides DEFAULT_IDLE_TIMEOUT for long-running skills
 
 
 class SkillModel(BaseModel):

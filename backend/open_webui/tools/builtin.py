@@ -2059,8 +2059,17 @@ async def run_agent_skill(
     __metadata__: dict = None,
 ) -> str:
     """
-    Execute an agent skill using the opencode CLI in a sandboxed environment.
-    Use this when a skill is marked as an executable agent skill.
+    Execute an agent skill using the opencode CLI.
+
+    Supports two execution modes:
+      1. Sandbox mode (default): skill files are copied into a temp sandbox,
+         opencode runs there, output files are collected by mtime, then cleaned up.
+         Requires meta.disk_path to be set.
+      2. Direct-dir mode (work_dir): opencode runs directly in the user's project
+         directory. Output files are collected ONLY from {work_dir}/output/.
+         No sandbox setup or cleanup. Requires meta.work_dir to be set.
+
+    work_dir takes precedence over disk_path when both are set.
 
     :param skill_name: Name of the agent skill to execute
     :param message: The task/message to send to the agent skill
@@ -2077,9 +2086,11 @@ async def run_agent_skill(
         from open_webui.models.access_grants import AccessGrants
         from open_webui.utils.opencode import (
             generate_opencode_config,
+            sync_opencode_config_to_dir,
             setup_sandbox,
             run_opencode,
             collect_output_files,
+            collect_output_files_from_work_dir,
             cleanup_sandbox,
             _get_user_semaphore,
         )
@@ -2109,9 +2120,24 @@ async def run_agent_skill(
         if not meta or meta.get("type") != "agent_skill":
             return json.dumps({"error": f"'{skill_name}' is not an agent skill"})
 
-        disk_path = meta.get("disk_path")
-        if not disk_path:
-            return json.dumps({"error": f"Agent skill '{skill_name}' has no disk path configured"})
+        # Determine execution mode: work_dir (direct-dir) takes precedence over disk_path (sandbox)
+        work_dir = meta.get("work_dir")
+        use_work_dir = False
+
+        if work_dir:
+            import os as _os
+            # NOTE: os.path.isdir follows symlinks. A symlink like /tmp/x -> /sensitive/dir
+            # would pass validation. This is acceptable because work_dir is set by an admin
+            # in the skill meta (not user-controllable). Admins are trusted to configure
+            # valid project directories.
+            if not _os.path.isdir(work_dir):
+                return json.dumps({"error": f"Agent skill '{skill_name}' work_dir does not exist: {work_dir}"})
+            use_work_dir = True
+            log.info(f"Agent skill '{skill_name}' using direct-dir mode: {work_dir}")
+        else:
+            disk_path = meta.get("disk_path")
+            if not disk_path:
+                return json.dumps({"error": f"Agent skill '{skill_name}' has no disk_path or work_dir configured"})
 
         # Check access
         if user_role != "admin" and skill.user_id != user_id:
@@ -2146,7 +2172,7 @@ async def run_agent_skill(
                     },
                 })
 
-            # Generate opencode config from OpenWebUI providers
+            # Generate opencode config from OpenWebUI providers (always needed)
             try:
                 openai_urls = getattr(__request__.app.state.config, "OPENAI_API_BASE_URLS", [])
                 openai_keys = getattr(__request__.app.state.config, "OPENAI_API_KEYS", [])
@@ -2156,56 +2182,104 @@ async def run_agent_skill(
             except Exception as e:
                 log.warning(f"Failed to generate opencode config: {e}")
 
-            # Setup sandbox
-            sandbox_dir = setup_sandbox(skill.id, disk_path, skill.name)
-            start_time = _time.time()
+            # Determine model from metadata (may be a str ID or a dict)
+            model_id = ""
+            if __metadata__:
+                raw_model = __metadata__.get("model", "")
+                model_id = raw_model if isinstance(raw_model, str) else ""
+
+            # Per-skill idle timeout override (e.g. VLM tasks need longer)
+            skill_idle_timeout = meta.get("idle_timeout") or None
+
+            # Track sandbox dir for deferred cleanup (after file upload).
+            # Set early so finally always cleans up, even on exceptions.
+            sandbox_dir_to_cleanup = None
 
             try:
-                # Determine model from metadata
-                model_id = ""
-                if __metadata__:
-                    model_id = __metadata__.get("model", "")
+                if use_work_dir:
+                    # --- Direct-dir mode: run in user's project directory ---
+                    # Sync opencode config (providers/permissions) into the project
+                    sync_opencode_config_to_dir(work_dir)
 
-                # Run opencode
-                result = await run_opencode(
-                    sandbox_dir=sandbox_dir,
-                    message=message,
-                    model=model_id,
-                    skill_name=skill_name,
-                    event_emitter=__event_emitter__,
-                )
+                    # Run opencode directly in work_dir (no sandbox, no cleanup)
+                    run_kwargs = {
+                        "sandbox_dir": work_dir,
+                        "message": message,
+                        "model": model_id,
+                        "skill_name": skill_name,
+                        "event_emitter": __event_emitter__,
+                    }
+                    if skill_idle_timeout:
+                        run_kwargs["idle_timeout"] = skill_idle_timeout
+                    result = await run_opencode(**run_kwargs)
 
-                # Collect output files
-                output_files = collect_output_files(sandbox_dir, start_time)
+                    # Collect output files ONLY from {work_dir}/output/
+                    output_files = collect_output_files_from_work_dir(work_dir)
 
-                # Upload output files to OpenWebUI storage
+                else:
+                    # --- Sandbox mode: existing behavior ---
+                    sandbox_dir = setup_sandbox(skill.id, disk_path, skill.name)
+                    # Mark for deferred cleanup immediately so it's cleaned
+                    # even if run_opencode or collect_output_files throws
+                    sandbox_dir_to_cleanup = sandbox_dir
+                    start_time = _time.time()
+
+                    run_kwargs = {
+                        "sandbox_dir": sandbox_dir,
+                        "message": message,
+                        "model": model_id,
+                        "skill_name": skill_name,
+                        "event_emitter": __event_emitter__,
+                    }
+                    if skill_idle_timeout:
+                        run_kwargs["idle_timeout"] = skill_idle_timeout
+                    result = await run_opencode(**run_kwargs)
+
+                    # Collect output files by modification time
+                    output_files = collect_output_files(sandbox_dir, start_time)
+
+                # Upload output files to OpenWebUI storage (common to both modes).
+                # Runs BEFORE sandbox cleanup so file bytes can still be read.
                 file_refs = []
                 if output_files:
                     try:
-                        from open_webui.models.files import Files
+                        from open_webui.models.files import Files, FileForm
                         from open_webui.routers.files import Storage
+
+                        import io
+                        import uuid
+                        import mimetypes
 
                         for fpath in output_files:
                             try:
                                 filename = fpath.name
                                 file_content = fpath.read_bytes()
+                                content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
-                                # Upload to storage
-                                storage_filename = Storage.upload_file(file_content, filename)
+                                # Upload to storage (requires BinaryIO + tags)
+                                file_obj = io.BytesIO(file_content)
+                                _, storage_filename = Storage.upload_file(
+                                    file_obj,
+                                    filename,
+                                    {"source": "agent_skill", "skill_id": skill.id},
+                                )
 
-                                # Create DB record
+                                # Create DB record — FileForm is a Pydantic model,
+                                # not a plain dict. Requires a unique id.
+                                file_id = str(uuid.uuid4())
                                 file_record = Files.insert_new_file(
                                     user_id,
-                                    {
-                                        "filename": filename,
-                                        "path": storage_filename,
-                                        "meta": {
+                                    FileForm(
+                                        id=file_id,
+                                        filename=filename,
+                                        path=storage_filename,
+                                        meta={
                                             "name": filename,
-                                            "content_type": "application/octet-stream",
+                                            "content_type": content_type,
                                             "size": len(file_content),
                                             "source": f"agent_skill:{skill.id}",
                                         },
-                                    },
+                                    ),
                                 )
 
                                 if file_record:
@@ -2216,31 +2290,33 @@ async def run_agent_skill(
                                 log.warning(f"Failed to upload output file {fpath}: {e}")
                     except ImportError as e:
                         log.warning(f"Cannot upload files: {e}")
-
-                # Build final result
-                output_parts = [result]
-                if file_refs:
-                    output_parts.append("\n\nOutput files:\n" + "\n".join(file_refs))
-
-                # Emit completion status
-                if __event_emitter__:
-                    await __event_emitter__({
-                        "type": "status",
-                        "data": {
-                            "action": "agent_skill",
-                            "sub_action": "complete",
-                            "description": "Agent skill completed",
-                            "done": True,
-                        },
-                    })
-
-                return json.dumps({
-                    "status": "success",
-                    "output": "\n".join(output_parts),
-                }, ensure_ascii=False)
-
             finally:
-                cleanup_sandbox(sandbox_dir)
+                # Sandbox cleanup: deferred to here so files survive upload.
+                # In work_dir mode, sandbox_dir_to_cleanup stays None (no cleanup).
+                if sandbox_dir_to_cleanup:
+                    cleanup_sandbox(sandbox_dir_to_cleanup)
+
+            # Build final result
+            output_parts = [result]
+            if file_refs:
+                output_parts.append("\n\nOutput files:\n" + "\n".join(file_refs))
+
+            # Emit completion status
+            if __event_emitter__:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "action": "agent_skill",
+                        "sub_action": "complete",
+                        "description": "Agent skill completed",
+                        "done": True,
+                    },
+                })
+
+            return json.dumps({
+                "status": "success",
+                "output": "\n".join(output_parts),
+            }, ensure_ascii=False)
 
     except Exception as e:
         log.exception(f"run_agent_skill error: {e}")

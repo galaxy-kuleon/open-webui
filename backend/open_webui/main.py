@@ -1935,7 +1935,37 @@ async def chat_completion(
                 request, form_data, user, metadata, model
             )
 
-            response = await chat_completion_handler(request, form_data, user)
+            # If an agent skill was directly executed (keyword intercept),
+            # skip the LLM and return the skill output as an SSE stream.
+            if "__agent_skill_result__" in metadata:
+                import json as _json
+
+                skill_result = metadata.pop("__agent_skill_result__")
+                output_text = skill_result.get("output", str(skill_result))
+
+                async def _skill_stream():
+                    # SSE format matching OpenAI streaming
+                    chunk = {
+                        "id": f"skill-{metadata.get('chat_id', 'x')}",
+                        "object": "chat.completion.chunk",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": output_text},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                    yield f"data: {_json.dumps(chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                from starlette.responses import StreamingResponse
+
+                response = StreamingResponse(
+                    _skill_stream(), media_type="text/event-stream"
+                )
+            else:
+                response = await chat_completion_handler(request, form_data, user)
             if metadata.get("chat_id") and metadata.get("message_id"):
                 try:
                     if not metadata["chat_id"].startswith("local:"):

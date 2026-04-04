@@ -168,7 +168,7 @@ def call_llm_completion(
         app:           The FastAPI application instance (carries state.MODELS, etc.)
         system_prompt: System message content
         user_prompt:   User message content
-        model_id:      OpenWebUI model ID (e.g. "lmstudio.qwen3.5-35b-a3b")
+        model_id:      OpenWebUI model ID (e.g. "lmstudio.qwen3.5-122b-a10b")
         timeout:       Maximum seconds to wait for the LLM response
 
     Returns:

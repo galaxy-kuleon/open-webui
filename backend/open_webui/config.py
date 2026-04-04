@@ -2922,7 +2922,7 @@ IMAGE_ANALYSIS_ENABLED = PersistentConfig(
 IMAGE_ANALYSIS_CLASSIFIER_MODEL = PersistentConfig(
     "IMAGE_ANALYSIS_CLASSIFIER_MODEL",
     "rag.image_analysis_classifier_model",
-    os.environ.get("IMAGE_ANALYSIS_CLASSIFIER_MODEL", "lmstudio.qwen3.5-35b-a3b"),
+    os.environ.get("IMAGE_ANALYSIS_CLASSIFIER_MODEL", "lmstudio.qwen3.5-122b-a10b"),
 )
 
 IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH = PersistentConfig(
@@ -3101,7 +3101,7 @@ Format: Use compact key-value pairs grouped by dimension. Preserve original lang
 RAG_DOCUMENT_INDEX_MODEL = PersistentConfig(
     "RAG_DOCUMENT_INDEX_MODEL",
     "rag.document_index_model",
-    os.environ.get("RAG_DOCUMENT_INDEX_MODEL", "lmstudio.qwen3.5-35b-a3b"),
+    os.environ.get("RAG_DOCUMENT_INDEX_MODEL", "lmstudio.qwen3.5-122b-a10b"),
 )
 
 RAG_DOCUMENT_INDEX_TIMEOUT = PersistentConfig(
@@ -3125,13 +3125,13 @@ RAG_KNOWLEDGE_EXPORT_DIR = PersistentConfig(
 RAG_RESEARCH_MODEL = PersistentConfig(
     "RAG_RESEARCH_MODEL",
     "rag.research_model",
-    os.environ.get("RAG_RESEARCH_MODEL", "lmstudio.qwen3.5-35b-a3b"),
+    os.environ.get("RAG_RESEARCH_MODEL", "lmstudio.qwen3.5-122b-a10b"),
 )
 
 RAG_KNOWLEDGE_ORGANIZER_MODEL = PersistentConfig(
     "RAG_KNOWLEDGE_ORGANIZER_MODEL",
     "rag.knowledge_organizer_model",
-    os.environ.get("RAG_KNOWLEDGE_ORGANIZER_MODEL", "lmstudio.qwen3.5-35b-a3b"),
+    os.environ.get("RAG_KNOWLEDGE_ORGANIZER_MODEL", "lmstudio.qwen3.5-122b-a10b"),
 )
 
 RAG_USER_COLLECTION_ENABLED = PersistentConfig(
