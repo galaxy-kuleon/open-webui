@@ -24,19 +24,71 @@ DIRECT_OCR_EXTENSIONS = {"pdf", "jpg", "jpeg", "png", "bmp", "gif", "webp"}
 # Plain text extensions: read directly, skip soffice + glm-ocr entirely
 PLAINTEXT_EXTENSIONS = {
     # Markup / prose
-    "txt", "md", "rst", "org", "adoc",
+    "txt",
+    "md",
+    "rst",
+    "org",
+    "adoc",
     # Data / config
-    "json", "yaml", "yml", "toml", "ini", "conf", "env", "csv", "tsv",
+    "json",
+    "yaml",
+    "yml",
+    "toml",
+    "ini",
+    "conf",
+    "env",
+    "csv",
+    "tsv",
     # Programming languages
-    "py", "js", "ts", "jsx", "tsx", "rs", "go", "java", "c", "cpp", "h", "hpp",
-    "cs", "swift", "dart", "rb", "pl", "pm", "php", "lua", "r", "scala",
-    "ex", "exs", "erl", "hs", "lhs", "sh", "bash", "bat", "ps1", "cmd",
+    "py",
+    "js",
+    "ts",
+    "jsx",
+    "tsx",
+    "rs",
+    "go",
+    "java",
+    "c",
+    "cpp",
+    "h",
+    "hpp",
+    "cs",
+    "swift",
+    "dart",
+    "rb",
+    "pl",
+    "pm",
+    "php",
+    "lua",
+    "r",
+    "scala",
+    "ex",
+    "exs",
+    "erl",
+    "hs",
+    "lhs",
+    "sh",
+    "bash",
+    "bat",
+    "ps1",
+    "cmd",
     # Web / style
-    "css", "html", "htm", "xml", "svg", "vue", "svelte",
+    "css",
+    "html",
+    "htm",
+    "xml",
+    "svg",
+    "vue",
+    "svelte",
     # Database / query
-    "sql", "plsql", "db2",
+    "sql",
+    "plsql",
+    "db2",
     # Other
-    "log", "dockerfile", "makefile", "cmake",
+    "log",
+    "dockerfile",
+    "makefile",
+    "cmake",
 }
 
 # Extensions whose content is already markdown or plain text — use as-is
@@ -44,19 +96,55 @@ RAW_MARKDOWN_EXTENSIONS = {"md", "txt", "rst", "org", "adoc"}
 
 # Map file extension → markdown code fence language identifier
 EXTENSION_LANG_MAP = {
-    "py": "python", "js": "javascript", "ts": "typescript",
-    "jsx": "jsx", "tsx": "tsx", "rs": "rust", "go": "go",
-    "java": "java", "rb": "ruby", "sh": "bash", "bash": "bash",
-    "ps1": "powershell", "bat": "batch", "cmd": "batch",
-    "css": "css", "html": "html", "htm": "html", "xml": "xml",
-    "svg": "xml", "sql": "sql", "json": "json", "yaml": "yaml",
-    "yml": "yaml", "toml": "toml", "ini": "ini", "conf": "ini",
-    "c": "c", "cpp": "cpp", "h": "c", "hpp": "cpp", "cs": "csharp",
-    "swift": "swift", "dart": "dart", "lua": "lua", "r": "r",
-    "scala": "scala", "ex": "elixir", "exs": "elixir", "erl": "erlang",
-    "hs": "haskell", "lhs": "haskell", "pl": "perl", "pm": "perl",
-    "php": "php", "vue": "vue", "svelte": "svelte",
-    "dockerfile": "dockerfile", "makefile": "makefile", "cmake": "cmake",
+    "py": "python",
+    "js": "javascript",
+    "ts": "typescript",
+    "jsx": "jsx",
+    "tsx": "tsx",
+    "rs": "rust",
+    "go": "go",
+    "java": "java",
+    "rb": "ruby",
+    "sh": "bash",
+    "bash": "bash",
+    "ps1": "powershell",
+    "bat": "batch",
+    "cmd": "batch",
+    "css": "css",
+    "html": "html",
+    "htm": "html",
+    "xml": "xml",
+    "svg": "xml",
+    "sql": "sql",
+    "json": "json",
+    "yaml": "yaml",
+    "yml": "yaml",
+    "toml": "toml",
+    "ini": "ini",
+    "conf": "ini",
+    "c": "c",
+    "cpp": "cpp",
+    "h": "c",
+    "hpp": "cpp",
+    "cs": "csharp",
+    "swift": "swift",
+    "dart": "dart",
+    "lua": "lua",
+    "r": "r",
+    "scala": "scala",
+    "ex": "elixir",
+    "exs": "elixir",
+    "erl": "erlang",
+    "hs": "haskell",
+    "lhs": "haskell",
+    "pl": "perl",
+    "pm": "perl",
+    "php": "php",
+    "vue": "vue",
+    "svelte": "svelte",
+    "dockerfile": "dockerfile",
+    "makefile": "makefile",
+    "cmake": "cmake",
 }
 
 
@@ -158,6 +246,7 @@ class KG1Loader:
                 # Fallback: count /Type /Page occurrences
                 data = f.read()
             import re
+
             # Try /Count N pattern (most reliable)
             counts = re.findall(rb"/Count\s+(\d+)", data)
             if counts:
@@ -285,8 +374,14 @@ class KG1Loader:
                 ),
             )
 
-        t_out = threading.Thread(target=_drain_soffice, args=(proc.stdout, "stdout"), daemon=True)
-        t_err = threading.Thread(target=_drain_soffice, args=(proc.stderr, "stderr", soffice_stderr), daemon=True)
+        t_out = threading.Thread(
+            target=_drain_soffice, args=(proc.stdout, "stdout"), daemon=True
+        )
+        t_err = threading.Thread(
+            target=_drain_soffice,
+            args=(proc.stderr, "stderr", soffice_stderr),
+            daemon=True,
+        )
         t_out.start()
         t_err.start()
 
@@ -325,7 +420,9 @@ class KG1Loader:
         log.info(f"KG1: Converted to PDF: {os.path.basename(pdf_path)}")
         return pdf_path
 
-    def _run_glmocr(self, input_path: str, output_dir: str, timeout: Optional[int] = None) -> None:
+    def _run_glmocr(
+        self, input_path: str, output_dir: str, timeout: Optional[int] = None
+    ) -> None:
         """Run glm-ocr via subprocess using uv run."""
         filename = os.path.basename(input_path)
         log.info(f"KG1: Running glm-ocr on '{filename}'")
@@ -351,6 +448,10 @@ class KG1Loader:
         cmd = [
             "uv",
             "run",
+            "--extra",
+            "layout",
+            "--extra",
+            "selfhosted",
             "glmocr",
             "parse",
             input_path,
@@ -379,9 +480,13 @@ class KG1Loader:
                     if self.status_callback and label == "stderr":
                         low = line.lower()
                         if "pipeline started" in low:
-                            self.status_callback(f"processing:extracting (OCR running, {page_count or '?'} pages)")
+                            self.status_callback(
+                                f"processing:extracting (OCR running, {page_count or '?'} pages)"
+                            )
                         elif "loading weights" in low and "100%" in line:
-                            self.status_callback("processing:extracting (model loaded, starting OCR)")
+                            self.status_callback(
+                                "processing:extracting (model loaded, starting OCR)"
+                            )
                 if collect is not None:
                     collect.append(line)
             stream.close()
@@ -403,8 +508,12 @@ class KG1Loader:
                 ),
             )
 
-        t_out = threading.Thread(target=_drain, args=(proc.stdout, "stdout"), daemon=True)
-        t_err = threading.Thread(target=_drain, args=(proc.stderr, "stderr", stderr_lines), daemon=True)
+        t_out = threading.Thread(
+            target=_drain, args=(proc.stdout, "stdout"), daemon=True
+        )
+        t_err = threading.Thread(
+            target=_drain, args=(proc.stderr, "stderr", stderr_lines), daemon=True
+        )
         t_out.start()
         t_err.start()
 

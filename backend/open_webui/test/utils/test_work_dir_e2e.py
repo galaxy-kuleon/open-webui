@@ -239,16 +239,58 @@ class TestSyncOpencodeConfigToDir:
         with tempfile.TemporaryDirectory(prefix="test_sync_") as td:
             # Pre-populate with custom field
             config_path = Path(td) / "opencode.json"
-            config_path.write_text(json.dumps({
-                "custom_field": "custom_value",
-                "permission": "deny",  # should be overwritten to "allow"
-            }))
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "custom_field": "custom_value",
+                        "permission": "deny",  # should be overwritten to "allow"
+                    }
+                )
+            )
 
             sync_opencode_config_to_dir(td)
             config = json.loads(config_path.read_text())
 
             assert config["permission"] == "allow"  # overwritten
             assert config["custom_field"] == "custom_value"  # preserved
+
+    def test_copies_model_fields_from_global_config(self, monkeypatch):
+        from open_webui.utils.opencode import sync_opencode_config_to_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_home_") as home_dir:
+            monkeypatch.setenv("HOME", home_dir)
+            config_dir = Path(home_dir) / ".config" / "opencode"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            (config_dir / "opencode.json").write_text(
+                json.dumps(
+                    {
+                        "model": "lmstudio/qwen3.5-122b-a10b",
+                        "small_model": "lmstudio/qwen3.5-9b",
+                        "provider": {
+                            "lmstudio": {
+                                "options": {
+                                    "baseURL": "http://127.0.0.1:1234/v1",
+                                }
+                            }
+                        },
+                        "agent": {
+                            "general": {
+                                "model": "lmstudio/qwen3.5-122b-a10b",
+                            }
+                        },
+                    }
+                )
+            )
+
+            with tempfile.TemporaryDirectory(prefix="test_sync_") as td:
+                sync_opencode_config_to_dir(td)
+                config = json.loads((Path(td) / "opencode.json").read_text())
+
+                assert config["model"] == "lmstudio/qwen3.5-122b-a10b"
+                assert config["small_model"] == "lmstudio/qwen3.5-9b"
+                assert (
+                    config["agent"]["general"]["model"] == "lmstudio/qwen3.5-122b-a10b"
+                )
 
     def test_permission_format_matches_generate(self):
         """Both config producers must use the same 'allow' string format."""
@@ -336,6 +378,50 @@ class TestGenerateOpencodeConfig:
         assert "lmstudio" in config["provider"]
         assert "openai" not in config["provider"]
 
+    def test_normalizes_stale_top_level_model_from_agent_config(self, monkeypatch):
+        from open_webui.utils.opencode import generate_opencode_config
+
+        with tempfile.TemporaryDirectory(prefix="test_home_") as home_dir:
+            monkeypatch.setenv("HOME", home_dir)
+            config_dir = Path(home_dir) / ".config" / "opencode"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            (config_dir / "opencode.json").write_text(
+                json.dumps(
+                    {
+                        "model": "lmstudio/qwen3.5-27b",
+                        "provider": {
+                            "lmstudio": {
+                                "options": {
+                                    "baseURL": "http://old-host:1234/v1",
+                                },
+                                "models": {
+                                    "qwen3.5-122b-a10b": {
+                                        "name": "qwen3.5-122b-a10b",
+                                    }
+                                },
+                            }
+                        },
+                        "agent": {
+                            "general": {
+                                "model": "lmstudio/qwen3.5-122b-a10b",
+                            },
+                            "plan": {
+                                "model": "lmstudio/qwen3.5-122b-a10b",
+                            },
+                        },
+                    }
+                )
+            )
+
+            config = generate_opencode_config(
+                openai_api_base_urls=["http://127.0.0.1:1234/v1"],
+                openai_api_keys=["lmstudio"],
+                ollama_base_urls=[],
+                openai_api_configs={"0": {"prefix_id": "lmstudio"}},
+            )
+
+            assert config["model"] == "lmstudio/qwen3.5-122b-a10b"
+
 
 # ---------------------------------------------------------------------------
 # 5. Dual-mode branching — contract verification
@@ -399,6 +485,7 @@ class TestDualModeBranching:
             cleanup_sandbox,
             _get_user_semaphore,
         )
+
         # If any import fails, this test fails — verifying the import list matches
         assert callable(generate_opencode_config)
         assert callable(sync_opencode_config_to_dir)

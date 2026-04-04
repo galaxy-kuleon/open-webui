@@ -22,14 +22,16 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
-from open_webui.env import OPENCODE_PATH
+from open_webui.env import OPENCODE_PATH, OPENCODE_MODEL_NAME_MIDDLE_NAME
 
 log = logging.getLogger(__name__)
 
 # Concurrency limit per user
 _user_semaphores: dict[str, asyncio.Semaphore] = {}
 MAX_CONCURRENT_PER_USER = 2
-DEFAULT_IDLE_TIMEOUT = 1800  # seconds — kill only if idle (no output) for this long (30 min for VLM tasks)
+DEFAULT_IDLE_TIMEOUT = (
+    3600  # seconds — kill only if idle (no output) for this long (60 min for VLM tasks)
+)
 MAX_UNCOMPRESSED_SIZE = 50 * 1024 * 1024  # 50MB
 
 # Global registry of active OpenCode subprocesses (for cleanup on shutdown)
@@ -71,9 +73,9 @@ def generate_opencode_config(
     """
     Update ~/.config/opencode/opencode.json with provider info from OpenWebUI.
 
-    Reads the existing config and only updates provider connection details
-    (baseURL, apiKey). All other fields (model, small_model, agent configs,
-    sampling parameters, permission, etc.) are preserved as-is.
+    Reads the existing config and updates provider connection details
+    (baseURL, apiKey). Existing model settings are preserved unless the
+    top-level model is missing or stale relative to the configured agent model.
 
     If model_override is given (e.g. "lmstudio/qwen3.5-122b-a10b"), it replaces
     model, and all agent.*.model entries.
@@ -147,6 +149,46 @@ def generate_opencode_config(
             for agent_cfg in config["agent"].values():
                 if isinstance(agent_cfg, dict) and "model" in agent_cfg:
                     agent_cfg["model"] = model_override
+    else:
+        current_model = config.get("model") or ""
+        current_provider_id, _, current_model_name = current_model.partition("/")
+        current_provider_cfg = config.get("provider", {}).get(current_provider_id, {})
+        current_provider_models = (
+            current_provider_cfg.get("models", {})
+            if isinstance(current_provider_cfg, dict)
+            else {}
+        )
+        current_model_known = bool(
+            current_model_name
+            and (
+                not current_provider_models
+                or current_model_name in current_provider_models
+            )
+        )
+
+        agent_models = {
+            agent_cfg.get("model")
+            for agent_cfg in config.get("agent", {}).values()
+            if isinstance(agent_cfg, dict) and agent_cfg.get("model")
+        }
+        if (not current_model or not current_model_known) and len(agent_models) == 1:
+            candidate_model = next(iter(agent_models))
+            candidate_provider_id, _, candidate_model_name = candidate_model.partition(
+                "/"
+            )
+            candidate_provider_cfg = config.get("provider", {}).get(
+                candidate_provider_id, {}
+            )
+            candidate_provider_models = (
+                candidate_provider_cfg.get("models", {})
+                if isinstance(candidate_provider_cfg, dict)
+                else {}
+            )
+            if candidate_model_name and (
+                not candidate_provider_models
+                or candidate_model_name in candidate_provider_models
+            ):
+                config["model"] = candidate_model
 
     config_path.write_text(json.dumps(config, indent=2))
 
@@ -177,9 +219,9 @@ def sync_opencode_config_to_dir(target_dir: str) -> None:
     if global_config_path.exists():
         try:
             global_config = json.loads(global_config_path.read_text())
-            # Merge provider from global into project
-            if "provider" in global_config:
-                project_config["provider"] = global_config["provider"]
+            for key in ("provider", "model", "small_model", "agent"):
+                if key in global_config:
+                    project_config[key] = global_config[key]
         except (json.JSONDecodeError, OSError) as e:
             log.warning(f"Failed to read global opencode config: {e}")
 
@@ -238,6 +280,32 @@ def setup_sandbox(skill_id: str, skill_disk_path: str, skill_name: str = "") -> 
     return sandbox_dir
 
 
+def _convert_model_name(model: str) -> str:
+    """
+    Convert model name for opencode based on OPENCODE_MODEL_NAME_MIDDLE_NAME env var.
+
+    If OPENCODE_MODEL_NAME_MIDDLE_NAME is set (e.g., "qwen"), converts:
+        "provider.modelname" → "provider/{middle_name}/modelname"
+
+    Example:
+        "lmstudio.qwen3.5-122b-a10b" → "lmstudio/qwen/qwen3.5-122b-a10b"
+    """
+    if not model or not isinstance(model, str):
+        return model
+
+    middle_name = OPENCODE_MODEL_NAME_MIDDLE_NAME
+    if not middle_name:
+        return model
+
+    # Check if model has provider prefix format (contains ".")
+    if "." in model:
+        provider, _, model_name = model.partition(".")
+        if provider and model_name:
+            return f"{provider}/{middle_name}/{model_name}"
+
+    return model
+
+
 async def run_opencode(
     sandbox_dir: str,
     message: str,
@@ -256,12 +324,15 @@ async def run_opencode(
     cmd = [
         OPENCODE_PATH,
         "run",
-        "--format", "json",
+        "--format",
+        "json",
         "--thinking",
-        "--dir", sandbox_dir,
+        "--dir",
+        sandbox_dir,
     ]
     if model and isinstance(model, str):
-        cmd.extend(["--model", model])
+        converted_model = _convert_model_name(model)
+        cmd.extend(["--model", converted_model])
     cmd.append(prompt)
 
     log.info(f"Running opencode: {' '.join(str(c) for c in cmd)}")
@@ -288,7 +359,9 @@ async def run_opencode(
             last_activity_ns[0] = time.monotonic()
             text = line.decode("utf-8", errors="replace")
             stderr_output.append(text)
-            log.info(f"[opencode:stderr] {text.rstrip()[:2500] + ' ... ' + text.rstrip()[-2500:] if len(text.rstrip()) > 5000 else text.rstrip()}")
+            log.info(
+                f"[opencode:stderr] {text.rstrip()[:2500] + ' ... ' + text.rstrip()[-2500:] if len(text.rstrip()) > 5000 else text.rstrip()}"
+            )
 
     stderr_task = asyncio.create_task(_read_stderr())
 
@@ -323,7 +396,9 @@ async def run_opencode(
             if not line_str:
                 continue
 
-            log.info(f"[opencode:stdout] {line_str[:2500] + ' ... ' + line_str[-2500:] if len(line_str) > 5000 else line_str}")
+            log.info(
+                f"[opencode:stdout] {line_str[:2500] + ' ... ' + line_str[-2500:] if len(line_str) > 5000 else line_str}"
+            )
 
             try:
                 event = json.loads(line_str)
@@ -335,32 +410,38 @@ async def run_opencode(
             part = event.get("part", {})
 
             if event_type == "text":
-                text = part.get("text", "") or event.get("content", event.get("text", ""))
+                text = part.get("text", "") or event.get(
+                    "content", event.get("text", "")
+                )
                 if text and text.strip():
                     collected_text.append(text)
                     if event_emitter:
-                        await event_emitter({
-                            "type": "status",
-                            "data": {
-                                "action": "agent_skill",
-                                "sub_action": "output",
-                                "description": text.strip()[:500],
-                                "done": False,
-                            },
-                        })
+                        await event_emitter(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "action": "agent_skill",
+                                    "sub_action": "output",
+                                    "description": text.strip()[:500],
+                                    "done": False,
+                                },
+                            }
+                        )
 
             elif event_type == "reasoning":
                 thinking = part.get("text", "") or event.get("content", "")
                 if thinking and thinking.strip() and event_emitter:
-                    await event_emitter({
-                        "type": "status",
-                        "data": {
-                            "action": "agent_skill",
-                            "sub_action": "thinking",
-                            "description": thinking.strip()[:500],
-                            "done": False,
-                        },
-                    })
+                    await event_emitter(
+                        {
+                            "type": "status",
+                            "data": {
+                                "action": "agent_skill",
+                                "sub_action": "thinking",
+                                "description": thinking.strip()[:500],
+                                "done": False,
+                            },
+                        }
+                    )
 
             elif event_type == "tool_use":
                 # opencode nests tool info in part.state
@@ -372,18 +453,24 @@ async def run_opencode(
                 if isinstance(tool_input_data, dict):
                     cmd = tool_input_data.get("command", "")
                     if cmd:
-                        tool_desc = f"{tool_desc}: {cmd[:200]}" if tool_desc else cmd[:300]
+                        tool_desc = (
+                            f"{tool_desc}: {cmd[:200]}" if tool_desc else cmd[:300]
+                        )
 
                 if event_emitter:
-                    await event_emitter({
-                        "type": "status",
-                        "data": {
-                            "action": "agent_skill",
-                            "sub_action": "tool_use",
-                            "description": f"{tool_name}: {tool_desc}"[:500] if tool_desc else tool_name,
-                            "done": False,
-                        },
-                    })
+                    await event_emitter(
+                        {
+                            "type": "status",
+                            "data": {
+                                "action": "agent_skill",
+                                "sub_action": "tool_use",
+                                "description": f"{tool_name}: {tool_desc}"[:500]
+                                if tool_desc
+                                else tool_name,
+                                "done": False,
+                            },
+                        }
+                    )
 
                 # Collect tool output if completed
                 tool_output = state.get("output", "")
@@ -395,15 +482,17 @@ async def run_opencode(
             elif event_type == "error":
                 error_msg = event.get("error", event.get("message", "Unknown error"))
                 if event_emitter:
-                    await event_emitter({
-                        "type": "status",
-                        "data": {
-                            "action": "agent_skill",
-                            "sub_action": "error",
-                            "description": str(error_msg)[:500],
-                            "done": False,
-                        },
-                    })
+                    await event_emitter(
+                        {
+                            "type": "status",
+                            "data": {
+                                "action": "agent_skill",
+                                "sub_action": "error",
+                                "description": str(error_msg)[:500],
+                                "done": False,
+                            },
+                        }
+                    )
 
             elif event_type == "result":
                 result_text = event.get("result", event.get("content", ""))
@@ -413,7 +502,9 @@ async def run_opencode(
                     if isinstance(result_text, str):
                         collected_text.append(result_text)
                     else:
-                        collected_text.append(json.dumps(result_text, ensure_ascii=False))
+                        collected_text.append(
+                            json.dumps(result_text, ensure_ascii=False)
+                        )
 
         await proc.wait()
 
@@ -421,21 +512,25 @@ async def run_opencode(
         elapsed = int(time.monotonic() - last_activity_ns[0])
         import signal
 
-        log.warning(f"opencode idle-timed out (no output for {elapsed}s), killing process group")
+        log.warning(
+            f"opencode idle-timed out (no output for {elapsed}s), killing process group"
+        )
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (ProcessLookupError, OSError):
             proc.kill()
         await proc.wait()
         if event_emitter:
-            await event_emitter({
-                "type": "status",
-                "data": {
-                    "action": "agent_skill",
-                    "description": f"Agent skill idle-timed out (no activity for {idle_timeout}s)",
-                    "done": True,
-                },
-            })
+            await event_emitter(
+                {
+                    "type": "status",
+                    "data": {
+                        "action": "agent_skill",
+                        "description": f"Agent skill idle-timed out (no activity for {idle_timeout}s)",
+                        "done": True,
+                    },
+                }
+            )
         return f"Error: opencode idle-timed out (no output for {idle_timeout} seconds)."
 
     finally:
