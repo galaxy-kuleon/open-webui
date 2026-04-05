@@ -892,7 +892,7 @@ def handle_responses_streaming_event(
 
 
 ####################################
-# Full Document Context (Phase A) + Sub-Chat Extraction (Phase B)
+# Full Document Context (Phase A) + 3-Tier Token Budget Cascade
 ####################################
 
 
@@ -906,7 +906,8 @@ def expand_sources_to_full_documents(sources: list) -> list:
 
     seen_files = {}  # file_id -> { source_info, name }
     for source in sources:
-        metadatas = source.get("metadata", [])
+        # `or []` handles both missing key AND metadata=None
+        metadatas = source.get("metadata") or []
         source_info = source.get("source", {})
         for meta in metadatas:
             file_id = meta.get("file_id")
@@ -986,6 +987,184 @@ def estimate_sources_total_tokens(
     return total
 
 
+def build_index_only_sources(sources: list) -> Optional[list]:
+    """
+    Produce a new sources list where each source's document content is replaced
+    with only the index_content from the DB (Tier 2 of the token budget cascade).
+
+    Returns None if NO sources had index_content (i.e., Tier 2 can't help).
+    Sources without index_content retain their original document content.
+    """
+    if not sources:
+        return None
+
+    new_sources = []
+    any_replaced = False
+
+    for source in sources:
+        # `or []` handles both missing key AND metadata=None
+        metadatas = source.get("metadata") or []
+        file_id = metadatas[0].get("file_id") if metadatas else None
+
+        index_content = ""
+        if file_id:
+            file_obj = Files.get_file_by_id(file_id)
+            if file_obj and file_obj.data:
+                index_content = (file_obj.data.get("index_content") or "").strip()
+
+        if index_content:
+            any_replaced = True
+            new_sources.append(
+                {
+                    "source": source.get("source", {}),
+                    "document": [index_content],
+                    "metadata": source.get("metadata") or [],
+                }
+            )
+        else:
+            # Keep original document content for files without index
+            src_name = source.get("source", {}).get("name", "unknown")
+            log.warning(
+                f"[RAG] cascade Tier 2: file '{src_name}' (id={file_id}) "
+                f"has no index_content — retaining original content"
+            )
+            new_sources.append(
+                {
+                    "source": source.get("source", {}),
+                    "document": list(source.get("document", [])),
+                    "metadata": source.get("metadata") or [],
+                }
+            )
+
+    return new_sources if any_replaced else None
+
+
+async def apply_token_budget_cascade(
+    sources: list,
+    max_tokens: Optional[int],
+    request,
+    body: dict,
+    user,
+    event_emitter,
+) -> list:
+    """
+    Apply a 3-tier token budget cascade to RAG sources, degrading gracefully:
+
+      Tier 1: full .md content + .index.md  (richest context)
+      Tier 2: only .index.md per file        (pre-computed summary, zero query-time cost)
+      Tier 3: sub-chat extraction via LLM    (most precise but most expensive)
+
+    Returns the sources list that fits within the token budget, at the
+    highest-fidelity tier possible.
+
+    max_tokens of 0 or None means "no budget limit" — returns Tier 1 immediately.
+    """
+    # No budget constraint → Tier 1 as-is
+    if not max_tokens or max_tokens <= 0:
+        return sources
+
+    # --- Tier 1 check ---
+    tier1_tokens = estimate_sources_total_tokens(sources)
+    log.info(
+        f"[RAG] cascade: Tier 1 (full content) tokens={tier1_tokens} budget={max_tokens}"
+    )
+    if tier1_tokens <= max_tokens:
+        return sources
+
+    # --- Tier 2: index-only ---
+    index_only = build_index_only_sources(sources)
+    if index_only is not None:
+        tier2_tokens = estimate_sources_total_tokens(index_only)
+        log.info(
+            f"[RAG] cascade: Tier 2 (index-only) tokens={tier2_tokens} budget={max_tokens}"
+        )
+        if tier2_tokens <= max_tokens:
+            if event_emitter:
+                await event_emitter(
+                    {
+                        "type": "status",
+                        "data": {
+                            "action": "rag_cascade",
+                            "description": "Using document summaries to fit token budget",
+                            "done": False,
+                        },
+                    }
+                )
+            log.info("[RAG] cascade: Tier 2 (index-only) within budget")
+            return index_only
+
+    # --- Tier 3: sub-chat extraction on ORIGINAL full content ---
+    model_id = body["model"]
+    user_query = get_last_user_message(body["messages"])
+
+    # Guard: sub-chat extraction without a user query is meaningless —
+    # the LLM needs a query to know what to extract. Fall back to the
+    # best available tier instead of making a pointless API call.
+    if user_query is None:
+        log.warning(
+            "[RAG] cascade: Tier 3 skipped — no user query available. "
+            "Returning %s",
+            "Tier 2 (index-only)" if index_only is not None else "Tier 1 (full, over budget)",
+        )
+        return index_only if index_only is not None else sources
+
+    if event_emitter:
+        await event_emitter(
+            {
+                "type": "status",
+                "data": {
+                    "action": "rag_cascade",
+                    "description": "Extracting relevant content via sub-chat (over budget)",
+                    "done": False,
+                },
+            }
+        )
+    log.info("[RAG] cascade: Tier 3 (sub-chat extraction)")
+    concurrency = request.app.state.config.RAG_SUBCHAT_CONCURRENCY or 3
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _extract(src_idx, doc_idx, doc_text, doc_name):
+        async with semaphore:
+            return (
+                src_idx,
+                doc_idx,
+                await extract_relevant_content_from_document(
+                    request=request,
+                    model_id=model_id,
+                    user_query=user_query,
+                    document_content=doc_text,
+                    document_name=doc_name,
+                    user=user,
+                ),
+            )
+
+    # Build extraction tasks from the original (Tier 1) sources
+    tasks = []
+    for src_idx, source in enumerate(sources):
+        # `or []` handles both missing key AND metadata=None
+        metadatas = source.get("metadata") or []
+        for doc_idx, doc in enumerate(source.get("document", [])):
+            meta = (
+                metadatas[min(doc_idx, len(metadatas) - 1)]
+                if metadatas
+                else {}
+            )
+            doc_name = meta.get("name") or f"doc_{src_idx}"
+            tasks.append(_extract(src_idx, doc_idx, doc, doc_name))
+
+    # Deep copy sources so we don't mutate the original
+    extracted_sources = copy.deepcopy(sources)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception):
+            log.error(f"[RAG] cascade Tier 3 extraction failed: {result}")
+            continue
+        src_idx, doc_idx, extracted = result
+        extracted_sources[src_idx]["document"][doc_idx] = extracted
+
+    return extracted_sources
+
+
 async def extract_relevant_content_from_document(
     request: Request,
     model_id: str,
@@ -1054,7 +1233,7 @@ def get_source_context(
     if source_ids is None:
         source_ids = {}
     for source in sources:
-        for doc, meta in zip(source.get("document", []), source.get("metadata", [])):
+        for doc, meta in zip(source.get("document", []), source.get("metadata") or []):
             source_id = (
                 meta.get("source") or source.get("source", {}).get("id") or "N/A"
             )
@@ -2109,22 +2288,20 @@ async def chat_completion_files_handler(
     user_collection_enabled = request.app.state.config.RAG_USER_COLLECTION_ENABLED
 
     # ── Direct Content Mode ──────────────────────────────────────
-    # In a new chat where the user only uploaded files (no collections),
-    # bypass vector search and inject full .md + .index.md content directly.
-    # This gives the LLM complete document context instead of top-k chunks.
+    # When the user only uploaded files (no collections), bypass vector search
+    # and inject full .md + .index.md content directly. This gives the LLM
+    # complete document context instead of top-k chunks.
     only_uploaded_files = (
         files
         and all(item.get("type") == "file" for item in files)
     )
-    user_messages = [m for m in body.get("messages", []) if m.get("role") == "user"]
-    is_new_chat = len(user_messages) <= 1
 
-    if only_uploaded_files and is_new_chat:
+    if only_uploaded_files:
         direct_sources = _build_direct_file_sources(files)
         if direct_sources is not None:
             log.info(
                 f"[RAG] direct content mode: {len(direct_sources)} files, "
-                f"bypassing vector search for new-chat uploaded files"
+                f"bypassing vector search for uploaded files"
             )
             sources = direct_sources
 
@@ -2139,61 +2316,21 @@ async def chat_completion_files_handler(
                 }
             )
 
-            # Still apply full-document token budget & sub-chat extraction (Phase B)
+            # Apply 3-tier token budget cascade (full → index-only → sub-chat)
             max_tokens = request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS
-            if max_tokens and max_tokens > 0:
-                total_tokens = estimate_sources_total_tokens(sources)
-                log.info(
-                    f"[RAG] direct content token check: {total_tokens} vs budget {max_tokens}"
-                )
-                if total_tokens > max_tokens:
-                    log.info(
-                        f"[RAG] direct content exceeds budget, activating sub-chat extraction"
-                    )
-                    try:
-                        model_id = body["model"]
-                        user_query = get_last_user_message(body["messages"])
-                        concurrency = request.app.state.config.RAG_SUBCHAT_CONCURRENCY or 3
-                        semaphore = asyncio.Semaphore(concurrency)
-
-                        async def _extract_direct(src_idx, doc_idx, doc_text, doc_name):
-                            async with semaphore:
-                                return (
-                                    src_idx,
-                                    doc_idx,
-                                    await extract_relevant_content_from_document(
-                                        request=request,
-                                        model_id=model_id,
-                                        user_query=user_query,
-                                        document_content=doc_text,
-                                        document_name=doc_name,
-                                        user=user,
-                                    ),
-                                )
-
-                        tasks = []
-                        for src_idx, source in enumerate(sources):
-                            for doc_idx, doc in enumerate(source.get("document", [])):
-                                meta = source.get("metadata", [{}])[
-                                    min(doc_idx, len(source.get("metadata", [])) - 1)
-                                ]
-                                doc_name = meta.get("name") or f"doc_{src_idx}"
-                                tasks.append(_extract_direct(src_idx, doc_idx, doc, doc_name))
-
-                        results = await asyncio.gather(*tasks, return_exceptions=True)
-                        for result in results:
-                            if isinstance(result, Exception):
-                                log.error(f"Direct content sub-chat extraction failed: {result}")
-                                continue
-                            src_idx, doc_idx, extracted = result
-                            sources[src_idx]["document"][doc_idx] = extracted
-                    except Exception as e:
-                        log.exception(f"Direct content sub-chat extraction failed: {e}")
+            sources = await apply_token_budget_cascade(
+                sources=sources,
+                max_tokens=max_tokens,
+                request=request,
+                body=body,
+                user=user,
+                event_emitter=__event_emitter__,
+            )
 
             # Emit final source count
             unique_ids = set()
             for source in sources:
-                for meta in source.get("metadata", []):
+                for meta in source.get("metadata") or []:
                     unique_ids.add(meta.get("source") or meta.get("file_id") or "N/A")
             total_ctx_tokens = estimate_sources_total_tokens(sources)
             log.info(
@@ -2295,40 +2432,72 @@ async def chat_completion_files_handler(
                     }
                 )
 
-        try:
-            # Directly await async get_sources_from_items (no thread needed - fully async now)
-            sources = await get_sources_from_items(
-                request=request,
-                items=files,
-                queries=queries,
-                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
-                    query, prefix=prefix, user=user
-                ),
-                k=request.app.state.config.TOP_K,
-                reranking_function=(
-                    (
-                        lambda query, documents: request.app.state.RERANKING_FUNCTION(
-                            query, documents, user=user
-                        )
+        # Split items: user collection must ALWAYS use vector search (never full_context)
+        # even when RAG_FULL_CONTEXT is globally enabled.
+        user_collection_items = [item for item in files if item.get("type") == "user_collection"]
+        other_items = [item for item in files if item.get("type") != "user_collection"]
+        log.info(
+            f"[RAG] retrieval split: other_items={len(other_items)}, "
+            f"user_collection_items={len(user_collection_items)}"
+        )
+
+        # Common kwargs shared by both retrieval calls
+        _retrieval_kwargs = dict(
+            request=request,
+            queries=queries,
+            embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                query, prefix=prefix, user=user
+            ),
+            k=request.app.state.config.TOP_K,
+            reranking_function=(
+                (
+                    lambda query, documents: request.app.state.RERANKING_FUNCTION(
+                        query, documents, user=user
                     )
-                    if request.app.state.RERANKING_FUNCTION
-                    else None
-                ),
-                k_reranker=request.app.state.config.TOP_K_RERANKER,
-                r=request.app.state.config.RELEVANCE_THRESHOLD,
-                hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
-                hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
-                full_context=all_full_context
-                or request.app.state.config.RAG_FULL_CONTEXT,
-                user=user,
-            )
+                )
+                if request.app.state.RERANKING_FUNCTION
+                else None
+            ),
+            k_reranker=request.app.state.config.TOP_K_RERANKER,
+            r=request.app.state.config.RELEVANCE_THRESHOLD,
+            hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
+            hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+            user=user,
+        )
+
+        other_sources = []
+        user_collection_sources = []
+
+        try:
+            # Retrieve other items (files, collections) — respects global full_context setting
+            if other_items:
+                other_sources = await get_sources_from_items(
+                    items=other_items,
+                    full_context=all_full_context
+                    or request.app.state.config.RAG_FULL_CONTEXT,
+                    **_retrieval_kwargs,
+                )
+            else:
+                other_sources = []
+
+            # Retrieve user collection — ALWAYS vector search, never dump all chunks
+            if user_collection_items:
+                user_collection_sources = await get_sources_from_items(
+                    items=user_collection_items,
+                    full_context=False,
+                    **_retrieval_kwargs,
+                )
+            else:
+                user_collection_sources = []
+
+            sources = other_sources + user_collection_sources
         except Exception as e:
             log.exception(e)
 
-        # Log retrieval results
+        # Log retrieval results (raw, before Phase A / cascade)
         for i, src in enumerate(sources):
-            metas = src.get("metadata", [])
-            docs = src.get("document", [])
+            metas = src.get("metadata") or []
+            docs = src.get("document") or []
             name = metas[0].get("name", "?") if metas else "?"
             doc_lens = [len(d) if isinstance(d, str) else 0 for d in docs]
             meta_types = [m.get("type", "-") for m in metas]
@@ -2337,96 +2506,44 @@ async def chat_completion_files_handler(
                 f"chunks={len(docs)} lens={doc_lens} types={meta_types}"
             )
 
-        # Phase A: Expand chunk-level sources to full document-level sources
-        if request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT and sources:
-            sources = expand_sources_to_full_documents(sources)
+        # ── Phase A + 3-tier cascade ──────────────────────────────
+        # User collection: ALWAYS expand + cascade (vector search is file selector)
+        # Other sources:   expand + cascade only when RAG_FULL_DOCUMENT_CONTEXT is on
+        max_tokens = request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS
+
+        if user_collection_sources:
+            user_collection_sources = expand_sources_to_full_documents(
+                user_collection_sources
+            )
             log.info(
-                f"[RAG] Phase A: expanded to {len(sources)} full document sources"
+                f"[RAG] user collection Phase A: expanded to "
+                f"{len(user_collection_sources)} full document sources"
+            )
+            user_collection_sources = await apply_token_budget_cascade(
+                sources=user_collection_sources,
+                max_tokens=max_tokens,
+                request=request,
+                body=body,
+                user=user,
+                event_emitter=__event_emitter__,
             )
 
-            # Phase B: Sub-chat extraction fallback if total tokens exceed budget
-            max_tokens = request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS
-            if max_tokens and max_tokens > 0:
-                total_tokens = estimate_sources_total_tokens(sources)
-                log.info(
-                    f"[RAG] Phase B check: total_tokens={total_tokens}, budget={max_tokens}"
-                )
+        if other_sources and request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT:
+            other_sources = expand_sources_to_full_documents(other_sources)
+            log.info(
+                f"[RAG] other sources Phase A: expanded to "
+                f"{len(other_sources)} full document sources"
+            )
+            other_sources = await apply_token_budget_cascade(
+                sources=other_sources,
+                max_tokens=max_tokens,
+                request=request,
+                body=body,
+                user=user,
+                event_emitter=__event_emitter__,
+            )
 
-                if total_tokens > max_tokens:
-                    log.info(
-                        f"Sources exceed token budget ({total_tokens} > {max_tokens}), "
-                        f"activating sub-chat extraction"
-                    )
-                    try:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "action": "subchat_extraction",
-                                    "description": f"Extracting relevant content from {len(sources)} documents...",
-                                    "done": False,
-                                },
-                            }
-                        )
-
-                        model_id = body["model"]
-                        user_query = get_last_user_message(body["messages"])
-                        concurrency = (
-                            request.app.state.config.RAG_SUBCHAT_CONCURRENCY or 3
-                        )
-                        semaphore = asyncio.Semaphore(concurrency)
-
-                        async def _extract(src_idx, doc_idx, doc_text, doc_name):
-                            async with semaphore:
-                                return (
-                                    src_idx,
-                                    doc_idx,
-                                    await extract_relevant_content_from_document(
-                                        request=request,
-                                        model_id=model_id,
-                                        user_query=user_query,
-                                        document_content=doc_text,
-                                        document_name=doc_name,
-                                        user=user,
-                                    ),
-                                )
-
-                        tasks = []
-                        for src_idx, source in enumerate(sources):
-                            for doc_idx, doc in enumerate(source.get("document", [])):
-                                meta = source.get("metadata", [{}])[
-                                    min(doc_idx, len(source.get("metadata", [])) - 1)
-                                ]
-                                doc_name = (
-                                    meta.get("name")
-                                    or meta.get("source")
-                                    or f"doc_{src_idx}"
-                                )
-                                tasks.append(_extract(src_idx, doc_idx, doc, doc_name))
-
-                        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                        for result in results:
-                            if isinstance(result, Exception):
-                                log.error(f"Sub-chat extraction failed: {result}")
-                                continue
-                            src_idx, doc_idx, extracted = result
-                            sources[src_idx]["document"][doc_idx] = extracted
-
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "action": "subchat_extraction",
-                                    "description": "Content extraction complete",
-                                    "done": True,
-                                },
-                            }
-                        )
-                    except Exception as e:
-                        log.exception(
-                            f"Phase B sub-chat extraction failed, using full content: {e}"
-                        )
+        sources = other_sources + user_collection_sources
 
         unique_ids = set()
         for source in sources or []:
