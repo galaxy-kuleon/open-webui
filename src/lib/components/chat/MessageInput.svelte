@@ -484,6 +484,14 @@
 			$models.find((m) => m.id === model)?.info?.meta?.capabilities?.code_interpreter ?? true
 	);
 
+	// Models with skip_rag: files bypass RAG pipeline (no embedding/vector store),
+	// converted to markdown and injected directly into prompt context.
+	// Defaults to false — only models explicitly configured get this.
+	let skipRagModels = [];
+	$: skipRagModels = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels).filter(
+		(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.skip_rag === true
+	);
+
 	let toggleFilters = [];
 	$: toggleFilters = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
 		.map((id) => ($models.find((model) => model.id === id) || {})?.filters ?? [])
@@ -609,6 +617,16 @@
 					metadata = {
 						language: $settings?.audio?.stt?.language
 					};
+				}
+
+				// Only set skip_rag metadata + bypass processing when ALL selected
+				// models have skip_rag.  In mixed-model scenarios (some skip_rag,
+				// some not), we must NOT set skip_rag metadata — non-skip_rag models
+				// need normal RAG embeddings.
+				const totalModels = atSelectedModel?.id ? 1 : selectedModels.length;
+				if (skipRagModels.length > 0 && skipRagModels.length === totalModels) {
+					metadata = { ...(metadata || {}), skip_rag: true };
+					process = false;
 				}
 
 				// During the file upload, file content is automatically extracted.
@@ -1324,9 +1342,11 @@
 														? $i18n.t('Embedding...')
 														: file.status === 'processing:indexing'
 															? $i18n.t('Generating index...')
-															: file.status === 'uploading'
-																? $i18n.t('Uploading...')
-																: ''}
+															: file.status === 'processing:quick_mode'
+																? $i18n.t('Quick Mode: converting to markdown...')
+																: file.status === 'uploading'
+																	? $i18n.t('Uploading...')
+																	: ''}
 												dismissible={true}
 												edit={true}
 												small={true}

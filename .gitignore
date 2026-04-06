@@ -312,3 +312,13 @@ cypress/screenshots
 .vscode/settings.json
 
 /backend/open_webui/frontend
+
+.playwright-cli/
+
+/knowledge-base/
+/AI_MEMORIES/
+
+# Playwright E2E test artifacts
+e2e/test-results/
+e2e/screenshots/
+playwright-report/

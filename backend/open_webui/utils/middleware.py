@@ -2807,6 +2807,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     form_data = apply_params_to_form_data(form_data, model)
     log.debug(f"form_data: {form_data}")
 
+    # Check if this model should bypass all RAG processing (default False)
+    skip_rag = (
+        ((model.get("info") or {}).get("meta") or {}).get("capabilities") or {}
+    ).get("skip_rag", False)
+
     # Load messages from DB when available — DB preserves structured 'output' items
     # which the frontend strips, causing tool calls to be merged into content.
     chat_id = metadata.get("chat_id")
@@ -2893,6 +2898,30 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     events = []
     sources = []
 
+    # ── LM Studio memory check ───────────────────────────────────
+    # For lmstudio.* models not yet loaded, estimate whether memory
+    # budget allows loading.  Emits a status warning if insufficient.
+    model_id = form_data.get("model", "")
+    if model_id.startswith("lmstudio.") and event_emitter:
+        try:
+            from open_webui.utils.lmstudio_memory import check_can_load_model
+
+            mem_warning = check_can_load_model(model_id)
+            if mem_warning:
+                log.warning("[lmstudio] %s", mem_warning["warning"])
+                await event_emitter(
+                    {
+                        "type": "status",
+                        "data": {
+                            "action": "memory_warning",
+                            "description": mem_warning["warning"],
+                            "done": True,
+                        },
+                    }
+                )
+        except Exception as e:
+            log.debug("LM Studio memory check failed: %s", e)
+
     # Folder "Project" handling
     # Check if the request has chat_id and is inside of a folder
     # Uses lightweight column query — only fetches folder_id, not the full chat JSON blob
@@ -2924,6 +2953,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     if (
         model_knowledge
+        and not skip_rag
         and metadata.get("params", {}).get("function_calling") != "native"
     ):
         await event_emitter(
@@ -3472,7 +3502,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         ((model.get("info") or {}).get("meta") or {}).get("capabilities") or {}
     ).get("file_context", True)
 
-    if file_context_enabled:
+    if file_context_enabled and not skip_rag:
         try:
             form_data, flags = await chat_completion_files_handler(
                 request, form_data, extra_params, user
@@ -3480,6 +3510,153 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             sources.extend(flags.get("sources", []))
         except Exception as e:
             log.exception(e)
+    elif skip_rag:
+        log.info(
+            "[skip_rag] RAG bypass active — skipping query generation, "
+            "user collection, and KB retrieval"
+        )
+
+        # ── Docling-based direct MD injection for skip_rag ─────────
+        # PDF/DOCX/PPTX/XLSX → docling CLI (ocrmac, zh-Hant/zh-Hans/en-US)
+        #   → high-quality Markdown → inject directly into prompt.
+        # Plain text/markdown → inject content as-is.
+        # No embedding.  No vector search.  No RAG template.
+        _SKIP_RAG_MAX_CHARS = 10 * 1024 * 1024  # 10MB cap for raw text injection
+        skip_rag_files = form_data.get("metadata", {}).get("files", None) or []
+        if skip_rag_files:
+            from pathlib import Path as _Path
+            from open_webui.utils.docling import (
+                convert_to_markdown as _docling_convert,
+                SUPPORTED_EXTENSIONS as _DOCLING_EXTS,
+                DoclingError as _DoclingError,
+            )
+            from open_webui.storage.provider import Storage as _Storage
+
+            context_parts = []
+            skip_rag_sources = []
+
+            for item in skip_rag_files:
+                file_id = item.get("id")
+                if not file_id:
+                    continue
+
+                file_obj = Files.get_file_by_id(file_id)
+                if not file_obj:
+                    log.warning(f"[skip_rag] file {file_id} not found — skipping")
+                    continue
+
+                filename = item.get("name") or file_obj.filename
+                # Always use server-side filename for extension routing to
+                # prevent users from bypassing docling via name spoofing.
+                ext = _Path(file_obj.filename).suffix.lower()
+                content = None
+
+                # ── Docling path: PDF, DOCX, PPTX, XLSX ──
+                if ext in _DOCLING_EXTS:
+                    # Prefer cached docling output to avoid re-processing
+                    cached_md = (file_obj.data or {}).get("docling_md")
+                    if cached_md:
+                        content = cached_md
+                        log.info(
+                            f"[skip_rag] using cached docling MD for {filename}"
+                        )
+                    else:
+                        if not file_obj.path:
+                            log.warning(
+                                f"[skip_rag] file {file_id} ({filename}) "
+                                "has no storage path — skipping"
+                            )
+                            continue
+                        try:
+                            raw_path = _Storage.get_file(file_obj.path)
+                            content = await _docling_convert(raw_path)
+                            # Cache so subsequent messages don't re-run docling
+                            Files.update_file_data_by_id(
+                                file_id, {"docling_md": content}
+                            )
+                            log.info(
+                                f"[skip_rag] docling converted {filename} → "
+                                f"{len(content)} chars of markdown"
+                            )
+                        except _DoclingError as e:
+                            log.error(
+                                f"[skip_rag] docling failed for {filename}: {e}"
+                            )
+                            continue
+                else:
+                    # ── Plain text / markdown / other ──
+                    # Try data["content"] first (populated if upload processing ran).
+                    # If empty (e.g. process=false was sent), read raw file from disk.
+                    content = (
+                        (file_obj.data or {}).get("content") or ""
+                    ).strip()
+                    if not content and file_obj.path:
+                        try:
+                            raw_path = _Storage.get_file(file_obj.path)
+                            content = _Path(raw_path).read_text(
+                                encoding="utf-8", errors="replace"
+                            )[:_SKIP_RAG_MAX_CHARS].strip()
+                        except Exception as e:
+                            log.warning(
+                                f"[skip_rag] failed to read raw file "
+                                f"{filename}: {e}"
+                            )
+
+                if not content:
+                    log.warning(
+                        f"[skip_rag] file {file_id} ({filename}) "
+                        "produced no content — skipping"
+                    )
+                    continue
+
+                context_parts.append(f"## File: {filename}\n\n{content}")
+
+                # Build source entry for citation UI
+                skip_rag_sources.append(
+                    {
+                        "source": {
+                            "id": file_id,
+                            "name": filename,
+                            "type": "file",
+                        },
+                        "document": [content],
+                        "metadata": [
+                            {
+                                "file_id": file_id,
+                                "name": filename,
+                                "source": filename,
+                            }
+                        ],
+                    }
+                )
+
+            if context_parts:
+                direct_context = "\n\n---\n\n".join(context_parts)
+
+                if RAG_SYSTEM_CONTEXT:
+                    form_data["messages"] = add_or_update_system_message(
+                        direct_context,
+                        form_data["messages"],
+                        append=True,
+                    )
+                else:
+                    form_data["messages"] = add_or_update_user_message(
+                        direct_context,
+                        form_data["messages"],
+                        append=False,
+                    )
+
+                sources.extend(skip_rag_sources)
+
+                log.info(
+                    f"[skip_rag] injected {len(context_parts)} file(s) "
+                    f"directly into prompt ({len(direct_context)} chars)"
+                )
+            else:
+                log.info(
+                    "[skip_rag] files attached but none produced content — "
+                    "no injection performed"
+                )
 
     # Save the pre-RAG message state so the native tool call loop can
     # restore to the true original (before file-source injection) rather
@@ -3491,8 +3668,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     metadata["user_prompt"] = get_last_user_message(form_data["messages"])
     metadata["sources"] = sources[:] if sources else []
 
-    # If context is not empty, insert it into the messages
-    if sources and prompt:
+    # If context is not empty, insert it into the messages.
+    # When skip_rag is active, content was already injected directly
+    # without RAG template — do not double-inject via this path.
+    if sources and prompt and not skip_rag:
         form_data["messages"] = apply_source_context_to_messages(
             request, form_data["messages"], sources, prompt
         )
@@ -3508,7 +3687,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if len(sources) > 0:
         events.append({"sources": sources})
 
-    if model_knowledge:
+    if model_knowledge and not skip_rag:
         await event_emitter(
             {
                 "type": "status",
@@ -5381,7 +5560,10 @@ async def streaming_chat_response_handler(response, ctx):
                                 include_content=False,
                             )
                             source_context = source_context.strip()
-                            if source_context:
+                            _skip_rag = (
+                                ((model.get("info") or {}).get("meta") or {}).get("capabilities") or {}
+                            ).get("skip_rag", False)
+                            if source_context and not _skip_rag:
                                 rag_content = rag_template(
                                     request.app.state.config.RAG_TEMPLATE,
                                     source_context,

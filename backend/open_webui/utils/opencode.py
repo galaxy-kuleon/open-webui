@@ -580,6 +580,41 @@ def collect_output_files(sandbox_dir: str, start_time: float) -> list[Path]:
     return output_files
 
 
+def _is_safe_output_file(
+    path: Path, output_dir: Path, resolved_output_dir: Path
+) -> bool:
+    """
+    Check if *path* is a safe, non-hidden, regular file inside *output_dir*.
+
+    Returns False (and logs) for:
+      - non-files (directories, broken symlinks)
+      - symlinks that escape outside resolved_output_dir
+      - hidden files or files inside hidden subdirectories
+    """
+    if not path.is_file():
+        return False
+
+    # SECURITY: resolve() follows all symlinks to the real filesystem path.
+    # We then verify the resolved path is still under output_dir.
+    # This prevents symlink escape (e.g. output/evil -> /etc/passwd).
+    resolved_path = path.resolve()
+    try:
+        resolved_path.relative_to(resolved_output_dir)
+    except ValueError:
+        log.warning(
+            f"Skipping symlink escape: {path} resolves to {resolved_path} "
+            f"which is outside {resolved_output_dir}"
+        )
+        return False
+
+    # Skip hidden files / files inside hidden subdirectories.
+    rel = path.relative_to(output_dir)
+    if any(p.startswith(".") for p in rel.parts):
+        return False
+
+    return True
+
+
 def collect_output_files_from_work_dir(work_dir: str) -> list[Path]:
     """
     Collect output files from a WORK_DIR (direct-dir mode, mode 2).
@@ -591,8 +626,20 @@ def collect_output_files_from_work_dir(work_dir: str) -> list[Path]:
       - Skills running in work_dir mode are expected to place their outputs
         in the output/ subdirectory
 
-    No start_time filtering is applied — ALL files in output/ are returned.
-    The output/ directory is the skill's contract for where results go.
+    Three-tier collection strategy (first match wins):
+
+      Tier 1 — Manifest:  If output/.deliverables exists (a newline-separated
+               list of relative paths), return ONLY those files.  This gives
+               skills explicit, data-driven control over what the user sees.
+
+      Tier 2 — Convention: If any file matching ``final-output.*`` exists at
+               any depth, return ONLY those.  This covers skills (like
+               anything-to-docx) that produce a workspace with many
+               intermediates plus one clearly-named deliverable.
+
+      Tier 3 — Fallback:  Return ALL non-hidden files (the original behavior).
+               Provides backwards compatibility for skills that haven't
+               adopted Tier 1 or 2.
 
     Does NOT clean up the work_dir (it's the user's project, not a temp dir).
     """
@@ -606,31 +653,91 @@ def collect_output_files_from_work_dir(work_dir: str) -> list[Path]:
     # compare against the canonical location (no symlink components).
     resolved_output_dir = output_dir.resolve()
 
+    # ------------------------------------------------------------------
+    # Tier 1: Manifest (.deliverables)
+    # ------------------------------------------------------------------
+    manifest_path = output_dir / ".deliverables"
+    if manifest_path.is_file():
+        manifest_files = []
+        for line in manifest_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # SECURITY: reject absolute paths — Path("/base") / "/etc/passwd"
+            # evaluates to "/etc/passwd", completely bypassing output_dir
+            # containment.
+            if os.path.isabs(line):
+                log.warning(
+                    "[opencode] Manifest entry skipped (absolute path): %s",
+                    line,
+                )
+                continue
+            candidate = output_dir / line
+            if _is_safe_output_file(candidate, output_dir, resolved_output_dir):
+                manifest_files.append(candidate)
+            else:
+                log.warning(
+                    f"Manifest entry skipped (missing/unsafe): {line}"
+                )
+        if manifest_files:
+            log.info(
+                f"Tier 1 (manifest): returning {len(manifest_files)} "
+                f"deliverable(s) from {output_dir}"
+            )
+            return manifest_files
+        # Empty/invalid manifest — fall through to lower tiers.
+        log.debug("Manifest found but yielded no valid files; falling through")
+
+    # ------------------------------------------------------------------
+    # Tier 2: Convention — files named final-output.*
+    # ------------------------------------------------------------------
+    final_output_files = []
+    for path in output_dir.rglob("final-output.*"):
+        if _is_safe_output_file(path, output_dir, resolved_output_dir):
+            final_output_files.append(path)
+
+    if final_output_files:
+        # Deduplicate by filename: when a skill runs multiple times in
+        # the same work_dir, each run creates a new workspace (e.g.
+        # output/ws-1/, output/ws-2/) each containing final-output.docx.
+        # rglob picks up ALL of them, causing stale duplicates.
+        # Fix: group by path.name, keep only the most recently modified.
+        seen: dict[str, Path] = {}
+        for path in final_output_files:
+            name = path.name
+            try:
+                # TOCTOU hardening: a file may be deleted between the
+                # _is_safe_output_file check and this stat() comparison.
+                if name not in seen or path.stat().st_mtime > seen[name].stat().st_mtime:
+                    seen[name] = path
+            except OSError:
+                # File disappeared — skip it silently.
+                continue
+        if len(seen) < len(final_output_files):
+            log.info(
+                f"Tier 2 dedup: {len(final_output_files)} candidates "
+                f"reduced to {len(seen)} by keeping newest per filename"
+            )
+        final_output_files = list(seen.values())
+
+        log.info(
+            f"Tier 2 (final-output convention): returning "
+            f"{len(final_output_files)} deliverable(s) from {output_dir}"
+        )
+        return final_output_files
+
+    # ------------------------------------------------------------------
+    # Tier 3: Fallback — return everything (original behavior)
+    # ------------------------------------------------------------------
     output_files = []
     for path in output_dir.rglob("*"):
-        if not path.is_file():
-            continue
+        if _is_safe_output_file(path, output_dir, resolved_output_dir):
+            output_files.append(path)
 
-        # SECURITY: resolve() follows all symlinks to the real filesystem path.
-        # We then verify the resolved path is still under output_dir.
-        # This prevents symlink escape (e.g. output/evil -> /etc/passwd).
-        resolved_path = path.resolve()
-        try:
-            resolved_path.relative_to(resolved_output_dir)
-        except ValueError:
-            log.warning(
-                f"Skipping symlink escape: {path} resolves to {resolved_path} "
-                f"which is outside {resolved_output_dir}"
-            )
-            continue
-
-        # Skip hidden files even within output/
-        rel = path.relative_to(output_dir)
-        if any(p.startswith(".") for p in rel.parts):
-            continue
-        output_files.append(path)
-
-    log.info(f"Collected {len(output_files)} output file(s) from {output_dir}")
+    log.info(
+        f"Tier 3 (fallback): collected {len(output_files)} "
+        f"output file(s) from {output_dir}"
+    )
     return output_files
 
 

@@ -97,6 +97,7 @@ def process_uploaded_file(
     db: Optional[Session] = None,
 ):
     def _process_handler(db_session):
+        # ── Normal RAG processing path ──
         try:
             content_type = file.content_type
 

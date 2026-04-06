@@ -200,6 +200,394 @@ class TestCollectOutputFilesFromWorkDir:
 
 
 # ---------------------------------------------------------------------------
+# 2b. Three-tier deliverable collection
+# ---------------------------------------------------------------------------
+
+
+class TestCollectOutputTieredDeliverables:
+    """Verify the three-tier collection: manifest > final-output > fallback."""
+
+    # -- Tier 1: .deliverables manifest --
+
+    def test_tier1_manifest_returns_only_listed_files(self):
+        """When .deliverables manifest exists, return ONLY the listed files."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_tier1_") as td:
+            out_dir = os.path.join(td, "output")
+            workspace = os.path.join(out_dir, "report-atd-workspace")
+            os.makedirs(workspace)
+
+            # Deliverable
+            Path(workspace, "final-output.docx").write_bytes(b"PK-docx")
+            # Intermediates
+            dsl_dir = os.path.join(workspace, "dsl")
+            os.makedirs(dsl_dir)
+            Path(dsl_dir, "page-1.xml").write_text("<page/>")
+            Path(workspace, "output.docx").write_bytes(b"PK-intermediate")
+            ocr_dir = os.path.join(workspace, "ocr-output")
+            os.makedirs(ocr_dir)
+            Path(ocr_dir, "page-1.json").write_text('{"text":"hi"}')
+
+            # Manifest — only lists the deliverable
+            manifest = os.path.join(out_dir, ".deliverables")
+            Path(manifest).write_text(
+                "# Deliverables for this skill run\n"
+                "report-atd-workspace/final-output.docx\n"
+            )
+
+            result = collect_output_files_from_work_dir(td)
+            assert len(result) == 1
+            assert result[0].name == "final-output.docx"
+
+    def test_tier1_manifest_multiple_entries(self):
+        """Manifest can list multiple deliverables."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_tier1m_") as td:
+            out_dir = os.path.join(td, "output")
+            os.makedirs(out_dir)
+
+            Path(out_dir, "report.docx").write_bytes(b"PK-docx")
+            Path(out_dir, "summary.pdf").write_bytes(b"%PDF-fake")
+            Path(out_dir, "intermediate.xml").write_text("<xml/>")
+
+            Path(out_dir, ".deliverables").write_text(
+                "report.docx\nsummary.pdf\n"
+            )
+
+            result = collect_output_files_from_work_dir(td)
+            names = sorted(p.name for p in result)
+            assert names == ["report.docx", "summary.pdf"]
+
+    def test_tier1_manifest_skips_missing_entries(self):
+        """Manifest entries pointing to nonexistent files are skipped."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_tier1miss_") as td:
+            out_dir = os.path.join(td, "output")
+            os.makedirs(out_dir)
+            Path(out_dir, "exists.docx").write_bytes(b"PK")
+
+            Path(out_dir, ".deliverables").write_text(
+                "exists.docx\nno-such-file.pdf\n"
+            )
+
+            result = collect_output_files_from_work_dir(td)
+            assert len(result) == 1
+            assert result[0].name == "exists.docx"
+
+    def test_tier1_manifest_empty_falls_through(self):
+        """An empty manifest (or all entries invalid) falls through to Tier 2/3."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_tier1empty_") as td:
+            out_dir = os.path.join(td, "output")
+            os.makedirs(out_dir)
+            Path(out_dir, "data.csv").write_text("a,b\n1,2")
+
+            # Manifest with only comments and blanks
+            Path(out_dir, ".deliverables").write_text(
+                "# nothing here\n\n"
+            )
+
+            result = collect_output_files_from_work_dir(td)
+            names = [p.name for p in result]
+            assert "data.csv" in names  # Fell through to Tier 3
+
+    def test_tier1_manifest_ignores_comments_and_blanks(self):
+        """Manifest parser skips comment lines and blank lines."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_tier1comments_") as td:
+            out_dir = os.path.join(td, "output")
+            os.makedirs(out_dir)
+            Path(out_dir, "result.docx").write_bytes(b"PK")
+
+            Path(out_dir, ".deliverables").write_text(
+                "# comment\n\n  \nresult.docx\n# another comment\n"
+            )
+
+            result = collect_output_files_from_work_dir(td)
+            assert len(result) == 1
+            assert result[0].name == "result.docx"
+
+    # -- Tier 2: final-output.* convention --
+
+    def test_tier2_final_output_convention(self):
+        """When no manifest but final-output.* exists, return only those."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_tier2_") as td:
+            out_dir = os.path.join(td, "output")
+            workspace = os.path.join(out_dir, "my-atd-workspace")
+            os.makedirs(workspace)
+
+            # Deliverable (final-output.docx)
+            Path(workspace, "final-output.docx").write_bytes(b"PK-docx")
+            # Intermediates
+            Path(workspace, "output.docx").write_bytes(b"PK-intermediate")
+            dsl = os.path.join(workspace, "dsl")
+            os.makedirs(dsl)
+            Path(dsl, "page-1.xml").write_text("<page/>")
+            Path(dsl, "page-2.xml").write_text("<page/>")
+            img_dir = os.path.join(workspace, "input-images")
+            os.makedirs(img_dir)
+            Path(img_dir, "page-1.png").write_bytes(b"\x89PNG")
+            ocr = os.path.join(workspace, "ocr-output")
+            os.makedirs(ocr)
+            Path(ocr, "page-1.json").write_text("{}")
+
+            result = collect_output_files_from_work_dir(td)
+            assert len(result) == 1
+            assert result[0].name == "final-output.docx"
+
+    def test_tier2_final_output_multiple_formats(self):
+        """Multiple final-output files (e.g. .docx and .pdf) are all returned."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_tier2multi_") as td:
+            out_dir = os.path.join(td, "output")
+            os.makedirs(out_dir)
+            Path(out_dir, "final-output.docx").write_bytes(b"PK-docx")
+            Path(out_dir, "final-output.pdf").write_bytes(b"%PDF")
+            Path(out_dir, "intermediate.xml").write_text("<xml/>")
+
+            result = collect_output_files_from_work_dir(td)
+            names = sorted(p.name for p in result)
+            assert names == ["final-output.docx", "final-output.pdf"]
+
+    def test_tier2_final_output_nested_deep(self):
+        """final-output.* is found even in deeply nested directories."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_tier2deep_") as td:
+            deep = os.path.join(td, "output", "a", "b", "c")
+            os.makedirs(deep)
+            Path(deep, "final-output.xlsx").write_bytes(b"PK-xlsx")
+            # Red herring at a sibling level
+            Path(os.path.join(td, "output", "a"), "junk.tmp").write_text("tmp")
+
+            result = collect_output_files_from_work_dir(td)
+            assert len(result) == 1
+            assert result[0].name == "final-output.xlsx"
+
+    # -- Tier 3: Fallback (existing behavior) --
+
+    def test_tier3_fallback_returns_everything(self):
+        """When no manifest and no final-output, return all non-hidden files."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_tier3_") as td:
+            out_dir = os.path.join(td, "output")
+            os.makedirs(out_dir)
+            Path(out_dir, "report.pdf").write_bytes(b"%PDF")
+            Path(out_dir, "data.csv").write_text("x,y\n1,2")
+            Path(out_dir, ".hidden").write_text("hidden")
+
+            result = collect_output_files_from_work_dir(td)
+            names = sorted(p.name for p in result)
+            assert names == ["data.csv", "report.pdf"]
+
+    # -- Tier precedence --
+
+    def test_manifest_takes_precedence_over_final_output(self):
+        """Tier 1 (manifest) beats Tier 2 (final-output) when both present."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_precedence_") as td:
+            out_dir = os.path.join(td, "output")
+            os.makedirs(out_dir)
+            Path(out_dir, "final-output.docx").write_bytes(b"PK")
+            Path(out_dir, "custom-report.pdf").write_bytes(b"%PDF")
+
+            # Manifest lists the custom report, NOT final-output
+            Path(out_dir, ".deliverables").write_text("custom-report.pdf\n")
+
+            result = collect_output_files_from_work_dir(td)
+            assert len(result) == 1
+            assert result[0].name == "custom-report.pdf"
+
+    def test_tier1_manifest_blocks_path_traversal(self):
+        """Manifest entries with ../ path traversal are rejected as unsafe."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_traversal_") as td:
+            out_dir = os.path.join(td, "output")
+            os.makedirs(out_dir)
+
+            # Place a file outside output/ that traversal would reach
+            Path(td, "secret.txt").write_text("sensitive")
+
+            # Place a legit file inside output/
+            Path(out_dir, "safe.docx").write_bytes(b"PK")
+
+            # Manifest tries to escape via path traversal
+            Path(out_dir, ".deliverables").write_text(
+                "../secret.txt\nsafe.docx\n"
+            )
+
+            result = collect_output_files_from_work_dir(td)
+            names = [p.name for p in result]
+            assert "safe.docx" in names
+            assert "secret.txt" not in names
+
+    # -- Tier 2: dedup across multiple workspaces --
+
+    def test_tier2_dedup_two_workspaces_same_filename(self):
+        """Two workspaces with final-output.docx: only the newest is returned."""
+        import time
+
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_dedup2_") as td:
+            out_dir = os.path.join(td, "output")
+            ws1 = os.path.join(out_dir, "report-atd-workspace")
+            ws2 = os.path.join(out_dir, "report-atd-workspace-2")
+            os.makedirs(ws1)
+            os.makedirs(ws2)
+
+            # Old workspace (stale)
+            old_file = Path(ws1, "final-output.docx")
+            old_file.write_bytes(b"PK-old-content")
+            old_mtime = time.time() - 3600  # 1 hour ago
+            os.utime(old_file, (old_mtime, old_mtime))
+
+            # New workspace (current run)
+            new_file = Path(ws2, "final-output.docx")
+            new_file.write_bytes(b"PK-new-content")
+            new_mtime = time.time()
+            os.utime(new_file, (new_mtime, new_mtime))
+
+            result = collect_output_files_from_work_dir(td)
+            assert len(result) == 1
+            assert result[0].name == "final-output.docx"
+            assert result[0].read_bytes() == b"PK-new-content"
+
+    def test_tier2_dedup_different_extensions_no_collision(self):
+        """Two workspaces with different extensions: both are returned (no dedup)."""
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_dedup_ext_") as td:
+            out_dir = os.path.join(td, "output")
+            ws1 = os.path.join(out_dir, "ws-1")
+            ws2 = os.path.join(out_dir, "ws-2")
+            os.makedirs(ws1)
+            os.makedirs(ws2)
+
+            Path(ws1, "final-output.docx").write_bytes(b"PK-docx")
+            Path(ws2, "final-output.pdf").write_bytes(b"%PDF")
+
+            result = collect_output_files_from_work_dir(td)
+            names = sorted(p.name for p in result)
+            assert names == ["final-output.docx", "final-output.pdf"]
+
+    def test_tier2_dedup_three_workspaces_same_file(self):
+        """Three workspaces with same final-output.docx: only newest returned."""
+        import time
+
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_dedup3_") as td:
+            out_dir = os.path.join(td, "output")
+            base_time = time.time()
+
+            for i, age_offset in enumerate([7200, 3600, 0]):
+                ws = os.path.join(out_dir, f"workspace-{i + 1}")
+                os.makedirs(ws)
+                f = Path(ws, "final-output.docx")
+                f.write_bytes(f"PK-content-{i + 1}".encode())
+                mtime = base_time - age_offset
+                os.utime(f, (mtime, mtime))
+
+            result = collect_output_files_from_work_dir(td)
+            assert len(result) == 1
+            assert result[0].name == "final-output.docx"
+            # workspace-3 has age_offset=0 (most recent)
+            assert result[0].read_bytes() == b"PK-content-3"
+
+    def test_tier2_dedup_survives_file_deleted_during_stat(self):
+        """TOCTOU hardening: if a file vanishes between rglob and dedup stat, no crash."""
+        import time
+        from unittest.mock import patch
+
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_toctou_") as td:
+            out_dir = os.path.join(td, "output")
+            ws1 = os.path.join(out_dir, "ws-1")
+            ws2 = os.path.join(out_dir, "ws-2")
+            os.makedirs(ws1)
+            os.makedirs(ws2)
+
+            old_file = Path(ws1, "final-output.docx")
+            old_file.write_bytes(b"PK-old")
+            old_mtime = time.time() - 3600
+            os.utime(old_file, (old_mtime, old_mtime))
+
+            new_file = Path(ws2, "final-output.docx")
+            new_file.write_bytes(b"PK-new")
+
+            # Patch Path.stat to raise OSError on the second call,
+            # simulating the old file being deleted mid-comparison.
+            original_stat = Path.stat
+            call_count = 0
+
+            def flaky_stat(self_, *args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                # Let the first stat succeed (new_file or old_file depending on
+                # rglob order), then blow up on the comparison stat to simulate
+                # a TOCTOU race.
+                if call_count == 2:
+                    raise FileNotFoundError("TOCTOU race simulation")
+                return original_stat(self_, *args, **kwargs)
+
+            with patch.object(Path, "stat", flaky_stat):
+                result = collect_output_files_from_work_dir(td)
+
+            # Should still return at least one file (the one that didn't vanish)
+            assert len(result) >= 1
+            assert all(p.name == "final-output.docx" for p in result)
+
+    def test_realistic_anything_to_docx_workspace(self):
+        """
+        End-to-end: simulates the exact anything-to-docx workspace structure.
+        Without any manifest, Tier 2 should pick up only final-output.docx.
+        """
+        from open_webui.utils.opencode import collect_output_files_from_work_dir
+
+        with tempfile.TemporaryDirectory(prefix="test_atd_") as td:
+            out_dir = os.path.join(td, "output")
+            ws = os.path.join(out_dir, "report-atd-workspace")
+
+            # Build the exact workspace structure from the bug report
+            for subdir in [
+                "dsl", "dsl-vlm", "ocr-output", "input-images",
+            ]:
+                os.makedirs(os.path.join(ws, subdir))
+
+            # Intermediates
+            Path(ws, "output.docx").write_bytes(b"PK-untranslated")
+            for i in range(1, 4):
+                Path(ws, "dsl", f"page-{i}.xml").write_text(f"<page>{i}</page>")
+                Path(ws, "dsl-vlm", f"page-{i}.xml").write_text(f"<page>{i}</page>")
+                Path(ws, "input-images", f"page-{i}.png").write_bytes(b"\x89PNG")
+                Path(ws, "ocr-output", f"page-{i}.json").write_text(f'{{"page":{i}}}')
+
+            # THE deliverable
+            Path(ws, "final-output.docx").write_bytes(b"PK-final-docx-content")
+
+            result = collect_output_files_from_work_dir(td)
+
+            # Tier 2 should return ONLY final-output.docx
+            assert len(result) == 1
+            assert result[0].name == "final-output.docx"
+            # Verify it's the right one (not output.docx)
+            assert result[0].read_bytes() == b"PK-final-docx-content"
+
+
+# ---------------------------------------------------------------------------
 # 3. sync_opencode_config_to_dir — idempotency + permission format
 # ---------------------------------------------------------------------------
 
@@ -292,32 +680,40 @@ class TestSyncOpencodeConfigToDir:
                     config["agent"]["general"]["model"] == "lmstudio/qwen3.5-122b-a10b"
                 )
 
-    def test_permission_format_matches_generate(self):
+    def test_permission_format_matches_generate(self, monkeypatch):
         """Both config producers must use the same 'allow' string format."""
         from open_webui.utils.opencode import (
             generate_opencode_config,
             sync_opencode_config_to_dir,
         )
 
-        # generate_opencode_config writes to ~/.config/opencode/opencode.json
-        # We test that the permission value is the string "allow"
-        config = generate_opencode_config(
-            openai_api_base_urls=["http://localhost:11434"],
-            openai_api_keys=["test-key"],
-            ollama_base_urls=[],
-        )
-        assert config["permission"] == "allow"
-        assert isinstance(config["permission"], str)
+        with tempfile.TemporaryDirectory(prefix="test_home_") as home_dir:
+            monkeypatch.setenv("HOME", home_dir)
+            config_dir = Path(home_dir) / ".config" / "opencode"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            # Pre-populate with permission: "allow" string format —
+            # generate_opencode_config uses setdefault so it preserves this.
+            (config_dir / "opencode.json").write_text(
+                json.dumps({"permission": "allow"})
+            )
 
-        # sync_opencode_config_to_dir writes permission: "allow"
-        with tempfile.TemporaryDirectory(prefix="test_perm_") as td:
-            sync_opencode_config_to_dir(td)
-            project_config = json.loads((Path(td) / "opencode.json").read_text())
-            assert project_config["permission"] == "allow"
-            assert isinstance(project_config["permission"], str)
+            config = generate_opencode_config(
+                openai_api_base_urls=["http://localhost:11434"],
+                openai_api_keys=["test-key"],
+                ollama_base_urls=[],
+            )
+            assert config["permission"] == "allow"
+            assert isinstance(config["permission"], str)
 
-        # Both produce the exact same format
-        assert config["permission"] == project_config["permission"]
+            # sync_opencode_config_to_dir writes permission: "allow"
+            with tempfile.TemporaryDirectory(prefix="test_perm_") as td:
+                sync_opencode_config_to_dir(td)
+                project_config = json.loads((Path(td) / "opencode.json").read_text())
+                assert project_config["permission"] == "allow"
+                assert isinstance(project_config["permission"], str)
+
+            # Both produce the exact same format
+            assert config["permission"] == project_config["permission"]
 
 
 # ---------------------------------------------------------------------------
@@ -328,55 +724,120 @@ class TestSyncOpencodeConfigToDir:
 class TestGenerateOpencodeConfig:
     """Verify generate_opencode_config produces valid provider entries."""
 
-    def test_openai_provider_mapping(self):
+    def test_openai_provider_mapping(self, monkeypatch):
         from open_webui.utils.opencode import generate_opencode_config
 
-        config = generate_opencode_config(
-            openai_api_base_urls=["http://api.openai.com/v1"],
-            openai_api_keys=["sk-test"],
-            ollama_base_urls=[],
-        )
-        assert "openai" in config["provider"]
-        p = config["provider"]["openai"]
-        assert p["baseURL"] == "http://api.openai.com/v1"
-        assert p["apiKey"] == "sk-test"
+        with tempfile.TemporaryDirectory(prefix="test_home_") as home_dir:
+            monkeypatch.setenv("HOME", home_dir)
+            config_dir = Path(home_dir) / ".config" / "opencode"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            # Pre-populate with an "openai" provider so generate_opencode_config
+            # will update it (it only updates existing providers).
+            (config_dir / "opencode.json").write_text(
+                json.dumps({
+                    "provider": {
+                        "openai": {
+                            "baseURL": "http://old.example.com/v1",
+                            "apiKey": "old-key",
+                        }
+                    }
+                })
+            )
 
-    def test_ollama_provider_adds_v1(self):
+            config = generate_opencode_config(
+                openai_api_base_urls=["http://api.openai.com/v1"],
+                openai_api_keys=["sk-test"],
+                ollama_base_urls=[],
+            )
+            assert "openai" in config["provider"]
+            p = config["provider"]["openai"]
+            assert p["baseURL"] == "http://api.openai.com/v1"
+            assert p["apiKey"] == "sk-test"
+
+    def test_ollama_provider_adds_v1(self, monkeypatch):
         from open_webui.utils.opencode import generate_opencode_config
 
-        config = generate_opencode_config(
-            openai_api_base_urls=[],
-            openai_api_keys=[],
-            ollama_base_urls=["http://localhost:11434"],
-        )
-        assert "ollama" in config["provider"]
-        assert config["provider"]["ollama"]["baseURL"] == "http://localhost:11434/v1"
+        with tempfile.TemporaryDirectory(prefix="test_home_") as home_dir:
+            monkeypatch.setenv("HOME", home_dir)
+            config_dir = Path(home_dir) / ".config" / "opencode"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            # Pre-populate with an "ollama" provider so it gets updated.
+            (config_dir / "opencode.json").write_text(
+                json.dumps({
+                    "provider": {
+                        "ollama": {
+                            "baseURL": "http://old-ollama:11434/v1",
+                        }
+                    }
+                })
+            )
 
-    def test_empty_urls_skipped(self):
+            config = generate_opencode_config(
+                openai_api_base_urls=[],
+                openai_api_keys=[],
+                ollama_base_urls=["http://localhost:11434"],
+            )
+            assert "ollama" in config["provider"]
+            assert config["provider"]["ollama"]["baseURL"] == "http://localhost:11434/v1"
+
+    def test_empty_urls_skipped(self, monkeypatch):
         from open_webui.utils.opencode import generate_opencode_config
 
-        config = generate_opencode_config(
-            openai_api_base_urls=["", "http://valid.com/v1"],
-            openai_api_keys=["", "key2"],
-            ollama_base_urls=[""],
-        )
-        # First openai entry (empty URL) should be skipped
-        assert "openai" not in config["provider"]  # empty, skipped
-        assert "openai_1" in config["provider"]
-        # Empty ollama should be skipped
-        assert "ollama" not in config["provider"]
+        with tempfile.TemporaryDirectory(prefix="test_home_") as home_dir:
+            monkeypatch.setenv("HOME", home_dir)
+            config_dir = Path(home_dir) / ".config" / "opencode"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            # Pre-populate with "openai_1" provider (the one that should be updated)
+            # but NOT "openai" or "ollama" (those should remain absent).
+            (config_dir / "opencode.json").write_text(
+                json.dumps({
+                    "provider": {
+                        "openai_1": {
+                            "baseURL": "http://old.example.com/v1",
+                            "apiKey": "old-key",
+                        }
+                    }
+                })
+            )
 
-    def test_prefix_id_used_as_provider_id(self):
+            config = generate_opencode_config(
+                openai_api_base_urls=["", "http://valid.com/v1"],
+                openai_api_keys=["", "key2"],
+                ollama_base_urls=[""],
+            )
+            # First openai entry (empty URL) should be skipped
+            assert "openai" not in config["provider"]  # empty, skipped
+            assert "openai_1" in config["provider"]
+            # Empty ollama should be skipped
+            assert "ollama" not in config["provider"]
+
+    def test_prefix_id_used_as_provider_id(self, monkeypatch):
         from open_webui.utils.opencode import generate_opencode_config
 
-        config = generate_opencode_config(
-            openai_api_base_urls=["http://lmstudio.local/v1"],
-            openai_api_keys=["lm-key"],
-            ollama_base_urls=[],
-            openai_api_configs={"0": {"prefix_id": "lmstudio"}},
-        )
-        assert "lmstudio" in config["provider"]
-        assert "openai" not in config["provider"]
+        with tempfile.TemporaryDirectory(prefix="test_home_") as home_dir:
+            monkeypatch.setenv("HOME", home_dir)
+            config_dir = Path(home_dir) / ".config" / "opencode"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            # Pre-populate with "lmstudio" provider (the prefix_id) but NOT "openai".
+            (config_dir / "opencode.json").write_text(
+                json.dumps({
+                    "provider": {
+                        "lmstudio": {
+                            "baseURL": "http://old-lmstudio.local/v1",
+                            "apiKey": "old-key",
+                        }
+                    }
+                })
+            )
+
+            config = generate_opencode_config(
+                openai_api_base_urls=["http://lmstudio.local/v1"],
+                openai_api_keys=["lm-key"],
+                ollama_base_urls=[],
+                openai_api_configs={"0": {"prefix_id": "lmstudio"}},
+            )
+            assert "lmstudio" in config["provider"]
+            assert "openai" not in config["provider"]
 
     def test_normalizes_stale_top_level_model_from_agent_config(self, monkeypatch):
         from open_webui.utils.opencode import generate_opencode_config
