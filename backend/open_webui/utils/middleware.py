@@ -3730,7 +3730,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 import shutil as _shutil
                 import json as _json
                 from open_webui.tools.builtin import run_agent_skill
-                from open_webui.models.files import Files
                 from open_webui.storage.provider import UPLOAD_DIR
 
                 work_dir = matched_meta.get("work_dir", "")
