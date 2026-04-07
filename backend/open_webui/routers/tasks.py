@@ -221,7 +221,7 @@ async def generate_title(
     content = title_generation_template(template, form_data["messages"], user)
 
     max_tokens = (
-        models[task_model_id].get("info", {}).get("params", {}).get("max_tokens", 1000)
+        models[task_model_id].get("info", {}).get("params", {}).get("max_tokens", 16000)
     )
 
     payload = {

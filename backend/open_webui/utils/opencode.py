@@ -71,129 +71,19 @@ def generate_opencode_config(
     model_override: str | None = None,
 ) -> dict:
     """
-    Update ~/.config/opencode/opencode.json with provider info from OpenWebUI.
+    Read ~/.config/opencode/opencode.json and return it as-is.
 
-    Reads the existing config and updates provider connection details
-    (baseURL, apiKey). Existing model settings are preserved unless the
-    top-level model is missing or stale relative to the configured agent model.
-
-    If model_override is given (e.g. "lmstudio/qwen3.5-122b-a10b"), it replaces
-    model, and all agent.*.model entries.
-
-    Returns the merged config dict.
+    The local opencode.json is fully authoritative — this function never
+    writes to it. Provider connection details, API keys, model settings,
+    and agent configs are all left untouched.
     """
-    config_dir = Path.home() / ".config" / "opencode"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "opencode.json"
-
-    # Read existing config — this is the user's curated template
-    existing_config = {}
+    config_path = Path.home() / ".config" / "opencode" / "opencode.json"
     if config_path.exists():
         try:
-            existing_config = json.loads(config_path.read_text())
+            return json.loads(config_path.read_text())
         except (json.JSONDecodeError, OSError):
             pass
-
-    existing_providers = existing_config.get("provider", {})
-
-    # Update provider connection details from OpenWebUI, preserving everything else
-    api_configs = openai_api_configs or {}
-    for i, (url, key) in enumerate(zip(openai_api_base_urls, openai_api_keys)):
-        if not url:
-            continue
-
-        cfg = api_configs.get(str(i), {})
-        prefix_id = cfg.get("prefix_id", "")
-        provider_id = prefix_id if prefix_id else (f"openai_{i}" if i > 0 else "openai")
-        base_url = url.rstrip("/")
-
-        if provider_id in existing_providers:
-            # Preserve existing entry, only update connection details
-            existing = existing_providers[provider_id]
-            if "options" in existing:
-                existing["options"]["baseURL"] = base_url
-                if key:
-                    existing["options"]["apiKey"] = key
-            else:
-                existing["baseURL"] = base_url
-                if key:
-                    existing["apiKey"] = key
-        # If provider not in existing config, skip — don't pollute user's config
-        # with providers that may not have the correct opencode format.
-
-    # Ollama: only update existing entries, don't add new ones
-    for i, url in enumerate(ollama_base_urls):
-        if not url:
-            continue
-        provider_id = f"ollama_{i}" if i > 0 else "ollama"
-        base = url.rstrip("/")
-        if not base.endswith("/v1"):
-            base = f"{base}/v1"
-        if provider_id in existing_providers:
-            existing = existing_providers[provider_id]
-            if "options" in existing:
-                existing["options"]["baseURL"] = base
-            else:
-                existing["baseURL"] = base
-
-    # Merge: start from existing config, update provider
-    config = existing_config.copy()
-    config["provider"] = existing_providers
-    config.setdefault("$schema", "https://opencode.ai/config.json")
-    config.setdefault("permission", {"*": "allow"})
-
-    # Optional: override model across all agent configs
-    if model_override:
-        config["model"] = model_override
-        if "agent" in config:
-            for agent_cfg in config["agent"].values():
-                if isinstance(agent_cfg, dict) and "model" in agent_cfg:
-                    agent_cfg["model"] = model_override
-    else:
-        current_model = config.get("model") or ""
-        current_provider_id, _, current_model_name = current_model.partition("/")
-        current_provider_cfg = config.get("provider", {}).get(current_provider_id, {})
-        current_provider_models = (
-            current_provider_cfg.get("models", {})
-            if isinstance(current_provider_cfg, dict)
-            else {}
-        )
-        current_model_known = bool(
-            current_model_name
-            and (
-                not current_provider_models
-                or current_model_name in current_provider_models
-            )
-        )
-
-        agent_models = {
-            agent_cfg.get("model")
-            for agent_cfg in config.get("agent", {}).values()
-            if isinstance(agent_cfg, dict) and agent_cfg.get("model")
-        }
-        if (not current_model or not current_model_known) and len(agent_models) == 1:
-            candidate_model = next(iter(agent_models))
-            candidate_provider_id, _, candidate_model_name = candidate_model.partition(
-                "/"
-            )
-            candidate_provider_cfg = config.get("provider", {}).get(
-                candidate_provider_id, {}
-            )
-            candidate_provider_models = (
-                candidate_provider_cfg.get("models", {})
-                if isinstance(candidate_provider_cfg, dict)
-                else {}
-            )
-            if candidate_model_name and (
-                not candidate_provider_models
-                or candidate_model_name in candidate_provider_models
-            ):
-                config["model"] = candidate_model
-
-    config_path.write_text(json.dumps(config, indent=2))
-
-    log.debug(f"Wrote opencode config to {config_path}")
-    return config
+    return {}
 
 
 def sync_opencode_config_to_dir(target_dir: str) -> None:
