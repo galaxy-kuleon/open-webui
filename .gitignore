@@ -322,3 +322,32 @@ cypress/screenshots
 e2e/test-results/
 e2e/screenshots/
 playwright-report/
+
+# Screenshots / images (testing & documentation artifacts)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.tiff
+*.ico
+
+# AI agent memory and config directories
+.claude/
+AI_MEMORIES/
+backend/GLM-4.5V.pdf
+backend/open_webui_data.zip
+
+.claude/settings.local.json
+.claude/agent-memory/memory-architect/project_context.md
+
+AI_MEMORIES/_INDEX.md
+AI_MEMORIES/architecture.md
+AI_MEMORIES/environment.md
+AI_MEMORIES/errors-and-lessons.md
+AI_MEMORIES/goals.md
+AI_MEMORIES/todos.md
+AI_MEMORIES/unexplored.md
+
+.webui_secret_key
