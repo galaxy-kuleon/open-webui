@@ -28,6 +28,11 @@
 	let description = '';
 	let content = '';
 
+	// Agent skill meta fields
+	let metaType: string = '';
+	let workDir: string = '';
+	let diskPath: string = '';
+
 	let accessGrants = [];
 	let showAccessControlModal = false;
 	let hasManualEdit = false;
@@ -79,13 +84,18 @@
 		}
 		loading = true;
 
+		const meta: Record<string, any> = { tags: [] };
+		if (metaType) meta.type = metaType;
+		if (workDir.trim()) meta.work_dir = workDir.trim();
+		if (diskPath.trim()) meta.disk_path = diskPath.trim();
+
 		await onSubmit({
 			id,
 			name,
 			description,
 			content,
 			is_active: true,
-			meta: { tags: [] },
+			meta,
 			access_grants: accessGrants
 		});
 
@@ -100,6 +110,12 @@
 			description = skill.description || '';
 			content = skill.content || '';
 			accessGrants = skill?.access_grants === undefined ? [] : skill?.access_grants;
+
+			if (skill.meta) {
+				metaType = skill.meta.type || '';
+				workDir = skill.meta.work_dir || '';
+				diskPath = skill.meta.disk_path || '';
+			}
 
 			if (name) hasManualName = true;
 			if (description) hasManualDescription = true;
@@ -224,6 +240,69 @@
 								{disabled}
 							/>
 						</Tooltip>
+					</div>
+
+					<!-- Execution type + agent skill settings -->
+					<div class="mt-2 px-1 flex flex-col gap-2">
+						<div class="flex items-center gap-3">
+							<label class="text-xs text-gray-500 dark:text-gray-400 shrink-0 w-20"
+								>{$i18n.t('Type')}</label
+							>
+							<select
+								class="text-xs bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-lg px-2 py-1 outline-hidden"
+								bind:value={metaType}
+								{disabled}
+							>
+								<option value="">{$i18n.t('Markdown (default)')}</option>
+								<option value="agent_skill">{$i18n.t('Agent Skill (OpenCode)')}</option>
+							</select>
+						</div>
+
+						{#if metaType === 'agent_skill'}
+							<div class="flex items-center gap-3">
+								<label class="text-xs text-gray-500 dark:text-gray-400 shrink-0 w-20"
+									>{$i18n.t('Work Dir')}</label
+								>
+								<Tooltip
+									className="w-full"
+									content={$i18n.t(
+										'Absolute path to the project directory. OpenCode runs directly here (direct-dir mode). Takes precedence over Disk Path.'
+									)}
+									placement="top-start"
+								>
+									<input
+										class="w-full text-xs bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-lg px-2 py-1 font-mono outline-hidden"
+										type="text"
+										placeholder="/path/to/project"
+										aria-label={$i18n.t('Work Directory')}
+										bind:value={workDir}
+										{disabled}
+									/>
+								</Tooltip>
+							</div>
+
+							<div class="flex items-center gap-3">
+								<label class="text-xs text-gray-500 dark:text-gray-400 shrink-0 w-20"
+									>{$i18n.t('Disk Path')}</label
+								>
+								<Tooltip
+									className="w-full"
+									content={$i18n.t(
+										'Absolute path to the skill files directory. Used in sandbox mode when Work Dir is not set.'
+									)}
+									placement="top-start"
+								>
+									<input
+										class="w-full text-xs bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-lg px-2 py-1 font-mono outline-hidden"
+										type="text"
+										placeholder="/path/to/.claude/skills/my-skill"
+										aria-label={$i18n.t('Disk Path')}
+										bind:value={diskPath}
+										{disabled}
+									/>
+								</Tooltip>
+							</div>
+						{/if}
 					</div>
 				</div>
 
