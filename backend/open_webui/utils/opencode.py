@@ -579,17 +579,17 @@ def collect_output_files_from_work_dir(work_dir: str) -> list[Path]:
         log.debug("Manifest found but yielded no valid files; falling through")
 
     # ------------------------------------------------------------------
-    # Tier 2: Convention — files named final-output.*
+    # Tier 2: Convention — all *.docx files
     # ------------------------------------------------------------------
     final_output_files = []
-    for path in output_dir.rglob("final-output.*"):
+    for path in output_dir.rglob("*.docx"):
         if _is_safe_output_file(path, output_dir, resolved_output_dir):
             final_output_files.append(path)
 
     if final_output_files:
         # Deduplicate by filename: when a skill runs multiple times in
         # the same work_dir, each run creates a new workspace (e.g.
-        # output/ws-1/, output/ws-2/) each containing final-output.docx.
+        # output/ws-1/, output/ws-2/) each containing output.docx.
         # rglob picks up ALL of them, causing stale duplicates.
         # Fix: group by path.name, keep only the most recently modified.
         seen: dict[str, Path] = {}
@@ -611,7 +611,7 @@ def collect_output_files_from_work_dir(work_dir: str) -> list[Path]:
         final_output_files = list(seen.values())
 
         log.info(
-            f"Tier 2 (final-output convention): returning "
+            f"Tier 2 (*.docx convention): returning "
             f"{len(final_output_files)} deliverable(s) from {output_dir}"
         )
         return final_output_files
