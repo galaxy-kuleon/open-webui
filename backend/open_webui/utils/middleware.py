@@ -3782,7 +3782,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     build_enriched_skill_prompt,
                 )
 
-                model_id = form_data.get("model", "")
+                # Use the lightweight task model for parameter extraction
+                # (not the main chat model which may be very large/slow).
+                extraction_model_id = task_model_id
 
                 if event_emitter:
                     await event_emitter(
@@ -3801,7 +3803,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     request.app,
                     form_data.get("messages", []),
                     matched_skill.name,
-                    model_id,
+                    extraction_model_id,
                 )
 
                 skill_message = build_enriched_skill_prompt(
