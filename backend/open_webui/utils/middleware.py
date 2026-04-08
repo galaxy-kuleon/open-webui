@@ -3502,6 +3502,14 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         ((model.get("info") or {}).get("meta") or {}).get("capabilities") or {}
     ).get("file_context", True)
 
+    # Snapshot the last user message BEFORE skip_rag / RAG injection so
+    # the agent-skill intercept can send a clean prompt to opencode
+    # (opencode already has the raw file in work_dir/input/).
+    _pre_rag_last_user_msg = get_last_user_message(form_data["messages"])
+    _pre_rag_messages = [
+        {k: v for k, v in m.items()} for m in form_data.get("messages", [])
+    ]
+
     if file_context_enabled and not skip_rag:
         try:
             form_data, flags = await chat_completion_files_handler(
@@ -3706,7 +3714,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # Uploaded files (PDF, images, etc.) are copied to the skill's work_dir
     # so opencode can access them as real filesystem paths.
     if agent_skill_ids and available_skills:
-        last_user_msg = get_last_user_message(form_data["messages"]) or ""
+        # Use pre-RAG user message: opencode has the raw file in
+        # work_dir/input/, so docling markdown in the prompt is redundant.
+        last_user_msg = _pre_rag_last_user_msg or ""
         last_user_msg_lower = last_user_msg.lower()
         matched_skill = None
         matched_meta = None
@@ -3777,34 +3787,46 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         log.info(f"Copied uploaded file to skill input: {dest}")
 
                 # ── Extract structured params from chat context ──
+                # Only translation/conversion skills need param extraction
+                # (lang, style, terms). Other skills get the raw user message.
+                _EXTRACTION_SKILL_PREFIXES = ("anything-to-docx",)
+                _needs_extraction = matched_skill.name.lower().startswith(
+                    _EXTRACTION_SKILL_PREFIXES
+                )
+
                 from open_webui.utils.skill_params import (
-                    extract_skill_params,
                     build_enriched_skill_prompt,
                 )
 
-                # Use the lightweight task model for parameter extraction
-                # (not the main chat model which may be very large/slow).
-                extraction_model_id = task_model_id
-
-                if event_emitter:
-                    await event_emitter(
-                        {
-                            "type": "status",
-                            "data": {
-                                "action": "agent_skill",
-                                "sub_action": "extracting_params",
-                                "description": "Analyzing chat context...",
-                                "done": False,
-                            },
-                        }
+                extracted_params = {}
+                if _needs_extraction:
+                    from open_webui.utils.skill_params import (
+                        extract_skill_params,
                     )
 
-                extracted_params = await extract_skill_params(
-                    request.app,
-                    form_data.get("messages", []),
-                    matched_skill.name,
-                    extraction_model_id,
-                )
+                    # Use the lightweight task model for parameter extraction
+                    # (not the main chat model which may be very large/slow).
+                    extraction_model_id = task_model_id
+
+                    if event_emitter:
+                        await event_emitter(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "action": "agent_skill",
+                                    "sub_action": "extracting_params",
+                                    "description": "Analyzing chat context...",
+                                    "done": False,
+                                },
+                            }
+                        )
+
+                    extracted_params = await extract_skill_params(
+                        request.app,
+                        _pre_rag_messages,
+                        matched_skill.name,
+                        extraction_model_id,
+                    )
 
                 skill_message = build_enriched_skill_prompt(
                     extracted_params,

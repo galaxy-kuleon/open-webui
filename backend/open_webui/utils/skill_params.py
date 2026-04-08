@@ -17,12 +17,14 @@ log = logging.getLogger(__name__)
 
 # The expected keys in the extraction result.
 # Each is an optional string — None if the LLM could not detect it.
-PARAM_KEYS = frozenset({"lang", "style", "terms", "context_summary", "task_intent"})
+# Only translation-relevant params: opencode already has the raw file
+# and user message, so context_summary/task_intent are redundant.
+PARAM_KEYS = frozenset({"lang", "style", "terms"})
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a parameter extraction assistant. You will receive a chat conversation \
 and a skill name. Analyze the FULL conversation — not just the last message — \
-and extract structured parameters as a single JSON object.
+and extract translation parameters as a single JSON object.
 
 Fields to extract:
 
@@ -35,35 +37,26 @@ null if truly ambiguous.
 "technical", "bullet points", "concise". Infer from explicit requests or from the \
 register the user is writing in. null if no preference detected.
 
-- "terms": domain-specific terms, glossary entries, or term mappings the user mentioned \
-that should be preserved as-is or translated consistently. Format as a string: \
-"RAG=檢索增強生成, embedding=嵌入向量" for mappings, or "Kubernetes, pod, ReplicaSet" \
-for terms to preserve. null if none detected.
+- "terms": specific term mappings the user wants enforced — i.e. "this word MUST be \
+translated as that word". Format as a string: "RAG=檢索增強生成, embedding=嵌入向量" \
+for mappings, or "Kubernetes, pod, ReplicaSet" for terms to preserve untranslated. \
+null if none detected.
 
-- "context_summary": 1-3 sentence summary of the FULL conversation context. \
-What is the user working on? What documents or topics have been discussed? \
-This helps the skill understand the broader situation.
-
-- "task_intent": synthesize what the user wants the skill to do. Combine information \
-from multiple messages if the intent was built up over the conversation. Be specific. \
-E.g. "Convert the uploaded PDF about neural networks to DOCX and translate to Japanese \
-with formal academic style."
-
-Output ONLY a valid JSON object. No markdown fences, no commentary, no extra text.
+Output ONLY a valid JSON object with these 3 keys. No markdown fences, no commentary.
 
 --- FEW-SHOT EXAMPLES ---
 
 Chat: [USER: 我有一份關於 RAG pipeline 的技術報告，請幫我翻成日文，用學術風格。]
 Skill: anything-to-docx
-Output: {"lang": "ja", "style": "academic", "terms": "RAG=検索拡張生成, pipeline=パイプライン", "context_summary": "User has a technical report about RAG pipelines and wants it translated.", "task_intent": "Convert the technical report to DOCX and translate to Japanese with formal academic style."}
+Output: {"lang": "ja", "style": "academic", "terms": "RAG=検索拡張生成, pipeline=パイプライン"}
 
 Chat: [USER: Here's my meeting notes PDF. Can you convert it to Word?]
 Skill: anything-to-docx
-Output: {"lang": "en", "style": null, "terms": null, "context_summary": "User uploaded meeting notes in PDF format.", "task_intent": "Convert the uploaded meeting notes PDF to DOCX format."}
+Output: {"lang": "en", "style": null, "terms": null}
 
 Chat: [USER: 我們在做一個 Kubernetes 的部署文件。] [ASSISTANT: 好的，我可以幫你處理。需要什麼格式？] [USER: 轉成 Word，保持技術術語不要翻譯，但其他部分翻成繁體中文，正式一點。]
 Skill: anything-to-docx
-Output: {"lang": "zh-TW", "style": "formal", "terms": "Kubernetes, pod, ReplicaSet, deployment", "context_summary": "User is working on Kubernetes deployment documentation across multiple messages. They want technical terms preserved untranslated.", "task_intent": "Convert the Kubernetes deployment document to DOCX, translate non-technical content to Traditional Chinese in formal style, preserving technical terms untranslated."}
+Output: {"lang": "zh-TW", "style": "formal", "terms": "Kubernetes, pod, ReplicaSet, deployment"}
 """
 
 
@@ -249,14 +242,14 @@ def build_enriched_skill_prompt(
     Pure function — no side effects, no async, no imports.
 
     When params is {} (fallback / extraction failed), gracefully degrades to
-    task = user_message + file paths only. When a param value is None, that
+    user_message + file paths only. When a param value is None, that
     line is omitted entirely — the string "None" never appears in output.
 
     Args:
         params: Output from extract_skill_params. Either {} or a dict with
-                keys from PARAM_KEYS, each Optional[str].
+                keys from PARAM_KEYS (lang, style, terms), each Optional[str].
         file_paths: Paths to uploaded files in work_dir/input/.
-        user_message: The last user message.
+        user_message: The last user message (pre-RAG, no docling content).
         skill_name: Name of the skill being invoked.
 
     Returns:
@@ -264,19 +257,15 @@ def build_enriched_skill_prompt(
     """
     sections: list[str] = []
 
-    # --- Task ---
-    # Prefer task_intent from extraction; fall back to user_message.
-    task = params.get("task_intent") or user_message
-    sections.append(f"## Task\n{task}")
+    # --- Task (always the user's own words) ---
+    sections.append(f"## Task\n{user_message}")
 
     # --- Input Files (omit if empty) ---
     if file_paths:
         file_lines = "\n".join(f"- {fp}" for fp in file_paths)
         sections.append(f"## Input Files\n{file_lines}")
 
-    # --- Parameters (omit entire section if params is {} or all render keys are empty) ---
-    # Defense-in-depth: use truthiness checks so even if parser normalization
-    # is bypassed, empty/whitespace strings won't produce blank labels.
+    # --- Translation Parameters (omit if params is {} or all keys are empty) ---
     if params:
         param_lines: list[str] = []
         for key in _PARAM_RENDER_ORDER:
@@ -284,15 +273,7 @@ def build_enriched_skill_prompt(
             if val:
                 param_lines.append(f"- {_PARAM_LABELS[key]}: {val}")
         if param_lines:
-            sections.append("## Parameters\n" + "\n".join(param_lines))
-
-    # --- Context (omit if params is {} or context_summary is empty) ---
-    context_summary = params.get("context_summary")
-    if context_summary:
-        sections.append(f"## Context\n{context_summary}")
-
-    # --- Original User Message ---
-    sections.append(f"## Original User Message\n{user_message}")
+            sections.append("## Translation Parameters\n" + "\n".join(param_lines))
 
     return "\n\n".join(sections)
 
@@ -315,7 +296,7 @@ async def extract_skill_params(
         model_id: Model ID to use for the extraction LLM call
 
     Returns:
-        Dict with keys: lang, style, terms, context_summary, task_intent
+        Dict with keys: lang, style, terms
         (each Optional[str], None if not detected).
         Returns {} on any failure — caller should fallback to current behavior.
     """

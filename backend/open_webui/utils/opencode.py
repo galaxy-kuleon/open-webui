@@ -209,7 +209,7 @@ async def run_opencode(
 
     Returns the collected text output as a string.
     """
-    prompt = f"Use {skill_name} skill to ultra-reify end-user's request: {message}"
+    prompt = f"Use {skill_name} skill to realize end-user's request: {message}"
 
     cmd = [
         OPENCODE_PATH,
