@@ -1072,4 +1072,3 @@ DEFAULT_GROUP_SHARE_PERMISSION = (
 ####################################
 
 OPENCODE_PATH = os.environ.get("OPENCODE_PATH", shutil.which("opencode") or "opencode")
-OPENCODE_MODEL_NAME_MIDDLE_NAME = os.environ.get("OPENCODE_MODEL_NAME_MIDDLE_NAME", "")

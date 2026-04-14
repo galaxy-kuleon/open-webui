@@ -2182,12 +2182,6 @@ async def run_agent_skill(
             except Exception as e:
                 log.warning(f"Failed to generate opencode config: {e}")
 
-            # Determine model from metadata (may be a str ID or a dict)
-            model_id = ""
-            if __metadata__:
-                raw_model = __metadata__.get("model", "")
-                model_id = raw_model if isinstance(raw_model, str) else ""
-
             # Per-skill idle timeout override (e.g. VLM tasks need longer)
             skill_idle_timeout = meta.get("idle_timeout") or None
 
@@ -2205,7 +2199,6 @@ async def run_agent_skill(
                     run_kwargs = {
                         "sandbox_dir": work_dir,
                         "message": message,
-                        "model": model_id,
                         "skill_name": skill_name,
                         "event_emitter": __event_emitter__,
                     }
@@ -2227,7 +2220,6 @@ async def run_agent_skill(
                     run_kwargs = {
                         "sandbox_dir": sandbox_dir,
                         "message": message,
-                        "model": model_id,
                         "skill_name": skill_name,
                         "event_emitter": __event_emitter__,
                     }

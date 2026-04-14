@@ -22,7 +22,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
-from open_webui.env import OPENCODE_PATH, OPENCODE_MODEL_NAME_MIDDLE_NAME
+from open_webui.env import OPENCODE_PATH
 
 log = logging.getLogger(__name__)
 
@@ -170,42 +170,18 @@ def setup_sandbox(skill_id: str, skill_disk_path: str, skill_name: str = "") -> 
     return sandbox_dir
 
 
-def _convert_model_name(model: str) -> str:
-    """
-    Convert model name for opencode based on OPENCODE_MODEL_NAME_MIDDLE_NAME env var.
-
-    If OPENCODE_MODEL_NAME_MIDDLE_NAME is set (e.g., "qwen"), converts:
-        "provider.modelname" → "provider/{middle_name}/modelname"
-
-    Example:
-        "lmstudio.qwen3.5-122b-a10b" → "lmstudio/qwen/qwen3.5-122b-a10b"
-    """
-    if not model or not isinstance(model, str):
-        return model
-
-    middle_name = OPENCODE_MODEL_NAME_MIDDLE_NAME
-    if not middle_name:
-        return model
-
-    # Check if model has provider prefix format (contains ".")
-    if "." in model:
-        provider, _, model_name = model.partition(".")
-        if provider and model_name:
-            return f"{provider}/{middle_name}/{model_name}"
-
-    return model
-
-
 async def run_opencode(
     sandbox_dir: str,
     message: str,
-    model: str,
     skill_name: str,
     event_emitter: Optional[Callable] = None,
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
 ) -> str:
     """
     Execute opencode CLI in the sandbox and stream events to the chat.
+
+    Model selection is handled entirely by opencode's own config —
+    Open WebUI does not override it.
 
     Returns the collected text output as a string.
     """
@@ -219,11 +195,8 @@ async def run_opencode(
         "--thinking",
         "--dir",
         sandbox_dir,
+        prompt,
     ]
-    if model and isinstance(model, str):
-        converted_model = _convert_model_name(model)
-        cmd.extend(["--model", converted_model])
-    cmd.append(prompt)
 
     log.info(f"Running opencode: {' '.join(str(c) for c in cmd)}")
 
