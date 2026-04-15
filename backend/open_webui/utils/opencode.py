@@ -86,46 +86,6 @@ def generate_opencode_config(
     return {}
 
 
-def sync_opencode_config_to_dir(target_dir: str) -> None:
-    """
-    Sync OpenCode config to a project directory's opencode.json.
-
-    Reads the global config (~/.config/opencode/opencode.json) which has
-    the user's provider/model settings, merges with permission: allow,
-    and writes to {target_dir}/opencode.json.
-    """
-    global_config_path = Path.home() / ".config" / "opencode" / "opencode.json"
-    target_path = Path(target_dir) / "opencode.json"
-
-    # Start with existing project config or empty
-    project_config = {}
-    if target_path.exists():
-        try:
-            project_config = json.loads(target_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    # Read global config for provider settings
-    if global_config_path.exists():
-        try:
-            global_config = json.loads(global_config_path.read_text())
-            for key in ("provider", "model", "small_model", "agent"):
-                if key in global_config:
-                    project_config[key] = global_config[key]
-        except (json.JSONDecodeError, OSError) as e:
-            log.warning(f"Failed to read global opencode config: {e}")
-
-    # Ensure permission is set
-    project_config.setdefault("$schema", "https://opencode.ai/config.json")
-    project_config["permission"] = "allow"
-
-    try:
-        target_path.write_text(json.dumps(project_config, indent=2))
-        log.debug(f"Synced opencode config to {target_path}")
-    except OSError as e:
-        log.warning(f"Failed to write opencode config to {target_path}: {e}")
-
-
 def setup_sandbox(skill_id: str, skill_disk_path: str, skill_name: str = "") -> str:
     """
     Create a sandbox directory for opencode execution.

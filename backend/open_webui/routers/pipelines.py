@@ -25,6 +25,7 @@ from open_webui.constants import ERROR_MESSAGES
 from open_webui.routers.openai import get_all_models_responses
 
 from open_webui.utils.auth import get_admin_user
+from open_webui.utils.sanitize import sanitize_filename
 
 log = logging.getLogger(__name__)
 
@@ -203,7 +204,7 @@ async def upload_pipeline(
     user=Depends(get_admin_user),
 ):
     log.info(f"upload_pipeline: urlIdx={urlIdx}, filename={file.filename}")
-    filename = os.path.basename(file.filename)
+    filename = sanitize_filename(file.filename or "")
 
     # Check if the uploaded file is a python file
     if not (filename and filename.endswith(".py")):

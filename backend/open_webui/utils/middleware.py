@@ -26,6 +26,7 @@ from starlette.responses import Response, StreamingResponse, JSONResponse
 
 
 from open_webui.utils.misc import is_string_allowed
+from open_webui.utils.sanitize import sanitize_filename as _sanitize_fn
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.chats import Chats
 from open_webui.models.folders import Folders
@@ -3553,7 +3554,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     log.warning(f"[skip_rag] file {file_id} not found — skipping")
                     continue
 
-                filename = item.get("name") or file_obj.filename
+                filename = _sanitize_fn(item.get("name") or file_obj.filename or "")
                 # Always use server-side filename for extension routing to
                 # prevent users from bypassing docling via name spoofing.
                 ext = _Path(file_obj.filename).suffix.lower()
@@ -3773,7 +3774,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         file_record = Files.get_file_by_id(fid)
                         if not file_record:
                             continue
-                        fname = file_record.filename or ""
+                        fname = _sanitize_fn(file_record.filename or "")
                         ext = _os.path.splitext(fname)[1].lower()
                         if ext not in skill_exts:
                             continue
@@ -3782,6 +3783,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         if not storage_path or not _os.path.isfile(storage_path):
                             continue
                         dest = _os.path.join(input_dir, fname)
+                        # Avoid silent overwrites when different originals
+                        # sanitize to the same filename.
+                        if _os.path.exists(dest):
+                            _stem, _ext = _os.path.splitext(fname)
+                            dest = _os.path.join(input_dir, f"{_stem}-{fid[:8]}{_ext}")
                         _shutil.copy2(storage_path, dest)
                         copied_files.append(dest)
                         log.info(f"Copied uploaded file to skill input: {dest}")

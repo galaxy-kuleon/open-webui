@@ -32,6 +32,8 @@
 	let metaType: string = '';
 	let workDir: string = '';
 	let diskPath: string = '';
+	// Preserve fields that have no UI — they survive round-trips untouched.
+	let extraMeta: Record<string, any> = {};
 
 	let accessGrants = [];
 	let showAccessControlModal = false;
@@ -84,10 +86,16 @@
 		}
 		loading = true;
 
-		const meta: Record<string, any> = { tags: [] };
+		// Start from extraMeta so fields without UI (idle_timeout, tags, …)
+		// survive the round-trip instead of being silently wiped.
+		const meta: Record<string, any> = { ...extraMeta };
+		if (!meta.tags) meta.tags = [];
 		if (metaType) meta.type = metaType;
+		else delete meta.type;
 		if (workDir.trim()) meta.work_dir = workDir.trim();
+		else delete meta.work_dir;
 		if (diskPath.trim()) meta.disk_path = diskPath.trim();
+		else delete meta.disk_path;
 
 		await onSubmit({
 			id,
@@ -115,6 +123,10 @@
 				metaType = skill.meta.type || '';
 				workDir = skill.meta.work_dir || '';
 				diskPath = skill.meta.disk_path || '';
+				// Capture all meta fields so those without UI controls
+				// (idle_timeout, tags, future additions) survive saves.
+				const { type: _t, work_dir: _w, disk_path: _d, ...rest } = skill.meta;
+				extraMeta = rest;
 			}
 
 			if (name) hasManualName = true;

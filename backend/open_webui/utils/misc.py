@@ -525,18 +525,6 @@ def validate_email_format(email: str) -> bool:
     return bool(re.match(r"[^@]+@[^@]+\.[^@]+", email))
 
 
-def sanitize_filename(file_name):
-    # Convert to lowercase
-    lower_case_file_name = file_name.lower()
-
-    # Remove special characters using regular expression
-    sanitized_file_name = re.sub(r"[^\w\s]", "", lower_case_file_name)
-
-    # Replace spaces with dashes
-    final_file_name = re.sub(r"\s+", "-", sanitized_file_name)
-
-    return final_file_name
-
 
 def sanitize_text_for_db(text: str) -> str:
     """Remove null bytes and invalid UTF-8 surrogates from text for PostgreSQL storage."""

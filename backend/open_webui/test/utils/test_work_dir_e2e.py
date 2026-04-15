@@ -588,136 +588,7 @@ class TestCollectOutputTieredDeliverables:
 
 
 # ---------------------------------------------------------------------------
-# 3. sync_opencode_config_to_dir — idempotency + permission format
-# ---------------------------------------------------------------------------
-
-
-class TestSyncOpencodeConfigToDir:
-    """Verify sync_opencode_config_to_dir is idempotent and uses correct permission."""
-
-    def test_creates_config_in_target_dir(self):
-        from open_webui.utils.opencode import sync_opencode_config_to_dir
-
-        with tempfile.TemporaryDirectory(prefix="test_sync_") as td:
-            sync_opencode_config_to_dir(td)
-            config_path = Path(td) / "opencode.json"
-            assert config_path.exists()
-
-            config = json.loads(config_path.read_text())
-            assert config["permission"] == "allow"
-            assert "$schema" in config
-
-    def test_idempotent_run_twice(self):
-        """Running sync twice should produce identical output."""
-        from open_webui.utils.opencode import sync_opencode_config_to_dir
-
-        with tempfile.TemporaryDirectory(prefix="test_sync_") as td:
-            sync_opencode_config_to_dir(td)
-            first_content = (Path(td) / "opencode.json").read_text()
-
-            sync_opencode_config_to_dir(td)
-            second_content = (Path(td) / "opencode.json").read_text()
-
-            assert first_content == second_content
-
-    def test_preserves_existing_non_provider_fields(self):
-        """Existing fields in project config that are not provider/permission should survive."""
-        from open_webui.utils.opencode import sync_opencode_config_to_dir
-
-        with tempfile.TemporaryDirectory(prefix="test_sync_") as td:
-            # Pre-populate with custom field
-            config_path = Path(td) / "opencode.json"
-            config_path.write_text(
-                json.dumps(
-                    {
-                        "custom_field": "custom_value",
-                        "permission": "deny",  # should be overwritten to "allow"
-                    }
-                )
-            )
-
-            sync_opencode_config_to_dir(td)
-            config = json.loads(config_path.read_text())
-
-            assert config["permission"] == "allow"  # overwritten
-            assert config["custom_field"] == "custom_value"  # preserved
-
-    def test_copies_model_fields_from_global_config(self, monkeypatch):
-        from open_webui.utils.opencode import sync_opencode_config_to_dir
-
-        with tempfile.TemporaryDirectory(prefix="test_home_") as home_dir:
-            monkeypatch.setenv("HOME", home_dir)
-            config_dir = Path(home_dir) / ".config" / "opencode"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            (config_dir / "opencode.json").write_text(
-                json.dumps(
-                    {
-                        "model": "lmstudio/qwen3.5-122b-a10b",
-                        "small_model": "lmstudio/qwen3.5-9b",
-                        "provider": {
-                            "lmstudio": {
-                                "options": {
-                                    "baseURL": "http://127.0.0.1:1234/v1",
-                                }
-                            }
-                        },
-                        "agent": {
-                            "general": {
-                                "model": "lmstudio/qwen3.5-122b-a10b",
-                            }
-                        },
-                    }
-                )
-            )
-
-            with tempfile.TemporaryDirectory(prefix="test_sync_") as td:
-                sync_opencode_config_to_dir(td)
-                config = json.loads((Path(td) / "opencode.json").read_text())
-
-                assert config["model"] == "lmstudio/qwen3.5-122b-a10b"
-                assert config["small_model"] == "lmstudio/qwen3.5-9b"
-                assert (
-                    config["agent"]["general"]["model"] == "lmstudio/qwen3.5-122b-a10b"
-                )
-
-    def test_permission_format_matches_generate(self, monkeypatch):
-        """Both config producers must use the same 'allow' string format."""
-        from open_webui.utils.opencode import (
-            generate_opencode_config,
-            sync_opencode_config_to_dir,
-        )
-
-        with tempfile.TemporaryDirectory(prefix="test_home_") as home_dir:
-            monkeypatch.setenv("HOME", home_dir)
-            config_dir = Path(home_dir) / ".config" / "opencode"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            # Pre-populate with permission: "allow" string format —
-            # generate_opencode_config uses setdefault so it preserves this.
-            (config_dir / "opencode.json").write_text(
-                json.dumps({"permission": "allow"})
-            )
-
-            config = generate_opencode_config(
-                openai_api_base_urls=["http://localhost:11434"],
-                openai_api_keys=["test-key"],
-                ollama_base_urls=[],
-            )
-            assert config["permission"] == "allow"
-            assert isinstance(config["permission"], str)
-
-            # sync_opencode_config_to_dir writes permission: "allow"
-            with tempfile.TemporaryDirectory(prefix="test_perm_") as td:
-                sync_opencode_config_to_dir(td)
-                project_config = json.loads((Path(td) / "opencode.json").read_text())
-                assert project_config["permission"] == "allow"
-                assert isinstance(project_config["permission"], str)
-
-            # Both produce the exact same format
-            assert config["permission"] == project_config["permission"]
-
-
-# ---------------------------------------------------------------------------
-# 4. generate_opencode_config — provider mapping
+# 3. generate_opencode_config — provider mapping
 # ---------------------------------------------------------------------------
 
 
@@ -916,7 +787,6 @@ class TestDualModeBranching:
         from open_webui.utils.opencode import (
             collect_output_files,
             collect_output_files_from_work_dir,
-            sync_opencode_config_to_dir,
         )
 
         # collect_output_files(sandbox_dir: str, start_time: float)
@@ -929,16 +799,10 @@ class TestDualModeBranching:
         params = list(sig.parameters.keys())
         assert params == ["work_dir"]
 
-        # sync_opencode_config_to_dir(target_dir: str)
-        sig = inspect.signature(sync_opencode_config_to_dir)
-        params = list(sig.parameters.keys())
-        assert params == ["target_dir"]
-
     def test_all_opencode_imports_resolve(self):
         """All functions imported in builtin.py's run_agent_skill must exist."""
         from open_webui.utils.opencode import (
             generate_opencode_config,
-            sync_opencode_config_to_dir,
             setup_sandbox,
             run_opencode,
             collect_output_files,
@@ -949,7 +813,6 @@ class TestDualModeBranching:
 
         # If any import fails, this test fails — verifying the import list matches
         assert callable(generate_opencode_config)
-        assert callable(sync_opencode_config_to_dir)
         assert callable(setup_sandbox)
         assert callable(run_opencode)
         assert callable(collect_output_files)
@@ -1003,13 +866,3 @@ class TestErrorReturnConsistency:
         result = collect_output_files_from_work_dir("/nonexistent/path/work")
         assert result == []
 
-    def test_sync_to_unwritable_dir_logs_warning(self):
-        """sync_opencode_config_to_dir to a bad path should not raise."""
-        from open_webui.utils.opencode import sync_opencode_config_to_dir
-
-        # Using a path that likely doesn't exist — function should handle gracefully
-        # It catches OSError and logs a warning
-        try:
-            sync_opencode_config_to_dir("/nonexistent/readonly/path")
-        except Exception:
-            pytest.fail("sync_opencode_config_to_dir should not raise on write failure")

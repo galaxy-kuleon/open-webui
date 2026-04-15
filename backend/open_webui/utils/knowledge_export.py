@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from open_webui.utils.sanitize import sanitize_filename
+
 log = logging.getLogger(__name__)
 
 # Background job queue for organization tasks
@@ -208,21 +210,13 @@ def call_llm_completion(
 
 
 def _sanitize_filename(name: str) -> str:
-    """Sanitize filename for safe filesystem use and LLM tool-call compatibility.
+    """Sanitize filename for safe filesystem use, returning stem only (no extension).
 
-    Keeps: CJK chars, alphanumeric, hyphen, underscore, dot.
-    Replaces: spaces, parens, commas, punctuation -> hyphen.
-    Collapses consecutive hyphens/underscores.
+    Delegates to the centralized sanitize_filename() for security guarantees
+    (path traversal, control chars, hostile chars, CJK romanization), then
+    strips the extension since callers append their own (e.g. ".md").
     """
-    stem = Path(name).stem
-    sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", stem)
-    sanitized = re.sub(
-        r"[\s()\[\]{}【】「」『』〈〉《》,;、，；！!@#$%^&+=~`']+", "-", sanitized
-    )
-    sanitized = re.sub(r"-+", "-", sanitized)
-    sanitized = re.sub(r"_+", "_", sanitized)
-    sanitized = sanitized.strip("-_")
-    return sanitized or "unnamed"
+    return os.path.splitext(sanitize_filename(name))[0] or "unnamed"
 
 
 def _strip_yaml_frontmatter(text: str) -> str:

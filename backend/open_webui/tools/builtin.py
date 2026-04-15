@@ -2086,7 +2086,6 @@ async def run_agent_skill(
         from open_webui.models.access_grants import AccessGrants
         from open_webui.utils.opencode import (
             generate_opencode_config,
-            sync_opencode_config_to_dir,
             setup_sandbox,
             run_opencode,
             collect_output_files,
@@ -2192,9 +2191,6 @@ async def run_agent_skill(
             try:
                 if use_work_dir:
                     # --- Direct-dir mode: run in user's project directory ---
-                    # Sync opencode config (providers/permissions) into the project
-                    sync_opencode_config_to_dir(work_dir)
-
                     # Run opencode directly in work_dir (no sandbox, no cleanup)
                     run_kwargs = {
                         "sandbox_dir": work_dir,

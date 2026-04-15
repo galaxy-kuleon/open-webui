@@ -320,6 +320,7 @@ cypress/screenshots
 
 # Playwright E2E test artifacts
 e2e/test-results/
+test-results/
 e2e/screenshots/
 playwright-report/
 

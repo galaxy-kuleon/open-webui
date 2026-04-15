@@ -1,7 +1,5 @@
 import logging
 import os
-import re
-import unicodedata
 import uuid
 import json
 from pathlib import Path
@@ -52,6 +50,7 @@ from open_webui.storage.provider import Storage
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, RAG_USER_COLLECTION_ENABLED
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import strict_match_mime_type
+from open_webui.utils.sanitize import sanitize_filename
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -224,25 +223,7 @@ def upload_file_handler(
     file_metadata = metadata if metadata else {}
 
     try:
-        unsanitized_filename = file.filename
-        filename = os.path.basename(unsanitized_filename)
-
-        # Sanitize filename for safe filesystem paths:
-        # - Normalize Unicode (NFKC collapses fullwidth chars and compatibility forms)
-        # - Replace ALL whitespace (spaces, tabs, NBSP, ideographic space U+3000,
-        #   zero-width spaces, etc.) with hyphens
-        # - Replace shell-hostile chars with hyphens
-        # - Collapse consecutive hyphens
-        # - Preserve CJK characters, alphanumeric, dots, underscores, hyphens
-        stem, ext = os.path.splitext(filename)
-        stem = unicodedata.normalize("NFKC", stem)
-        stem = re.sub(r"[\s\u00a0\u2000-\u200f\u2028-\u202f\u205f\u3000\ufeff]+", "-", stem)
-        stem = re.sub(r"[<>:\"/\\|?*(){}[\]!@#$%^&+=~`',;]+", "-", stem)
-        stem = re.sub(r"-{2,}", "-", stem)
-        stem = stem.strip("-")
-        if not stem:
-            stem = "unnamed"
-        filename = f"{stem}{ext}"
+        filename = sanitize_filename(file.filename or "")
 
         file_extension = os.path.splitext(filename)[1]
         # Remove the leading dot from the file extension
@@ -263,8 +244,9 @@ def upload_file_handler(
 
         # replace filename with uuid
         id = str(uuid.uuid4())
-        # Display name preserves original filename; disk path uses sanitized version
-        name = os.path.basename(unsanitized_filename)
+        # Display name preserves original filename for UI readability;
+        # disk path uses sanitized version for filesystem/prompt safety.
+        name = os.path.basename(file.filename) if file.filename else "unnamed"
         filename = f"{id}_{filename}"
         contents, file_path = Storage.upload_file(
             file.file,
