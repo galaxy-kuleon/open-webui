@@ -1,0 +1,971 @@
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+;; Rebase Manifest: feat/opencode-agent-skill-integration
+;; From: e4e69a10e (Merge PR #22469, 2026-03-09)
+;; To:   b7793f729 (fix(sanitize), 2026-04-15)
+;; Target: v0.8.12 (9bd84258d, 2026-03-27, +244 upstream commits)
+;; Total: 19 commits → 9 logical units
+;;        36 new files, 44 modified files, 1 deleted file
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+;;
+;; ⚠ MONOLITHIC COMMIT WARNING
+;; Four commits cross unit boundaries and MUST be split before
+;; squash-by-unit rebase. See :monolithic-commits section below.
+;;
+;; ⚠ FILE LIST CONVENTION
+;; :new-files / :modified-files list SEMANTIC OWNERSHIP — which unit is
+;; responsible for each file's changes during rebase. Because of monolithic
+;; commits, a file's owning unit may differ from the commit that introduced it.
+;; The :monolithic-commits :breakdown is the authoritative commit→file mapping.
+;; When squashing, use the breakdown to split commits first, THEN assign files
+;; per the unit file lists.
+
+{:units
+ [;;
+  ;; ═══════════════════════════════════════════════════════════
+  ;; Unit 1: OpenCode Agent Skill Engine
+  ;; ═══════════════════════════════════════════════════════════
+  ;;
+  {:id          :opencode-engine
+   :description "Sandbox/direct-dir execution of agent skills via opencode CLI"
+
+   :problem-solved
+   "Open WebUI 原本只有 markdown skills（靜態文件），無法執行任何
+    實際工作。使用者如果想讓 AI 做文件轉換、程式碼生成、研究等需要
+    工具的任務，必須離開 Open WebUI 去用其他工具。"
+
+   :what-we-built
+   "一個完整的 agent skill 執行引擎，讓 Open WebUI 的 skills 可以
+    透過 opencode CLI 做真正的工作：
+
+    1. **兩種執行模式**
+       - Sandbox mode: 把 skill 檔案 copy 到 /tmp，opencode 在裡面跑，
+         結束後收集輸出檔、上傳到 Open WebUI storage、清理 sandbox。
+         適合一次性任務（文件轉換、翻譯）。
+       - Direct-dir mode (work_dir): opencode 直接在使用者的專案目錄跑，
+         不做 cleanup。輸出只從 {work_dir}/output/ 收集（不掃描整棵專案樹）。
+         適合需要專案 context 的任務（code review, refactoring）。
+
+    2. **三層輸出收集策略** (direct-dir mode)
+       - Tier 1: .deliverables manifest 檔 → 精確控制交付物
+       - Tier 2: *.docx convention → 已知檔名模式
+       - Tier 3: 全部非 hidden files → 向後相容
+
+    3. **安全機制**
+       - Per-user 並行上限 (MAX_CONCURRENT_PER_USER = 2)
+       - Idle timeout (預設 3600s，per-skill 可覆寫)
+       - Symlink escape 防護 (resolved path 必須在 output_dir 內)
+       - Process group kill 確保不會留下 orphan processes
+       - Server shutdown 時 kill 所有 active opencode subprocesses
+
+    4. **即時串流**
+       - opencode 的 JSON event stream (text/reasoning/tool_use/error/result)
+         即時轉換成 Open WebUI status events，在 chat 裡顯示 agent 正在做什麼
+
+    5. **Provider 橋接**
+       - 讀取 ~/.config/opencode/opencode.json 做為 opencode 的設定
+       - 完全不覆寫使用者的 opencode config — Open WebUI 只讀、不寫
+
+    6. **Agent skill delete cleanup**
+       - 刪除 agent_skill 類型的 skill 時，自動 shutil.rmtree(disk_path)
+       - 清除 persistent storage at ~/.claude/skills/{skill_id}/
+
+    7. **Title generation max_tokens bump**
+       - tasks.py: default max_tokens 從 1000 提升到 16000
+       - 避免長對話的 title 生成被截斷"
+
+   :key-behaviors
+   ["使用者在 chat 裡說 'use anything-to-docx skill' → opencode 啟動、串流狀態、收集輸出檔、自動上傳"
+    "sandbox 模式: 每次執行是全乾淨的環境，互不干擾"
+    "work_dir 模式: opencode 能存取完整專案 context (.venv, .git, node_modules)"
+    "輸出檔自動上傳到 Open WebUI storage，使用者可以直接下載"
+    "opencode idle 超過 timeout → kill process group + 通知使用者"
+    "server shutdown → 所有 active opencode processes 被 SIGKILL"
+    "刪除 agent skill → disk_path 自動 rmtree 清除"]
+
+   ;; 8cc9eeeeb is monolithic — see :monolithic-commits.
+   ;; 791303705 spans Units 1+2 but cleanly partitions by file path
+   ;; (backend/* → Unit 1, frontend StatusHistory/* → stays with Unit 1 too).
+   ;; Files listed here are the semantic ownership of this unit.
+   :commits     ["791303705" "09cb990e3" "4077a36eb"
+                 "82bf38232" "a10859f98" "e860e9bbe"
+                 "8cc9eeeeb"]                          ;; ← also touches Unit 2 files
+   :new-files
+   ["backend/open_webui/utils/opencode.py"             ;; 573 lines — sandbox, run, collect, cleanup
+    "backend/open_webui/test/utils/test_work_dir_e2e.py"
+    "backend/open_webui/test/utils/__init__.py"        ;; test package init
+    "backend/open_webui/test/utils/conftest.py"]       ;; 19 lines — test fixtures
+   :modified-files
+   ["backend/open_webui/tools/builtin.py"              ;; +267 lines: run_agent_skill() dispatcher
+    "backend/open_webui/config.py"                     ;; OPENCODE_PATH env
+    "backend/open_webui/env.py"                        ;; env var 註冊
+    "backend/open_webui/main.py"                       ;; skill router mount + shutdown hook
+    "backend/open_webui/routers/tasks.py"              ;; task model routing
+    "backend/open_webui/routers/skills.py"             ;; skill execution endpoint (via 791303705)
+    "backend/open_webui/utils/tools.py"                ;; builtin tool discovery (via 791303705)
+    "src/lib/apis/skills/index.ts"                     ;; API client (via 791303705)
+    "src/lib/components/workspace/Skills.svelte"       ;; skill list display (via 791303705)
+    "src/lib/components/chat/Messages/ResponseMessage/StatusHistory.svelte"  ;; via 791303705
+    "src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte"
+    "pyproject.toml"                                   ;; deps: +lmstudio-memory, ddgs==9.11.2→>=9.11.2
+    "uv.lock"]                                         ;; lock file updates
+   :conflict-risk :high}
+
+  ;;
+  ;; ═══════════════════════════════════════════════════════════
+  ;; Unit 2: Skill System Enhancements
+  ;; ═══════════════════════════════════════════════════════════
+  ;;
+  {:id          :skill-system
+   :description "Skill intercept, work_dir routing, param extraction, editor UI, meta preservation"
+   :depends-on  [:opencode-engine]
+
+   :problem-solved
+   "1. 使用者必須手動在 tool picker 裡選 skill — 不直覺。
+    2. 翻譯 skill 不知道要翻成什麼語言、什麼風格 — 使用者得在 prompt
+       裡寫得很精確，但 opencode 不一定能從自然語言抽取結構化參數。
+    3. 上傳的檔案 (PDF, DOCX) 無法自動傳給 opencode — 它們只存在
+       Open WebUI storage，opencode 的 sandbox 裡看不到。
+    4. SkillEditor 存檔會靜默清掉 idle_timeout 等沒有 UI 的 meta 欄位。
+    5. Skill 的 type/work_dir/disk_path 沒有 UI 可以設定。"
+
+   :what-we-built
+   "1. **Keyword-based skill intercept** (middleware.py)
+       - chat pipeline 偵測使用者訊息裡的 skill name（e.g. 'anything-to-docx'）
+       - 命中時直接 dispatch 到 run_agent_skill()，跳過正常 LLM 回覆
+       - 使用 pre-RAG user message（避免注入 docling markdown 到 prompt）
+
+    2. **LLM-based parameter extraction** (skill_params.py)
+       - 在 dispatch 前，用 task model 分析完整聊天 context
+       - 抽取 {lang, style, terms} 結構化參數
+       - 只對 translation-class skills (anything-to-docx) 啟用
+       - Few-shot prompt 確保穩定 JSON 輸出
+       - 失敗時靜默回傳 {} — 不阻斷 skill 執行
+
+    3. **上傳檔案自動 copy 到 work_dir/input/**
+       - 從 chat messages + metadata 收集 file_ids
+       - 按副檔名過濾（PDF, DOCX, PPTX, XLSX, 圖片等）
+       - sanitize filename 後 copy 到 input/ 目錄
+       - 碰撞防護: 同名檔案加上 fid[:8] 後綴
+
+    4. **SkillEditor meta 保存修復**
+       - 用 extraMeta spread pattern 保留所有沒有 UI 的欄位
+       - idle_timeout, tags, 未來新增的欄位都不會被清掉
+
+    5. **SkillEditor UI 新增 Type/Work Dir/Disk Path 欄位**
+       - Type: Markdown (default) vs Agent Skill (OpenCode)
+       - Work Dir: 專案目錄路徑（direct-dir mode）
+       - Disk Path: skill 檔案路徑（sandbox mode）
+
+    6. **AgentSkillStatus 元件**
+       - 在 chat 的 status history 裡顯示 agent skill 的執行狀態
+       - start → thinking → tool_use → result/error 完整流程
+
+    7. **/skills/upload-zip API endpoint** (routers/skills.py)
+       - 接受 .zip 上傳，解壓、解析 SKILL.md frontmatter (YAML)
+       - Zip bomb 防護: 壓縮/解壓後各 50MB 上限
+       - 用 _slugify() 從 frontmatter name 生成 skill ID
+       - 持久化到 ~/.claude/skills/{skill_id}/
+       - 已存在的 ID collision 檢查
+       - 支援 root 或一層 deep 的 SKILL.md 位置
+
+    8. **Pre-RAG message snapshot** (middleware.py)
+       - 在 skip_rag / RAG injection 之前快照 _pre_rag_last_user_msg
+         和 _pre_rag_messages
+       - Skill intercept + param extraction 都使用 pre-RAG 版本
+       - 避免 docling markdown 被注入到 opencode prompt 裡"
+
+   :key-behaviors
+   ["使用者上傳 PDF + 打 'anything-to-docx 翻成日文' → 自動偵測 skill、抽取 lang=ja、copy PDF 到 input/、dispatch opencode"
+    "SkillEditor 存檔不再清掉 idle_timeout — 設定什麼就保留什麼"
+    "Admin 可以在 UI 設定 work_dir → 該 skill 進入 direct-dir mode"
+    "chat 裡即時顯示 'Running agent skill: anything-to-docx' 等狀態"
+    "兩個不同檔案 sanitize 後同名 → 第二個自動加 fid 後綴，不覆寫"]
+
+   :commits     ["ff9c8099b" "acd4524b0"
+                 "1a0d60fb2" "dddd28c3f" "b7793f729"]
+   ;; Note: 8cc9eeeeb also contributes (models/skills.py, middleware.py)
+   ;; but is primarily assigned to Unit 1 due to the work_dir mode focus.
+   :new-files
+   ["backend/open_webui/utils/skill_params.py"         ;; 327 lines — LLM-based param extraction
+    "src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AgentSkillStatus.svelte"]
+   :modified-files
+   ["backend/open_webui/utils/middleware.py"            ;; skill intercept + file copy (最大修改)
+    "backend/open_webui/models/skills.py"              ;; SkillMeta: +type, +work_dir, +disk_path, +idle_timeout
+    "src/lib/components/workspace/Skills/SkillEditor.svelte"
+    "src/routes/(app)/workspace/skills/edit/+page.svelte"
+    "src/routes/(app)/workspace/skills/create/+page.svelte"]
+   ;; Note: routers/skills.py, utils/tools.py, apis/skills/index.ts,
+   ;; StatusHistory*.svelte, Skills.svelte are semantically skill-system
+   ;; but introduced by 791303705 (Unit 1). They move here after the
+   ;; monolithic split. See :monolithic-commits 791303705 note.
+   :conflict-risk :critical}
+
+  ;;
+  ;; ═══════════════════════════════════════════════════════════
+  ;; Unit 3: RAG Pipeline — Direct Content + Token Cascade
+  ;; ═══════════════════════════════════════════════════════════
+  ;;
+  {:id          :rag-optimization
+   :description "Direct content bypass for uploaded files + 3-tier token budget cascade"
+   :depends-on  [:sanitize]                            ;; middleware.py imports sanitize_filename
+
+   :problem-solved
+   "1. 上傳一份 PDF 後，Open WebUI 用 vector search 取 top-k chunks，
+       LLM 只看到文件的碎片，無法做全文翻譯、摘要等需要完整 context 的任務。
+    2. 大文件的 RAG content 超過 context window → 直接截斷或 crash。"
+
+   :what-we-built
+   "1. **Direct Content Mode**
+       - 當使用者只上傳 files（沒有 collections）時，跳過 vector search
+       - 直接讀取 file.data.content (processed .md) 全文注入
+       - 讓 LLM 看到完整文件，不是 top-k 碎片
+
+    2. **3-tier Token Budget Cascade**
+       當總 token 超過 RAG_FULL_DOCUMENT_MAX_TOKENS 時：
+       - Tier 1: 嘗試只用 .index.md (摘要版)，看看是否在預算內
+       - Tier 2: 如果 index 也超了，用 sub-chat 讓 LLM 摘要文件
+       - Tier 3: 如果 sub-chat 也失敗，fall back 到普通 vector search
+
+       每次降級都 emit status event 通知使用者。
+
+    3. **User Collection System**
+       - RAG_USER_COLLECTION_ENABLED config (預設 true)
+       - Upload 時每個檔案的 chunks + index 同步 embed 到 user-{user_id} collection
+       - 啟用跨 chat RAG retrieval — 不需要 re-upload 即可在新 chat 搜到舊文件
+       - File delete 時自動 cleanup user collection 中對應的 embeddings
+       - builtin tools (query_knowledge_files) 也查 user collection
+
+    4. **Smart Collection Retrieval**
+       - 區分 'uploaded files' vs 'knowledge collections'
+       - uploaded files → direct content path
+       - collections → vector search path
+       - 混合時兩條路徑都走，合併結果
+
+    5. **RAG Embedding Prefix PersistentConfig conversion**
+       - RAG_EMBEDDING_QUERY_PREFIX, RAG_EMBEDDING_CONTENT_PREFIX,
+         RAG_EMBEDDING_PREFIX_FIELD_NAME 從 os.environ.get() 轉為 PersistentConfig
+       - Runtime 可透過 admin API 修改，不需重啟 server
+       - retrieval/utils.py 所有 access sites 改用 .value
+
+    6. **Markdown-aware text splitter**
+       - TEXT_SPLITTER config 新增 'markdown' 選項
+       - 使用 RecursiveCharacterTextSplitter.from_language(Language.MARKDOWN)
+       - 比 character splitter 更好地保留 markdown 結構"
+
+   :key-behaviors
+   ["使用者上傳 10 頁 PDF → LLM 看到全文 markdown（不是 5 個 chunks）"
+    "50 頁技術文件 → cascade: 先試 full → 超了試 index-only → 再超試 sub-chat summary"
+    "cascade 每次降級，chat 裡顯示 'Document too large, using summary...' 等狀態"
+    "使用者同時上傳 file + 選 collection → file 走 direct content, collection 走 vector search"]
+
+   :commits     ["7f532dd54" "64ef6cfcb"]
+   :new-files
+   ["backend/open_webui/test/utils/test_t2_cascade_wiring.py"
+    "backend/open_webui/test/utils/test_t3_edge_cases.py"
+    "backend/open_webui/test/utils/test_w2t2_phase_a_cascade.py"]
+   :modified-files
+   ["backend/open_webui/utils/middleware.py"]            ;; direct content + cascade 邏輯
+   ;; Note: retrieval/utils.py, routers/retrieval.py, routers/files.py are
+   ;; semantically RAG-related but introduced by 5f131d63e (Unit 4 commit).
+   ;; They will move here after the monolithic split.
+   :conflict-risk :high}
+
+  ;;
+  ;; ═══════════════════════════════════════════════════════════
+  ;; Unit 4: Knowledge Export System
+  ;; ═══════════════════════════════════════════════════════════
+  ;;
+  {:id          :knowledge-export
+   :description "File-based knowledge export + LLM-powered directory organization"
+
+   :problem-solved
+   "Open WebUI 處理完文件後，processed markdown 只存在資料庫和
+    vector store 裡。使用者無法在 filesystem 上瀏覽、搜尋、或用
+    其他工具存取這些知識。組織大量文件時沒有自動分類能力。"
+
+   :what-we-built
+   "1. **Export Hook**
+       - document processing 完成後，自動把 .md + .index.md 寫到
+         RAG_KNOWLEDGE_EXPORT_DIR
+       - 檔名用 sanitize_filename 處理，CJK → romanized ASCII
+
+    2. **LLM-Powered Directory Organizer**
+       - 背景 thread 用 job queue 接收新 export 的文件
+       - 批次 (batch=12) 把文件列表送給 LLM
+       - LLM 回傳 JSON {moves: [{doc_id, destination, reason}]}
+       - Python 執行 filesystem moves — LLM 不碰 shell
+       - 分類結果: 例如 healthcare/accreditation/, tech/kubernetes/
+
+    3. **KG1 Document Loader**
+       - 581 行的自訂 loader，支援 GLM-4V OCR + docling
+       - 可以讀 PDF、圖片、Office 文件
+
+    4. **Document Index Generation** (retrieval.py, via 5f131d63e)
+       - Upload processing 時用 LLM 生成結構化 .index.md
+       - 大文件分 128k-token chunks (32k overlap)，per-chunk 生成 index 後合併
+       - Index 同時 embed 進 vector collection + 存入 file.data.index_content
+       - Status emit: processing:indexing
+       - 新 configs: RAG_DOCUMENT_INDEX_GENERATION (bool),
+         RAG_DOCUMENT_INDEX_MODEL, RAG_DOCUMENT_INDEX_TIMEOUT,
+         DEFAULT_RAG_DOCUMENT_INDEX_PROMPT
+
+    5. **Research Utils** (536 lines)
+       - 用 knowledge base 做 context-aware 研究
+       - 支援多文件交叉參照"
+
+   :key-behaviors
+   ["upload PDF → process → .md 自動出現在 /knowledge-base/"
+    "累積 12 份文件 → LLM 分批分類到子目錄"
+    "分類用 Python os.rename，不是 LLM 寫 shell command（安全）"
+    "支援 GLM-4V OCR 的 KG1 loader 可以讀掃描文件"]
+
+   ;; 5f131d63e is monolithic — see :monolithic-commits.
+   ;; It also touches Unit 1, 9, and cleanup files.
+   :commits     ["5f131d63e" "09cb990e3"]
+   :new-files
+   ["backend/open_webui/utils/knowledge_export.py"     ;; 899 lines
+    "backend/open_webui/utils/research.py"             ;; 536 lines
+    "backend/open_webui/retrieval/loaders/kg1.py"      ;; 581 lines
+    "backend/open_webui/test/utils/test_knowledge_export_e2e.py"
+    "backend/open_webui/test/utils/test_knowledge_export_llm_bridge.py"
+    "backend/open_webui/test/utils/test_research_kb_loader.py"
+    "backend/open_webui/test/utils/test_research_run.py"
+    "backend/open_webui/test/utils/test_middleware_research.py"]
+   :modified-files
+   ["backend/open_webui/retrieval/loaders/main.py"     ;; KG1 loader 註冊
+    "backend/open_webui/config.py"                     ;; RAG_KNOWLEDGE_EXPORT_DIR/ENABLED, KG1_* (7), RAG_RESEARCH/ORGANIZER_MODEL
+    "backend/open_webui/main.py"                       ;; startup hooks
+    "backend/open_webui/utils/middleware.py"            ;; research integration
+    "backend/open_webui/routers/retrieval.py"           ;; process_file hooks
+    "backend/open_webui/routers/files.py"               ;; upload hooks
+    "backend/open_webui/data/readme.txt"                ;; pip → docker instructions
+    "package.json"                                      ;; build script change (5f131d63e)
+    "package-lock.json"]                                ;; lockfile regen
+   :removed-files
+   ["backend/data/readme.txt"]                          ;; deleted by 5f131d63e (NOT open_webui/data/)
+   :conflict-risk :medium
+   :notes "5f131d63e is the biggest monolithic commit — touches 51 files
+           across Units 1, 4, 9, and cleanup. Must be split before squashing."}
+
+  ;;
+  ;; ═══════════════════════════════════════════════════════════
+  ;; Unit 5: Document Processing (Docling + Skip-RAG)
+  ;; ═══════════════════════════════════════════════════════════
+  ;;
+  {:id          :doc-processing
+   :description "Docling-based document conversion + skip_rag direct MD injection"
+   :depends-on  [:rag-optimization]
+
+   :problem-solved
+   "1. Open WebUI 的 RAG 對 PDF/DOCX 的解析品質取決於 content extraction
+       engine。預設的 parser 對複雜排版、表格、多欄 PDF 效果差。
+    2. 某些場景需要完全跳過 RAG（例如 skill 需要原始 markdown），
+       但沒有機制可以做到。"
+
+   :what-we-built
+   "1. **Docling Integration** (docling.py, 184 lines)
+       - 用 docling CLI 把 PDF/DOCX/PPTX/XLSX 轉成高品質 Markdown
+       - Async subprocess，有 timeout (300s) 和 process group kill
+       - 支援 SUPPORTED_EXTENSIONS frozenset
+
+    2. **Skip-RAG Direct MD Injection** (middleware.py)
+       - 當 metadata.skip_rag = true 時，跳過 vector search
+       - 用 docling 把上傳的 PDF/DOCX 直接轉成 markdown
+       - 注入到 chat context 裡，使用者看到完整文件內容
+       - 用於 agent skill 場景：opencode 需要原始檔案，
+         不需要 RAG chunks
+
+    3. **LMStudio Memory Bridge** (lmstudio_memory.py, 212 lines)
+       - 檢查 LMStudio 當前記憶體使用，判斷 model 是否能 load
+       - LMSTUDIO_MEMORY_BUDGET_GB env var (預設 120GB)
+       - middleware 整合: 在 chat 裡 emit memory_warning status event
+       - 避免 OOM crash
+
+    4. **skip_rag per-model capability toggle**
+       - Capabilities.svelte: 新增 skip_rag toggle (Models editor UI)
+       - constants.ts: DEFAULT_CAPABILITIES 加 skip_rag: false
+       - Chat.svelte: allSkipRag 邏輯 — 當所有 selected models 都有
+         skip_rag capability 時，upload 時 process=false + metadata.skip_rag=true
+       - MessageInput.svelte: 也有 allSkipRag 判斷，upload 時 bypass processing"
+
+   :key-behaviors
+   ["PDF 上傳 + skip_rag=true → docling 轉 markdown → 注入 chat context"
+    "docling 超過 300s → kill process group + graceful error"
+    "支援 PDF, DOCX, PPTX, XLSX 四種格式"
+    "Admin 在 model settings 開 skip_rag → 該 model 的檔案上傳自動跳過 RAG pipeline"]
+
+   :commits     ["5226833ff"]
+   :new-files
+   ["backend/open_webui/utils/docling.py"              ;; 184 lines
+    "backend/open_webui/utils/lmstudio_memory.py"      ;; 212 lines (created by 5226833ff)
+    "backend/open_webui/test/utils/test_docling_timeout.py"
+    "backend/open_webui/test/utils/test_lmstudio_memory.py"
+    "backend/open_webui/test/utils/test_skip_rag_injection.py"
+    "e2e/playwright.config.ts"                         ;; e2e infra introduced here
+    "e2e/helpers/auth.ts"
+    "e2e/helpers/chat.ts"
+    "e2e/helpers/docx.ts"
+    "e2e/tests/chat-basics.spec.ts"
+    "e2e/tests/conversion-e2e.spec.ts"
+    "e2e/tests/file-upload.spec.ts"
+    "e2e/tests/helper-contracts.spec.ts"
+    "e2e/tests/login.spec.ts"
+    "e2e/tests/skill-output.spec.ts"
+    "e2e/tests/skill-trigger.spec.ts"
+    "e2e/tests/translation-e2e.spec.ts"]
+   :modified-files
+   ["backend/open_webui/utils/middleware.py"            ;; skip_rag handler
+    "backend/open_webui/utils/opencode.py"              ;; 3-tier deliverable collection
+    "backend/open_webui/routers/files.py"               ;; upload bypass
+    "backend/open_webui/test/utils/test_work_dir_e2e.py" ;; work_dir test improvements
+    "src/lib/components/chat/MessageInput.svelte"       ;; upload UI + allSkipRag
+    "src/lib/components/chat/Chat.svelte"              ;; allSkipRag logic
+    "src/lib/components/workspace/Models/Capabilities.svelte" ;; +skip_rag toggle
+    "src/lib/constants.ts"                             ;; +skip_rag in DEFAULT_CAPABILITIES
+    "package.json"                                      ;; +playwright devDep + test scripts
+    "package-lock.json"
+    ".gitignore"]                                       ;; +playwright/e2e excludes
+   :conflict-risk :high}
+
+  ;;
+  ;; ═══════════════════════════════════════════════════════════
+  ;; Unit 6: Image Analysis Pipeline
+  ;; ═══════════════════════════════════════════════════════════
+  ;;
+  {:id          :image-analysis
+   :description "Automatic image OCR/description for non-vision models"
+   :depends-on  [:knowledge-export]                    ;; imports kg1.py + knowledge_export._async_llm_completion
+
+   :problem-solved
+   "使用者上傳圖片時，如果 LLM 不支援 vision (例如純文字模型)，
+    圖片只存在 storage 裡但 LLM 完全看不到內容。RAG 也無法搜尋
+    圖片的文字內容。"
+
+   :what-we-built
+   "1. **自動圖片分析 pipeline** (image_analysis.py, 290 lines)
+       - Upload 時自動觸發（背景 task）
+       - 先用 vision model 分類: OCR-text vs VISUAL
+       - OCR-text → GLM-4V/KG1 做 OCR 文字擷取
+       - VISUAL → vision model 描述圖片內容
+       - 結果存到 file.data.content → RAG 可搜尋
+
+    2. **Admin 開關**
+       - IMAGE_ANALYSIS_ENABLED config
+       - Admin Settings → Documents 裡可以 toggle"
+
+   :key-behaviors
+   ["上傳掃描文件截圖 → 自動 OCR → 文字存入 RAG 可搜尋"
+    "上傳照片 → 自動描述 → 純文字 LLM 可以理解圖片內容"
+    "背景執行，不阻斷 upload response"]
+
+   ;; 44c46f307 is monolithic — also touches middleware, retrieval, frontend.
+   :commits     ["44c46f307"]
+   :new-files
+   ["backend/open_webui/utils/image_analysis.py"]      ;; 290 lines
+   :modified-files
+   ["backend/open_webui/routers/files.py"              ;; image analysis trigger
+    "backend/open_webui/routers/retrieval.py"           ;; +30 lines
+    "backend/open_webui/config.py"                     ;; IMAGE_ANALYSIS_ENABLED
+    "backend/open_webui/main.py"                       ;; +7 lines startup
+    "backend/open_webui/utils/middleware.py"            ;; +84 lines
+    "backend/open_webui/utils/knowledge_export.py"     ;; +1/-1 incidental
+    "backend/open_webui/utils/research.py"             ;; +1/-1 incidental
+    "src/lib/components/admin/Settings/Documents.svelte" ;; +45 lines admin toggle
+    "src/lib/components/chat/Chat.svelte"              ;; +2/-4 minor
+    "src/lib/components/chat/MessageInput.svelte"]     ;; +2/-3 minor
+   :conflict-risk :medium}
+
+  ;;
+  ;; ═══════════════════════════════════════════════════════════
+  ;; Unit 7: Filename Sanitization
+  ;; ═══════════════════════════════════════════════════════════
+  ;;
+  {:id          :sanitize
+   :description "Centralized sanitize_filename with security hardening"
+
+   :problem-solved
+   "1. 5+ 個地方各自實作 filename sanitization — 規則不一致、涵蓋度不同。
+       有的 lowercase，有的不；有的擋 path traversal，有的不；
+       沒有一個處理 CJK 檔名（會把中文字直接寫進 prompt）。
+    2. misc.py 的舊版本只做 lowercase + strip non-word chars，
+       完全沒有 null byte、control char、prompt injection 防護。
+    3. CJK 檔名嵌入 prompt 時，LLM 可能把它當指令解讀。"
+
+   :what-we-built
+   "**單一 sanitize_filename() 函數** — pure function，no I/O:
+
+    Pipeline: raw → null-byte truncation → basename → control-char strip
+    → NFKC normalize → anyascii (CJK → romanized ASCII) → regex
+    extension extract → whitespace → hostile chars → hyphen collapse
+    → Windows reserved name check → length limit → done
+
+    保證:
+    - 輸出是純 ASCII: alphanumeric + dot + underscore + hyphen
+    - 無 path traversal (../ 不可能)
+    - 無 control chars (newline, null byte, tab)
+    - 無 shell-hostile chars (<>|?*(){}[]!@#$%^&+=~`';:\")
+    - CJK → romanized (文件.pdf → WenJian.pdf)
+    - Windows reserved names 加底線前綴 (CON → _CON)
+    - Stem ≤ 200 chars
+    - Idempotent (sanitize 兩次結果一樣)
+    - None input → 'unnamed'"
+
+   :key-behaviors
+   ["sanitize_filename('../../etc/passwd') → 'passwd'"
+    "sanitize_filename('文件.pdf') → 'WenJian.pdf'"
+    "sanitize_filename('file.pdf\\x00.exe') → 'file.pdf' (null-byte truncation)"
+    "sanitize_filename('CON.txt') → '_CON.txt'"
+    "sanitize_filename(None) → 'unnamed'"
+    "所有 upload handler 統一走這個函數 — 行為一致"]
+
+   :commits     ["b7793f729"]
+   :new-files
+   ["backend/open_webui/test/utils/test_sanitize_filename.py"]  ;; 255 lines, 32 test functions (54 items after parametrize)
+   :modified-files
+   ["backend/open_webui/utils/sanitize.py"             ;; +109 lines (sanitize_filename)
+    "backend/open_webui/utils/misc.py"                 ;; -old sanitize_filename (12 lines)
+    "backend/open_webui/routers/audio.py"              ;; import + call site
+    "backend/open_webui/routers/files.py"              ;; replaced inline 16-line sanitization
+    "backend/open_webui/routers/ollama.py"             ;; import + call site
+    "backend/open_webui/routers/pipelines.py"          ;; import + call site
+    "backend/open_webui/utils/middleware.py"            ;; import + collision avoidance
+    "src/lib/components/workspace/Skills/SkillEditor.svelte"  ;; extraMeta round-trip fix
+    "src/routes/(app)/workspace/skills/edit/+page.svelte"     ;; meta pass-through
+    "src/routes/(app)/workspace/skills/create/+page.svelte"   ;; meta in clone flow
+    "backend/open_webui/utils/knowledge_export.py"     ;; delegate to centralized
+    "backend/open_webui/utils/opencode.py"             ;; -sync_opencode_config_to_dir (40 lines)
+    "backend/open_webui/tools/builtin.py"              ;; -import sync fn
+    "backend/open_webui/test/utils/test_work_dir_e2e.py" ;; -sync tests (136 lines)
+    "pyproject.toml"                                   ;; +anyascii==0.3.3
+    "uv.lock"                                          ;; lockfile update
+    ".gitignore"]                                      ;; +test-results/
+   :conflict-risk :medium}
+
+  ;;
+  ;; ═══════════════════════════════════════════════════════════
+  ;; Unit 8: Upstream UI Patches
+  ;; ═══════════════════════════════════════════════════════════
+  ;;
+  {:id          :ui-patches
+   :description "Small surgical patches to upstream Svelte components"
+   :depends-on  [:skill-system :knowledge-export]
+
+   :problem-solved
+   "Agent skill 的狀態顯示、設定 UI、和各種整合點需要在既有的
+    upstream Svelte 元件裡加小量 code。"
+
+   :what-we-built
+   "分散在多個 Svelte 元件裡的小 patch:
+    - Chat.svelte: skill status 渲染
+    - MessageInput: upload progress statusText (extracting/embedding/indexing),
+      allSkipRag upload bypass, quick_mode status
+    - CallOverlay.svelte: !!navigator?.gpu → navigator?.gpu fix
+    - Audio Settings: !!navigator?.gpu → navigator?.gpu fix
+    - Documents Settings: knowledge export + KG1 admin UI (GLM-OCR project dir,
+      Ollama host/port, layout device, soffice path, timeout, concurrency)
+    - Models.svelte: !!navigator?.gpu → navigator?.gpu fix
+    - FileItem.svelte: +statusText prop with tooltip on processing spinner
+    - +layout.svelte: skill 預載 + Ollama connectivity check (getOllamaVersion
+      on startup, toast warning if unreachable)
+    - constants.ts: +skip_rag capability in DEFAULT_CAPABILITIES
+    - kokoro.worker.ts: !!navigator?.gpu → navigator?.gpu fix
+    - files/index.ts: +onProgress callback for upload status streaming"
+
+   :key-behaviors
+   ["chat 頁面能看到 agent skill status history"
+    "admin 設定頁面能 toggle image analysis / knowledge export"
+    "skill 在 app 啟動時就預載好，不用等到觸發"
+    "upload 時顯示 'Extracting content...' / 'Embedding...' / 'Generating index...' 等狀態"
+    "app 啟動時自動檢查 Ollama 連線，失敗時 toast warning"
+    "4 個檔案修正 !!navigator?.gpu → navigator?.gpu 的 double-bang bug"]
+
+   ;; These patches come from the monolithic commits 5f131d63e, 44c46f307.
+   ;; They are positional — line numbers drift when upstream changes.
+   :commits     ["5f131d63e" "44c46f307"]
+   ;; Note: 791303705 was previously listed here but its files all belong
+   ;; to Unit 1/2 (skills API, StatusHistory). Removed to avoid empty attribution.
+   :modified-files
+   ["src/lib/components/chat/Chat.svelte"
+    "src/lib/components/chat/MessageInput.svelte"       ;; upload progress statusText (via 5f131d63e)
+    "src/lib/components/chat/MessageInput/CallOverlay.svelte"
+    "src/lib/components/chat/Settings/Audio.svelte"
+    "src/lib/components/admin/Settings/Documents.svelte"
+    "src/lib/components/admin/Settings/Models.svelte"
+    "src/lib/components/common/FileItem.svelte"         ;; +statusText prop (via 5f131d63e)
+    "src/lib/apis/files/index.ts"                      ;; +onProgress callback (via 5f131d63e)
+    "src/lib/utils/index.ts"                           ;; let→const (via 5f131d63e)
+    "src/lib/workers/kokoro.worker.ts"
+    "src/routes/(app)/+layout.svelte"]
+   ;; Note: constants.ts is touched by 5226833ff (Unit 5), not by Unit 8 commits.
+   ;; It moves here after the 5226833ff monolithic split.
+   :conflict-risk :high
+   :notes "全部是 positional patches — 行號會因 upstream 改動而 drift。
+           需要逐檔手動 resolve。"}
+
+  ;;
+  ;; ═══════════════════════════════════════════════════════════
+  ;; Unit 9: Cleanup
+  ;; ═══════════════════════════════════════════════════════════
+  ;;
+  {:id          :cleanup
+   :description "Remove development artifacts + one-line bug fix"
+
+   :what-we-built
+   "1. 移除 AI_MEMORIES/ 開發殘留 (22 files)
+    2. 移除 .claude/ 暫存設定 (4 files)
+    3. 修正 middleware.py 的 UnboundLocalError:
+       有個地方 import Files 在 function scope 裡遮蔽了 module-level Files"
+
+   :commits     ["e36aaaf6c" "0e7fea64d"]
+   :modified-files
+   [".gitignore"                                       ;; +AI_MEMORIES, .claude excludes
+    "backend/open_webui/utils/middleware.py"]           ;; -1 line (UnboundLocalError fix)
+   :removed-files
+   ["AI_MEMORIES/* (22 files)"
+    ".claude/* (4 files)"]
+   :conflict-risk :none
+   :notes "UnboundLocalError fix (0e7fea64d) — verify the bug still exists in v0.8.12
+           before applying."}]
+
+ ;;
+ ;; ═══════════════════════════════════════════════════════════
+ ;; Monolithic Commits — MUST SPLIT BEFORE SQUASH
+ ;; Note: 09cb990e3 (17 files, Units 1+4) is dual-assigned but NOT listed here
+ ;; because its files cleanly partition into Unit 1 (opencode, builtin, tests)
+ ;; and Unit 4 (knowledge_export, research, kg1, retrieval) with no UI patches.
+ ;; It can be split trivially by file path without semantic ambiguity.
+ ;; ═══════════════════════════════════════════════════════════
+ ;;
+ :monolithic-commits
+ [{:commit "5f131d63e"
+   :subject "feat: add KG1 pipeline, knowledge export, research utils, and enhanced RAG"
+   :files-touched 51
+   :units-spanned [:opencode-engine :knowledge-export :ui-patches :cleanup]
+   :breakdown
+   {"Unit 4 (knowledge-export)"
+    ["backend/open_webui/utils/knowledge_export.py"
+     "backend/open_webui/utils/research.py"
+     "backend/open_webui/retrieval/loaders/kg1.py"
+     "backend/open_webui/retrieval/loaders/main.py"
+     "backend/open_webui/retrieval/utils.py"
+     "backend/open_webui/routers/retrieval.py"
+     "backend/open_webui/routers/files.py"
+     "backend/open_webui/config.py"
+     "backend/open_webui/main.py"
+     "backend/open_webui/data/readme.txt"
+     "package.json" "package-lock.json"]
+
+    "Unit 1 (opencode-engine)"
+    ["backend/open_webui/utils/opencode.py"
+     "backend/open_webui/tools/builtin.py"
+     "backend/open_webui/utils/middleware.py"]
+
+    "Unit 8 (ui-patches)"
+    ["src/lib/components/chat/Chat.svelte"
+     "src/lib/components/chat/MessageInput.svelte"
+     "src/lib/components/chat/MessageInput/CallOverlay.svelte"
+     "src/lib/components/chat/Settings/Audio.svelte"
+     "src/lib/components/common/FileItem.svelte"
+     "src/lib/components/admin/Settings/Documents.svelte"
+     "src/lib/components/admin/Settings/Models.svelte"
+     "src/lib/utils/index.ts"
+     "src/lib/workers/kokoro.worker.ts"
+     "src/routes/(app)/+layout.svelte"
+     "src/lib/apis/files/index.ts"
+     "src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AgentSkillStatus.svelte"
+     "src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte"]
+
+    "Cleanup (should be dropped on rebase)"
+    ["AI_MEMORIES/* (18 files)"                        ;; 5f131d63e adds 18; e36aaaf6c deletes 22 (incl 4 from 7f532dd54)
+     ".claude/* (3 files)"
+     ".gitignore"]}
+
+   :action "git rebase -i: split into 3-4 commits along unit boundaries.
+            AI_MEMORIES/ and .claude/ files → drop entirely (re-deleted by e36aaaf6c)."}
+
+  {:commit "44c46f307"
+   :subject "feat: image analysis pipeline"
+   :files-touched 12
+   :units-spanned [:image-analysis :ui-patches]
+   :breakdown
+   {"Unit 6 (image-analysis)"
+    ["backend/open_webui/utils/image_analysis.py"
+     "backend/open_webui/routers/files.py"
+     "backend/open_webui/routers/retrieval.py"
+     "backend/open_webui/config.py"
+     "backend/open_webui/main.py"
+     "backend/open_webui/utils/middleware.py"
+     "backend/open_webui/utils/knowledge_export.py"
+     "backend/open_webui/utils/research.py"]
+
+    "Unit 8 (ui-patches)"
+    ["src/lib/components/admin/Settings/Documents.svelte"
+     "src/lib/components/chat/Chat.svelte"
+     "src/lib/components/chat/MessageInput.svelte"]
+
+    "Cleanup"
+    [".claude/settings.local.json"]}
+
+   :action "git rebase -i: split backend vs frontend changes."}
+
+  {:commit "5226833ff"
+   :subject "feat(skip-rag): docling-based direct MD injection + upload bypass + security fixes"
+   :files-touched 28
+   :units-spanned [:doc-processing :opencode-engine :knowledge-export :ui-patches :cleanup]
+   :breakdown
+   {"Unit 5 (doc-processing) — primary"
+    ["backend/open_webui/utils/docling.py"
+     "backend/open_webui/utils/lmstudio_memory.py"
+     "backend/open_webui/utils/middleware.py"
+     "backend/open_webui/routers/files.py"
+     "backend/open_webui/test/utils/test_docling_timeout.py"
+     "backend/open_webui/test/utils/test_lmstudio_memory.py"
+     "backend/open_webui/test/utils/test_skip_rag_injection.py"
+     "e2e/* (12 files: playwright config + helpers + 8 specs)"
+     "package.json" "package-lock.json"]
+
+    "Unit 1 (opencode-engine)"
+    ["backend/open_webui/utils/opencode.py"
+     "backend/open_webui/test/utils/test_work_dir_e2e.py"]
+
+    "Unit 8 (ui-patches)"
+    ["src/lib/components/chat/Chat.svelte"
+     "src/lib/components/chat/MessageInput.svelte"
+     "src/lib/components/workspace/Models/Capabilities.svelte"
+     "src/lib/constants.ts"]
+
+    "Cleanup"
+    [".gitignore"]}
+
+   :action "git rebase -i: split docling+e2e (Unit 5) from opencode (Unit 1)
+            from UI patches (Unit 8). lmstudio_memory belongs with Unit 5."}
+
+  {:commit "8cc9eeeeb"
+   :subject "feat: work_dir mode, skill keyword intercept, and bug fixes"
+   :files-touched 9
+   :units-spanned [:opencode-engine :skill-system]
+   :breakdown
+   {"Unit 1 (opencode-engine)"
+    ["backend/open_webui/tools/builtin.py"
+     "backend/open_webui/utils/opencode.py"
+     "backend/open_webui/config.py"
+     "backend/open_webui/main.py"
+     "backend/open_webui/test/utils/test_work_dir_e2e.py"]
+
+    "Unit 2 (skill-system)"
+    ["backend/open_webui/models/skills.py"
+     "backend/open_webui/utils/middleware.py"]
+
+    "Incidental touches"
+    ["backend/open_webui/utils/knowledge_export.py"
+     "backend/open_webui/utils/research.py"]}
+
+   :action "git rebase -i: split work_dir mode (Unit 1) from SkillMeta changes (Unit 2)."}]
+
+ ;;
+ ;; ═══════════════════════════════════════════════════════════
+ ;; Conflict Hotspot Matrix
+ ;; ═══════════════════════════════════════════════════════════
+ ;;
+ :conflict-hotspots
+ {:critical
+  [{:file "backend/open_webui/utils/middleware.py"
+    :reason "8 units' commits touch it across 13 commits.
+             Upstream also heavily active. This is the #1 conflict hotspot.
+             All middleware changes must be consolidated into one coherent
+             patch before rebase."
+    :our-changes "+1131/-42"
+    :upstream-changes "heavily active (not measured)"}
+   {:file "backend/open_webui/tools/builtin.py"
+    :reason "run_agent_skill() is a +267 line new function in upstream-active file."
+    :our-changes "+267"}
+   {:file "backend/open_webui/routers/retrieval.py"
+    :reason "Upstream rewrote +640/-842 lines (massive refactor).
+             We added +567 lines: generate_document_index(), ~500 lines
+             of new admin API endpoints for all new RAG configs, KG1 settings,
+             embedding prefix config endpoints. Both sides made heavy changes."
+    :our-changes "+567/-10"
+    :upstream-changes "+640/-842"}
+   {:file "package-lock.json"
+    :reason "Upstream: +4462/-3009 lines. Do not merge — regenerate."
+    :our-changes "+173/-99"
+    :upstream-changes "+4462/-3009"
+    :action "regenerate"}]
+
+  :high
+  [{:file "backend/open_webui/routers/files.py"
+    :reason "upload handler: sanitize + image analysis + direct content"
+    :our-changes "inline sanitize → centralized, +image analysis hook"}
+   {:file "backend/open_webui/routers/skills.py"
+    :reason "Both sides modified (+55/-61 upstream, +206/-1 ours)"
+    :our-changes "+206/-1"
+    :upstream-changes "+55/-61"}
+   {:file "backend/open_webui/utils/tools.py"
+    :reason "Upstream near-complete rewrite (+401/-397). Our 5 lines
+             will land in completely different positions."
+    :our-changes "+5"
+    :upstream-changes "+401/-397"}
+   {:file "backend/open_webui/config.py"
+    :reason "~30 個新 PersistentConfig 項 — append-only 但行號會 drift"
+    :our-changes "+KG1_* (7), +IMAGE_ANALYSIS_* (3), +RAG_FULL_DOCUMENT_* (2),
+                  +RAG_SUBCHAT_CONCURRENCY, +RAG_DOCUMENT_INDEX_* (3),
+                  +RAG_KNOWLEDGE_EXPORT_* (2), +RAG_RESEARCH_MODEL,
+                  +RAG_KNOWLEDGE_ORGANIZER_MODEL, +RAG_USER_COLLECTION_ENABLED,
+                  +RAG_EMBEDDING_*_PREFIX → PersistentConfig (3),
+                  +OPENCODE_PATH, +DEFAULT_RAG_DOCUMENT_INDEX_PROMPT"}
+   {:file "backend/open_webui/main.py"
+    :reason "startup hooks + router mount"
+    :our-changes "+kill_all_opencode_processes, +knowledge export hook"}
+   {:file "src/lib/components/chat/Chat.svelte"
+    :reason "upstream 高頻修改"
+    :our-changes "skill status rendering patch"}
+   {:file "src/lib/components/chat/MessageInput.svelte"
+    :reason "Both sides modified (+76/-16 upstream, +45/-5 ours)"
+    :our-changes "+45/-5"
+    :upstream-changes "+76/-16"}]
+
+  :medium
+  [{:file "backend/open_webui/retrieval/utils.py"
+    :reason "Upstream massive refactor (+422/-526). Our changes small (+17/-17)
+             but anchor points may have moved entirely."
+    :our-changes "+17/-17"
+    :upstream-changes "+422/-526"}
+   {:file "backend/open_webui/utils/sanitize.py"
+    :reason "Our additions are appended — should merge cleanly if upstream
+             didn't restructure the file."
+    :our-changes "+109"}
+   {:file "backend/open_webui/utils/misc.py"
+    :reason "We removed old sanitize_filename. Check if upstream still has it."
+    :our-changes "-12 lines"}
+   {:file "backend/open_webui/models/skills.py"
+    :reason "SkillMeta additions (+type, +work_dir, +disk_path, +idle_timeout)"
+    :our-changes "SkillMeta field additions"}
+   {:file "backend/open_webui/retrieval/loaders/main.py"
+    :reason "KG1 loader registration — check if loader registry changed."
+    :our-changes "+KG1 registration"}
+   {:file "src/lib/utils/index.ts"
+    :reason "Upstream +68/-14. Our change is trivial (+1/-1)."
+    :our-changes "+1/-1"
+    :upstream-changes "+68/-14"}
+   {:file "src/routes/(app)/+layout.svelte"
+    :reason "skill preload patch in upstream-active file"}]
+
+  :low
+  [{:file "backend/open_webui/routers/audio.py"      :reason "import + 1 call site"}
+   {:file "backend/open_webui/routers/ollama.py"     :reason "import + 1 call site"}
+   {:file "backend/open_webui/routers/pipelines.py"  :reason "import + 1 call site"}
+   {:file "backend/open_webui/env.py"                :reason "env var additions"}
+   {:file "pyproject.toml"                           :reason "+anyascii dep"}
+   {:file "package.json"                             :reason "+playwright devDep"}
+   {:file "src/lib/constants.ts"                     :reason "+skill constants"}
+   {:file "src/lib/apis/skills/index.ts"             :reason "API client additions"}
+   {:file "src/lib/apis/files/index.ts"              :reason "skip_rag param"}]
+
+  :none
+  ["All 36 new files — zero conflict risk"]}
+
+ ;;
+ ;; ═══════════════════════════════════════════════════════════
+ ;; Rebase Strategy
+ ;; ═══════════════════════════════════════════════════════════
+ ;;
+ :rebase-strategy
+ {:approach :squash-by-unit
+
+  :rationale
+  "19 commits have 4 monolithic commits (5f131d63e, 44c46f307, 5226833ff,
+   8cc9eeeeb) that each span 2-5 units. middleware.py alone is touched by
+   8 units across 13 commits. Commit-by-commit rebase would cause repeated
+   conflicts on the same file with each commit. Squash into ~8 logical patches:
+   - Each patch conflicts once per file, not repeatedly
+   - Conflict content is a coherent semantic unit, easier to resolve
+   - If one unit's upstream changes are too large, it can be dropped + rewritten"
+
+  :pre-rebase-steps
+  ["STEP 0: Split monolithic commits before anything else.
+    git rebase -i e4e69a10e — mark 5f131d63e, 44c46f307, 5226833ff, 8cc9eeeeb as 'edit'.
+    For each, use git reset HEAD^ + selective git add to create separate commits
+    per unit boundary. See :monolithic-commits :breakdown for the split guide."
+   "STEP 1: Verify :pre-rebase-checklist items against v0.8.12 state."
+   "STEP 2: Squash by unit using interactive rebase."]
+
+  :suggested-order
+  [;; Phase 1: Leaf modules (無 upstream 依賴, 無 middleware 改動)
+   :cleanup                ;; 1. trivial，先清理
+   :sanitize               ;; 2. 純 utility，無 project imports
+
+   ;; Phase 2: New modules (mostly additive, low conflict)
+   :knowledge-export       ;; 3. 大量 new files + config additions
+
+   ;; Phase 3: Core integration (middleware.py 衝突區)
+   :opencode-engine        ;; 4. builtin.py (+267), main.py, opencode.py
+   :rag-optimization       ;; 5. middleware.py (direct content + cascade)
+   :doc-processing         ;; 6. middleware.py (skip_rag + docling)
+   :image-analysis         ;; 7. depends on :knowledge-export (kg1, _async_llm)
+
+   ;; Phase 4: Final integration (最高衝突風險)
+   :skill-system           ;; 8. middleware.py (skill intercept, 最大 patch) + frontend
+   :ui-patches]            ;; 9. positional Svelte patches，最後做
+   ;; Note: e2e tests (new files only) are embedded in :doc-processing
+   ;; since commit 5226833ff introduced both. No separate e2e step needed.
+
+  :pre-rebase-checklist
+  ["1. git diff v0.8.12 -- backend/open_webui/utils/middleware.py | wc -l"
+   "2. git diff v0.8.12 -- backend/open_webui/tools/builtin.py | wc -l"
+   "3. git diff v0.8.12 -- backend/open_webui/routers/retrieval.py | wc -l  ← CRITICAL: upstream +640/-842"
+   "4. git diff v0.8.12 -- backend/open_webui/utils/tools.py | wc -l  ← upstream near-rewrite +401/-397"
+   "5. grep sanitize_filename backend/open_webui/utils/misc.py  — upstream 是否還有舊版"
+   "6. grep 'class SkillMeta' backend/open_webui/models/skills.py  — upstream shape"
+   "7. git diff v0.8.12 -- src/lib/components/chat/Chat.svelte | wc -l"
+   "8. grep anyascii pyproject.toml at v0.8.12  — 是否已有此 dep"
+   "9. git diff v0.8.12 -- backend/open_webui/retrieval/utils.py | wc -l  ← upstream +422/-526"
+   "10. Regenerate package-lock.json — do NOT merge (+4462/-3009 upstream diff)"]}
+
+ ;;
+ ;; ═══════════════════════════════════════════════════════════
+ ;; Complete PersistentConfig Inventory
+ ;; ═══════════════════════════════════════════════════════════
+ ;; All new configs added by our branch. Missing any during rebase = silent breakage.
+ ;;
+ :new-configs
+ {;; KG1 Document Loader (7 configs)
+  :kg1
+  ["KG1_GLMOCR_PROJECT_DIR" "KG1_OLLAMA_HOST" "KG1_OLLAMA_PORT"
+   "KG1_LAYOUT_DEVICE" "KG1_SOFFICE_PATH" "KG1_TIMEOUT" "KG1_GLM_OCR_CONCURRENCY"]
+
+  ;; Image Analysis (3 configs)
+  :image-analysis
+  ["IMAGE_ANALYSIS_ENABLED" "IMAGE_ANALYSIS_CLASSIFIER_MODEL"
+   "IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH"]
+
+  ;; RAG Direct Content + Cascade (3 configs)
+  :rag-cascade
+  ["RAG_FULL_DOCUMENT_CONTEXT" "RAG_FULL_DOCUMENT_MAX_TOKENS"
+   "RAG_SUBCHAT_CONCURRENCY"]
+
+  ;; Document Index Generation (3 PersistentConfigs + 1 string constant)
+  :doc-index
+  ["RAG_DOCUMENT_INDEX_GENERATION" "RAG_DOCUMENT_INDEX_MODEL"
+   "RAG_DOCUMENT_INDEX_TIMEOUT"]
+  ;; DEFAULT_RAG_DOCUMENT_INDEX_PROMPT is a plain string constant, NOT PersistentConfig
+
+  ;; Knowledge Export (4 configs)
+  :knowledge-export
+  ["RAG_KNOWLEDGE_EXPORT_ENABLED" "RAG_KNOWLEDGE_EXPORT_DIR"
+   "RAG_RESEARCH_MODEL" "RAG_KNOWLEDGE_ORGANIZER_MODEL"]
+
+  ;; User Collection (1 config)
+  :user-collection
+  ["RAG_USER_COLLECTION_ENABLED"]
+
+  ;; Embedding Prefix — converted from env-only to PersistentConfig (3 configs)
+  :embedding-prefix
+  ["RAG_EMBEDDING_QUERY_PREFIX" "RAG_EMBEDDING_CONTENT_PREFIX"
+   "RAG_EMBEDDING_PREFIX_FIELD_NAME"]
+
+  ;; env.py additions (not PersistentConfig)
+  :env-vars
+  ["OPENCODE_PATH" "LMSTUDIO_MEMORY_BUDGET_GB"]
+  ;; Note: OPENCODE_MODEL_NAME_MIDDLE_NAME was added (4077a36eb) then
+  ;; removed (e860e9bbe). NOT in final codebase.
+  }}
