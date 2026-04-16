@@ -38,7 +38,7 @@ class Pipe:
         )
         hermes_api_key: str = Field(
             default='',
-            description='Bearer token for hermes API (matches API_SERVER_KEY)',
+            description='Bearer token for hermes API (matches API_SERVER_KEY). Required for authenticated session continuity.',
             json_schema_extra={'input': {'type': 'password'}},
         )
         request_timeout: int = Field(
@@ -95,6 +95,9 @@ class Pipe:
 
         Yields OpenAI-format chunk dicts for content streaming.
         Emits status events via __event_emitter__ for tool progress.
+        Falls back to stateless request-body history when no API key is
+        configured, because Hermes only accepts session continuation on
+        authenticated requests.
         """
         url = self.valves.hermes_api_url.rstrip('/')
         headers = {
@@ -102,9 +105,8 @@ class Pipe:
             **self._auth_headers(),
         }
 
-        # Session continuity: pass chat_id as hermes session ID
-        if __chat_id__:
-            headers['X-Hermes-Session-Id'] = str(__chat_id__)
+        # Hermes only accepts X-Hermes-Session-Id on authenticated requests.
+        session_continuity_enabled = self._maybe_add_session_header(headers, __chat_id__)
 
         # Inject uploaded file paths into system prompt so hermes can
         # read them from the shared filesystem.
@@ -157,6 +159,11 @@ class Pipe:
                             error_msg = json.loads(error_body).get('error', {}).get('message', error_msg)
                         except Exception:
                             pass
+                        if response.status_code == 403 and session_continuity_enabled:
+                            error_msg = (
+                                f'{error_msg}. Hermes session continuity requires API_SERVER_KEY on the '
+                                'Hermes server and a matching hermes_api_key in this pipe.'
+                            )
                         await self._emit_status(__event_emitter__, 'error', error_msg, done=True)
                         yield {'error': {'detail': error_msg}}
                         return
@@ -246,6 +253,21 @@ class Pipe:
         if self.valves.hermes_api_key:
             return {'Authorization': f'Bearer {self.valves.hermes_api_key}'}
         return {}
+
+    def _maybe_add_session_header(self, headers: dict, chat_id: str | None) -> bool:
+        """Add Hermes session header only when auth-backed continuation is possible."""
+        if not chat_id:
+            return False
+        if not self.valves.hermes_api_key:
+            log.debug(
+                'Skipping X-Hermes-Session-Id for chat %s because hermes_api_key is not configured; '
+                'requests will rely on stateless request-body history.',
+                chat_id,
+            )
+            return False
+
+        headers['X-Hermes-Session-Id'] = str(chat_id)
+        return True
 
     async def _resolve_file_paths(self, files: list | None) -> str:
         """Resolve Open WebUI file IDs to filesystem paths."""

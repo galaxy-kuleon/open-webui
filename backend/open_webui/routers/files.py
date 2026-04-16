@@ -99,6 +99,7 @@ def process_uploaded_file(
     db: Optional[Session] = None,
 ):
     def _process_handler(db_session):
+        # Image analysis and normal RAG extraction both flow through this path.
         try:
             content_type = file.content_type
 
@@ -119,6 +120,17 @@ def process_uploaded_file(
                         ProcessFileForm(file_id=file_item.id, content=result.get('text', '')),
                         user=user,
                         db=db_session,
+                    )
+                elif content_type.startswith('image/') and getattr(
+                    request.app.state.config, 'IMAGE_ANALYSIS_ENABLED', False
+                ):
+                    from open_webui.utils.image_analysis import analyze_image
+
+                    analyze_image(
+                        app=request.app,
+                        file_id=file_item.id,
+                        file_path=file_path,
+                        content_type=content_type,
                     )
                 elif (not content_type.startswith(('image/', 'video/'))) or (
                     request.app.state.config.CONTENT_EXTRACTION_ENGINE == 'external'
