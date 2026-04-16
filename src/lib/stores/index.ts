@@ -108,6 +108,8 @@ export const showCallOverlay = writable(false);
 export const showFileNav = writable(false);
 export const showFileNavPath: Writable<string | null> = writable(null);
 export const showFileNavDir: Writable<string | null> = writable(null);
+// Session-only: not persisted across reloads. No localStorage backing exists.
+// Do not add restore logic keyed on this store; it is always null on mount.
 export const selectedTerminalId: Writable<string | null> = writable(null);
 
 export const artifactCode = writable(null);

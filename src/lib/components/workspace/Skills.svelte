@@ -15,7 +15,8 @@
 		exportSkills,
 		createNewSkill,
 		deleteSkillById,
-		toggleSkillById
+		toggleSkillById,
+		uploadSkillZip
 	} from '$lib/apis/skills';
 	import { capitalizeFirstLetter, parseFrontmatter, formatSkillName } from '$lib/utils';
 	import TagInput from '$lib/components/common/Tags/TagInput.svelte';
@@ -199,9 +200,9 @@
 					bind:this={importInputElement}
 					bind:files={importFiles}
 					type="file"
-					accept=".md,.json"
+					accept=".md,.json,.zip"
 					hidden
-					on:change={() => {
+					on:change={async () => {
 						if (importFiles && importFiles.length > 0) {
 							const file = importFiles[0];
 							const ext = file.name.split('.').pop()?.toLowerCase();
@@ -232,6 +233,17 @@
 									}
 								};
 								reader.readAsText(file);
+							} else if (ext === 'zip') {
+								// ZIP import: upload via multipart API
+								try {
+									await uploadSkillZip(localStorage.token, file);
+									toast.success($i18n.t('Skill imported successfully'));
+									page = 1;
+									loadSkillItems();
+									_skills.set(await getSkills(localStorage.token));
+								} catch (error) {
+									toast.error(`${error}`);
+								}
 							} else {
 								// Markdown import: parse frontmatter and open in editor
 								const reader = new FileReader();
