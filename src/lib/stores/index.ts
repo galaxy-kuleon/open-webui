@@ -79,6 +79,11 @@ export const pyodideWorker: Writable<Worker | null> = writable(null);
 
 export const banners: Writable<Banner[]> = writable([]);
 
+// Fail-closed: false until the RAG config fetch confirms IMAGE_ANALYSIS_ENABLED=true.
+// Populated once at app init (layout.svelte onMount, after session user is confirmed).
+// MessageInput.svelte reads this to gate non-vision image uploads.
+export const imageAnalysisEnabled: Writable<boolean> = writable(false);
+
 export const settings: Writable<Settings> = writable({});
 
 export const audioQueue = writable<AudioQueue | null>(null);

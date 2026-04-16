@@ -35,7 +35,8 @@
 		showControls,
 		showFileNavPath,
 		showFileNavDir,
-		pyodideWorker
+		pyodideWorker,
+		imageAnalysisEnabled
 	} from '$lib/stores';
 	import { getFileContentById } from '$lib/apis/files';
 	import { goto } from '$app/navigation';
@@ -53,6 +54,7 @@
 	import { getSessionUser, userSignOut } from '$lib/apis/auths';
 	import { getAllTags, getChatList } from '$lib/apis/chats';
 	import { chatCompletion } from '$lib/apis/openai';
+	import { getRAGConfig } from '$lib/apis/retrieval';
 	import {
 		addOpenAIConnection,
 		removeOpenAIConnection,
@@ -954,6 +956,16 @@
 							await config.set(await getBackendConfig());
 						} catch (error) {
 							console.error('Error refreshing backend config:', error);
+						}
+						// Populate image-analysis capability flag from RAG config.
+						// Default is false (fail-closed); we only open the gate when the
+						// backend explicitly says IMAGE_ANALYSIS_ENABLED=true.
+						try {
+							const ragConfig = await getRAGConfig(localStorage.token);
+							imageAnalysisEnabled.set(ragConfig?.IMAGE_ANALYSIS_ENABLED === true);
+						} catch (error) {
+							console.error('Error fetching RAG config for image analysis flag:', error);
+							// Leave store at default false — fail-closed is correct here.
 						}
 					} else {
 						// Redirect Invalid Session User to /auth Page
