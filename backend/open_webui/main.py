@@ -541,6 +541,7 @@ from open_webui.utils.auth import (
     create_admin_user,
 )
 from open_webui.utils.plugin import install_tool_and_function_dependencies
+from open_webui.utils.builtin_pipes import ensure_builtin_pipes
 from open_webui.utils.oauth import (
     get_oauth_client_info_with_dynamic_client_registration,
     get_oauth_client_info_with_static_credentials,
@@ -630,6 +631,9 @@ async def lifespan(app: FastAPI):
     # when the first user lands on the / route.
     log.info('Installing external dependencies of functions and tools...')
     install_tool_and_function_dependencies()
+
+    # Register codebase-built-in pipe functions (e.g. hermes-agent)
+    ensure_builtin_pipes()
 
     app.state.redis = get_redis_connection(
         redis_url=REDIS_URL,

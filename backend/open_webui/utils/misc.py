@@ -575,16 +575,12 @@ def validate_email_format(email: str) -> bool:
 
 
 def sanitize_filename(file_name):
-    # Convert to lowercase
-    lower_case_file_name = file_name.lower()
+    # DEPRECATED: Use open_webui.utils.sanitize.sanitize_filename instead.
+    # This shim exists only for backwards compatibility with callers that
+    # import from misc.py.  Will be removed in a future release.
+    from open_webui.utils.sanitize import sanitize_filename as _sanitize
 
-    # Remove special characters using regular expression
-    sanitized_file_name = re.sub(r'[^\w\s]', '', lower_case_file_name)
-
-    # Replace spaces with dashes
-    final_file_name = re.sub(r'\s+', '-', sanitized_file_name)
-
-    return final_file_name
+    return _sanitize(file_name)
 
 
 def sanitize_text_for_db(text: str) -> str:

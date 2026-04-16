@@ -310,3 +310,12 @@ dist
 cypress/videos
 cypress/screenshots
 .vscode/settings.json
+
+# Development artifacts
+AI_MEMORIES/
+.claude/
+
+# Test artifacts
+test-results/
+playwright-report/
+e2e/test-results/

@@ -2834,11 +2834,21 @@ RAG_EMBEDDING_CONCURRENT_REQUESTS = PersistentConfig(
     int(os.getenv('RAG_EMBEDDING_CONCURRENT_REQUESTS', '0')),
 )
 
-RAG_EMBEDDING_QUERY_PREFIX = os.environ.get('RAG_EMBEDDING_QUERY_PREFIX', None)
-
-RAG_EMBEDDING_CONTENT_PREFIX = os.environ.get('RAG_EMBEDDING_CONTENT_PREFIX', None)
-
-RAG_EMBEDDING_PREFIX_FIELD_NAME = os.environ.get('RAG_EMBEDDING_PREFIX_FIELD_NAME', None)
+RAG_EMBEDDING_QUERY_PREFIX = PersistentConfig(
+    "RAG_EMBEDDING_QUERY_PREFIX",
+    "rag.embedding_query_prefix",
+    os.environ.get("RAG_EMBEDDING_QUERY_PREFIX", ""),
+)
+RAG_EMBEDDING_CONTENT_PREFIX = PersistentConfig(
+    "RAG_EMBEDDING_CONTENT_PREFIX",
+    "rag.embedding_content_prefix",
+    os.environ.get("RAG_EMBEDDING_CONTENT_PREFIX", ""),
+)
+RAG_EMBEDDING_PREFIX_FIELD_NAME = PersistentConfig(
+    "RAG_EMBEDDING_PREFIX_FIELD_NAME",
+    "rag.embedding_prefix_field_name",
+    os.environ.get("RAG_EMBEDDING_PREFIX_FIELD_NAME", ""),
+)
 
 RAG_RERANKING_ENGINE = PersistentConfig(
     'RAG_RERANKING_ENGINE',
@@ -4027,4 +4037,181 @@ LDAP_ATTRIBUTE_FOR_GROUPS = PersistentConfig(
     'LDAP_ATTRIBUTE_FOR_GROUPS',
     'ldap.server.attribute_for_groups',
     os.environ.get('LDAP_ATTRIBUTE_FOR_GROUPS', 'memberOf'),
+)
+
+
+####################################
+# KG1 (GLM-OCR) settings
+####################################
+
+KG1_GLMOCR_PROJECT_DIR = PersistentConfig(
+    "KG1_GLMOCR_PROJECT_DIR",
+    "rag.kg1_glmocr_project_dir",
+    os.environ.get("KG1_GLMOCR_PROJECT_DIR", ""),
+)
+
+KG1_OLLAMA_HOST = PersistentConfig(
+    "KG1_OLLAMA_HOST",
+    "rag.kg1_ollama_host",
+    os.environ.get("KG1_OLLAMA_HOST", "127.0.0.1"),
+)
+
+KG1_OLLAMA_PORT = PersistentConfig(
+    "KG1_OLLAMA_PORT",
+    "rag.kg1_ollama_port",
+    os.environ.get("KG1_OLLAMA_PORT", "11434"),
+)
+
+KG1_LAYOUT_DEVICE = PersistentConfig(
+    "KG1_LAYOUT_DEVICE",
+    "rag.kg1_layout_device",
+    os.environ.get("KG1_LAYOUT_DEVICE", "mps"),
+)
+
+KG1_SOFFICE_PATH = PersistentConfig(
+    "KG1_SOFFICE_PATH",
+    "rag.kg1_soffice_path",
+    os.environ.get("KG1_SOFFICE_PATH", "soffice"),
+)
+
+KG1_TIMEOUT = PersistentConfig(
+    "KG1_TIMEOUT",
+    "rag.kg1_timeout",
+    os.environ.get("KG1_TIMEOUT", "600"),
+)
+
+KG1_GLM_OCR_CONCURRENCY = PersistentConfig(
+    "KG1_GLM_OCR_CONCURRENCY",
+    "rag.kg1_glm_ocr_concurrency",
+    os.environ.get("KG1_GLM_OCR_CONCURRENCY", "1"),
+)
+
+####################################
+# Image Analysis Pipeline
+####################################
+
+IMAGE_ANALYSIS_ENABLED = PersistentConfig(
+    "IMAGE_ANALYSIS_ENABLED",
+    "rag.image_analysis_enabled",
+    os.environ.get("IMAGE_ANALYSIS_ENABLED", "false").lower() == "true",
+)
+
+IMAGE_ANALYSIS_CLASSIFIER_MODEL = PersistentConfig(
+    "IMAGE_ANALYSIS_CLASSIFIER_MODEL",
+    "rag.image_analysis_classifier_model",
+    os.environ.get("IMAGE_ANALYSIS_CLASSIFIER_MODEL", ""),
+)
+
+IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH = PersistentConfig(
+    "IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH",
+    "rag.image_analysis_max_classify_width",
+    int(os.environ.get("IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH", "2000")),
+)
+
+####################################
+# RAG Direct Content + Cascade
+####################################
+
+RAG_FULL_DOCUMENT_CONTEXT = PersistentConfig(
+    "RAG_FULL_DOCUMENT_CONTEXT",
+    "rag.full_document_context",
+    os.getenv("RAG_FULL_DOCUMENT_CONTEXT", "False").lower() == "true",
+)
+
+RAG_FULL_DOCUMENT_MAX_TOKENS = PersistentConfig(
+    "RAG_FULL_DOCUMENT_MAX_TOKENS",
+    "rag.full_document_max_tokens",
+    int(os.environ.get("RAG_FULL_DOCUMENT_MAX_TOKENS", "128000")),
+)
+
+RAG_SUBCHAT_CONCURRENCY = PersistentConfig(
+    "RAG_SUBCHAT_CONCURRENCY",
+    "rag.subchat_concurrency",
+    int(os.environ.get("RAG_SUBCHAT_CONCURRENCY", "3")),
+)
+
+DEFAULT_RAG_SUBCHAT_EXTRACTION_TEMPLATE = """You are a document analysis assistant. Your task is to extract ONLY the information relevant to the user's query from the provided document.
+
+Rules:
+- Be concise but complete - do not omit relevant details
+- Preserve exact quotes, numbers, dates, and names when relevant
+- If the document contains no relevant information, respond with: "No relevant information found."
+- Do not add information not present in the document
+- Do not provide analysis or opinions - only extract"""
+
+####################################
+# Document Index Generation
+####################################
+
+RAG_DOCUMENT_INDEX_GENERATION = PersistentConfig(
+    "RAG_DOCUMENT_INDEX_GENERATION",
+    "rag.document_index_generation",
+    os.getenv("RAG_DOCUMENT_INDEX_GENERATION", "False").lower() == "true",
+)
+
+DEFAULT_RAG_DOCUMENT_INDEX_PROMPT = """You are a document indexing assistant. Analyze the following document and produce a structured index that captures all searchable dimensions of the content. This index will be used for semantic search retrieval.
+
+Extract the following dimensions (skip any dimension that does not apply):
+
+**Entities**: All people, organizations, roles, systems, products mentioned
+**Events & Actions**: What happened, what was done, what was decided, what was requested
+**Temporal**: Dates, time periods, deadlines, sequences, chronological markers
+**Spatial**: Locations, addresses, regions, jurisdictions
+**Quantitative**: Numbers, amounts, measurements, statistics, scores, percentages
+**Relationships & Interactions**: Who relates to whom, who owes whom, who reports to whom, dependencies, agreements, obligations, expectations
+**Causality & Reasoning**: Why something happened, causes, consequences, conditions, if-then relationships
+**Categories & Topics**: Main subjects, domains, tags, classifications
+**Status & State**: Current state of affairs, pending items, completed items, open questions
+**Artifacts**: Documents, files, systems, tools, references mentioned
+
+Format: Use compact key-value pairs grouped by dimension. Preserve original language for proper nouns, technical terms, and quoted content. Be exhaustive but concise — every fact that someone might search for should appear here."""
+
+RAG_DOCUMENT_INDEX_MODEL = PersistentConfig(
+    "RAG_DOCUMENT_INDEX_MODEL",
+    "rag.document_index_model",
+    os.environ.get("RAG_DOCUMENT_INDEX_MODEL", ""),
+)
+
+RAG_DOCUMENT_INDEX_TIMEOUT = PersistentConfig(
+    "RAG_DOCUMENT_INDEX_TIMEOUT",
+    "rag.document_index_timeout",
+    int(os.environ.get("RAG_DOCUMENT_INDEX_TIMEOUT", "600")),
+)
+
+####################################
+# Knowledge Export
+####################################
+
+RAG_KNOWLEDGE_EXPORT_ENABLED = PersistentConfig(
+    "RAG_KNOWLEDGE_EXPORT_ENABLED",
+    "rag.knowledge_export_enabled",
+    os.getenv("RAG_KNOWLEDGE_EXPORT_ENABLED", "False").lower() == "true",
+)
+
+RAG_KNOWLEDGE_EXPORT_DIR = PersistentConfig(
+    "RAG_KNOWLEDGE_EXPORT_DIR",
+    "rag.knowledge_export_dir",
+    os.environ.get("RAG_KNOWLEDGE_EXPORT_DIR", ""),
+)
+
+RAG_RESEARCH_MODEL = PersistentConfig(
+    "RAG_RESEARCH_MODEL",
+    "rag.research_model",
+    os.environ.get("RAG_RESEARCH_MODEL", ""),
+)
+
+RAG_KNOWLEDGE_ORGANIZER_MODEL = PersistentConfig(
+    "RAG_KNOWLEDGE_ORGANIZER_MODEL",
+    "rag.knowledge_organizer_model",
+    os.environ.get("RAG_KNOWLEDGE_ORGANIZER_MODEL", ""),
+)
+
+####################################
+# User Collection
+####################################
+
+RAG_USER_COLLECTION_ENABLED = PersistentConfig(
+    "RAG_USER_COLLECTION_ENABLED",
+    "rag.user_collection_enabled",
+    os.getenv("RAG_USER_COLLECTION_ENABLED", "True").lower() == "true",
 )
