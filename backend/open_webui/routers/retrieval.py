@@ -359,17 +359,11 @@ async def update_embedding_config(request: Request, form_data: EmbeddingModelUpd
         request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS = form_data.RAG_EMBEDDING_CONCURRENT_REQUESTS
 
         if form_data.RAG_EMBEDDING_QUERY_PREFIX is not None:
-            request.app.state.config.RAG_EMBEDDING_QUERY_PREFIX = (
-                form_data.RAG_EMBEDDING_QUERY_PREFIX
-            )
+            request.app.state.config.RAG_EMBEDDING_QUERY_PREFIX = form_data.RAG_EMBEDDING_QUERY_PREFIX
         if form_data.RAG_EMBEDDING_CONTENT_PREFIX is not None:
-            request.app.state.config.RAG_EMBEDDING_CONTENT_PREFIX = (
-                form_data.RAG_EMBEDDING_CONTENT_PREFIX
-            )
+            request.app.state.config.RAG_EMBEDDING_CONTENT_PREFIX = form_data.RAG_EMBEDDING_CONTENT_PREFIX
         if form_data.RAG_EMBEDDING_PREFIX_FIELD_NAME is not None:
-            request.app.state.config.RAG_EMBEDDING_PREFIX_FIELD_NAME = (
-                form_data.RAG_EMBEDDING_PREFIX_FIELD_NAME
-            )
+            request.app.state.config.RAG_EMBEDDING_PREFIX_FIELD_NAME = form_data.RAG_EMBEDDING_PREFIX_FIELD_NAME
 
         # Sync PersistentConfig values for utils.py access
         from open_webui.config import (
@@ -1048,14 +1042,10 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         else request.app.state.config.KG1_GLMOCR_PROJECT_DIR
     )
     request.app.state.config.KG1_OLLAMA_HOST = (
-        form_data.KG1_OLLAMA_HOST
-        if form_data.KG1_OLLAMA_HOST is not None
-        else request.app.state.config.KG1_OLLAMA_HOST
+        form_data.KG1_OLLAMA_HOST if form_data.KG1_OLLAMA_HOST is not None else request.app.state.config.KG1_OLLAMA_HOST
     )
     request.app.state.config.KG1_OLLAMA_PORT = (
-        form_data.KG1_OLLAMA_PORT
-        if form_data.KG1_OLLAMA_PORT is not None
-        else request.app.state.config.KG1_OLLAMA_PORT
+        form_data.KG1_OLLAMA_PORT if form_data.KG1_OLLAMA_PORT is not None else request.app.state.config.KG1_OLLAMA_PORT
     )
     request.app.state.config.KG1_LAYOUT_DEVICE = (
         form_data.KG1_LAYOUT_DEVICE
@@ -1068,9 +1058,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         else request.app.state.config.KG1_SOFFICE_PATH
     )
     request.app.state.config.KG1_TIMEOUT = (
-        form_data.KG1_TIMEOUT
-        if form_data.KG1_TIMEOUT is not None
-        else request.app.state.config.KG1_TIMEOUT
+        form_data.KG1_TIMEOUT if form_data.KG1_TIMEOUT is not None else request.app.state.config.KG1_TIMEOUT
     )
     request.app.state.config.KG1_GLM_OCR_CONCURRENCY = (
         form_data.KG1_GLM_OCR_CONCURRENCY
@@ -1715,11 +1703,7 @@ def save_docs_to_vector_db(
         future = asyncio.run_coroutine_threadsafe(
             embedding_function(
                 list(map(lambda x: x.replace('\n', ' '), texts)),
-                prefix=(
-                    RAG_EMBEDDING_CONTENT_PREFIX.value
-                    if RAG_EMBEDDING_CONTENT_PREFIX.value
-                    else None
-                ),
+                prefix=(RAG_EMBEDDING_CONTENT_PREFIX.value if RAG_EMBEDDING_CONTENT_PREFIX.value else None),
                 user=user,
             ),
             request.app.state.main_loop,
@@ -1780,8 +1764,7 @@ def _split_text_by_tokens(text: str, chunk_size: int, overlap: int) -> list[str]
         start = end - overlap  # overlap for continuity
 
     log.info(
-        f'Document index: split {total} tokens into {len(chunks)} chunks '
-        f'(chunk_size={chunk_size}, overlap={overlap})'
+        f'Document index: split {total} tokens into {len(chunks)} chunks (chunk_size={chunk_size}, overlap={overlap})'
     )
     return chunks
 
@@ -1803,15 +1786,14 @@ def _call_index_llm(
     }
 
     future = asyncio.run_coroutine_threadsafe(
-        generate_chat_completion(
-            request, form_data=payload, user=user, bypass_filter=True
-        ),
+        generate_chat_completion(request, form_data=payload, user=user, bypass_filter=True),
         request.app.state.main_loop,
     )
     response = future.result(timeout=timeout)  # 600s default to handle large docs
 
     if hasattr(response, 'body'):
         import json as _json
+
         body = _json.loads(response.body.decode('utf-8'))
         return body['choices'][0]['message']['content']
     elif isinstance(response, dict) and 'choices' in response:
@@ -1850,9 +1832,7 @@ def generate_document_index(
     if not text_content or not text_content.strip():
         return None
 
-    timeout = getattr(
-        request.app.state.config, 'RAG_DOCUMENT_INDEX_TIMEOUT', 600
-    ) or 600
+    timeout = getattr(request.app.state.config, 'RAG_DOCUMENT_INDEX_TIMEOUT', 600) or 600
 
     chunks = _split_text_by_tokens(text_content, INDEX_CHUNK_SIZE, INDEX_CHUNK_OVERLAP)
 
@@ -1860,9 +1840,12 @@ def generate_document_index(
         if len(chunks) == 1:
             # Small document: single pass
             return _call_index_llm(
-                request, model_id, DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
+                request,
+                model_id,
+                DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
                 f'Document: {filename}\n\n{text_content}',
-                user, timeout=timeout,
+                user,
+                timeout=timeout,
             )
 
         # Large document: index each chunk sequentially, then merge
@@ -1871,9 +1854,12 @@ def generate_document_index(
             part_label = f'Part {i + 1}/{len(chunks)}'
             log.info(f'Document index: generating index for {filename} [{part_label}]')
             part_index = _call_index_llm(
-                request, model_id, DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
+                request,
+                model_id,
+                DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
                 f'Document: {filename} [{part_label}]\n\n{chunk}',
-                user, timeout=timeout,
+                user,
+                timeout=timeout,
             )
             if part_index:
                 part_indexes.append(f'## {part_label}\n\n{part_index}')
@@ -1885,17 +1871,11 @@ def generate_document_index(
             return None
 
         merged = '\n\n---\n\n'.join(part_indexes)
-        log.info(
-            f'Document index: merged {len(part_indexes)}/{len(chunks)} parts '
-            f'({len(merged)} chars) for {filename}'
-        )
+        log.info(f'Document index: merged {len(part_indexes)}/{len(chunks)} parts ({len(merged)} chars) for {filename}')
         return merged
 
     except Exception as e:
-        log.error(
-            f'Document index generation failed for {filename}: '
-            f'{type(e).__name__}: {e or "(no message)"}'
-        )
+        log.error(f'Document index generation failed for {filename}: {type(e).__name__}: {e or "(no message)"}')
         return None
 
 
@@ -1986,9 +1966,7 @@ def process_file(
                     file_path = Storage.get_file(file_path)
 
                     # Progress: extracting content
-                    Files.update_file_data_by_id(
-                        file.id, {'status': 'processing:extracting'}, db=db
-                    )
+                    Files.update_file_data_by_id(file.id, {'status': 'processing:extracting'}, db=db)
                     db.commit()
 
                     loader = Loader(
@@ -2030,9 +2008,7 @@ def process_file(
                         KG1_SOFFICE_PATH=request.app.state.config.KG1_SOFFICE_PATH,
                         KG1_TIMEOUT=request.app.state.config.KG1_TIMEOUT,
                         KG1_GLM_OCR_CONCURRENCY=request.app.state.config.KG1_GLM_OCR_CONCURRENCY,
-                        status_callback=lambda s: Files.update_file_data_by_id(
-                            file.id, {'status': s}
-                        ),
+                        status_callback=lambda s: Files.update_file_data_by_id(file.id, {'status': s}),
                     )
                     docs = loader.load(file.filename, file.meta.get('content_type'), file_path)
 
@@ -2084,9 +2060,7 @@ def process_file(
             else:
                 try:
                     # Progress: embedding
-                    Files.update_file_data_by_id(
-                        file.id, {'status': 'processing:embedding'}, db=db
-                    )
+                    Files.update_file_data_by_id(file.id, {'status': 'processing:embedding'}, db=db)
                     # Commit any pending changes before the slow embedding step.
                     # Note: file is already a Pydantic model (not ORM), so no expunge needed.
                     db.commit()
@@ -2109,10 +2083,7 @@ def process_file(
 
                     # Generate document index if enabled
                     index_content = None
-                    if (
-                        result
-                        and request.app.state.config.RAG_DOCUMENT_INDEX_GENERATION
-                    ):
+                    if result and request.app.state.config.RAG_DOCUMENT_INDEX_GENERATION:
                         try:
                             log.info(f'Generating document index for {file.filename}')
                             with get_db() as session:
@@ -2128,10 +2099,7 @@ def process_file(
                                 user=user,
                             )
                             if index_content:
-                                log.info(
-                                    f'Document index generated: {len(index_content)} chars '
-                                    f'for {file.filename}'
-                                )
+                                log.info(f'Document index generated: {len(index_content)} chars for {file.filename}')
 
                                 # Embed index into the same collection
                                 index_docs = [
@@ -2159,13 +2127,10 @@ def process_file(
                                     add=True,
                                     user=user,
                                 )
-                                log.info(
-                                    f'Document index embedded into {collection_name}'
-                                )
+                                log.info(f'Document index embedded into {collection_name}')
                         except Exception as e:
                             log.error(
-                                f'Document index generation failed for '
-                                f'{file.filename}, continuing without index: {e}'
+                                f'Document index generation failed for {file.filename}, continuing without index: {e}'
                             )
 
                     # User collection: embed docs + index into user-{user_id}
@@ -2219,14 +2184,9 @@ def process_file(
                                     add=True,
                                     user=user,
                                 )
-                            log.info(
-                                f'User collection: embedded {file.filename} into {user_collection}'
-                            )
+                            log.info(f'User collection: embedded {file.filename} into {user_collection}')
                         except Exception as e:
-                            log.error(
-                                f'User collection embedding failed for '
-                                f'{file.filename}: {e}'
-                            )
+                            log.error(f'User collection embedding failed for {file.filename}: {e}')
 
                     if result:
                         # Fresh session for the final update.
@@ -2253,10 +2213,7 @@ def process_file(
 
                         # Knowledge export: write .md + .index.md to filesystem (non-blocking)
                         export_dir = request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR
-                        if (
-                            request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED
-                            and export_dir
-                        ):
+                        if request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED and export_dir:
                             try:
                                 from open_webui.utils.knowledge_export import (
                                     export_document_files,
@@ -2272,9 +2229,7 @@ def process_file(
                                 )
                                 enqueue_organization(app=request.app)
                             except Exception as e:
-                                log.error(
-                                    f'Knowledge export failed for {file.filename}: {e}'
-                                )
+                                log.error(f'Knowledge export failed for {file.filename}: {e}')
 
                         return {
                             'status': True,
@@ -2949,11 +2904,7 @@ async def query_doc_handler(
         else:
             query_embedding = await request.app.state.EMBEDDING_FUNCTION(
                 form_data.query,
-                prefix=(
-                    RAG_EMBEDDING_QUERY_PREFIX.value
-                    if RAG_EMBEDDING_QUERY_PREFIX.value
-                    else None
-                ),
+                prefix=(RAG_EMBEDDING_QUERY_PREFIX.value if RAG_EMBEDDING_QUERY_PREFIX.value else None),
                 user=user,
             )
             return query_doc(
@@ -3111,11 +3062,7 @@ if ENV == 'dev':
         return {
             'result': await request.app.state.EMBEDDING_FUNCTION(
                 text,
-                prefix=(
-                    RAG_EMBEDDING_QUERY_PREFIX.value
-                    if RAG_EMBEDDING_QUERY_PREFIX.value
-                    else None
-                ),
+                prefix=(RAG_EMBEDDING_QUERY_PREFIX.value if RAG_EMBEDDING_QUERY_PREFIX.value else None),
             )
         }
 

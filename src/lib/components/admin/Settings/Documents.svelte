@@ -43,6 +43,8 @@
 	let RAG_EMBEDDING_BATCH_SIZE = 1;
 	let ENABLE_ASYNC_EMBEDDING = true;
 	let RAG_EMBEDDING_CONCURRENT_REQUESTS = 0;
+	let RAG_EMBEDDING_QUERY_PREFIX = '';
+	let RAG_EMBEDDING_CONTENT_PREFIX = '';
 
 	let rerankingModel = '';
 
@@ -357,6 +359,7 @@
 									<option value="document_intelligence">{$i18n.t('Document Intelligence')}</option>
 									<option value="mistral_ocr">{$i18n.t('Mistral OCR')}</option>
 									<option value="mineru">{$i18n.t('MinerU')}</option>
+									<option value="kg1">{$i18n.t('KG1 (GLM-OCR)')}</option>
 								</select>
 							</div>
 						</div>
@@ -742,8 +745,135 @@
 									/>
 								</div>
 							</div>
+						{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'kg1'}
+							<!-- GLM-OCR Project Directory -->
+							<div class="flex w-full mt-2">
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('Enter GLM-OCR Project Directory Path')}
+									bind:value={RAGConfig.KG1_GLMOCR_PROJECT_DIR}
+								/>
+							</div>
+
+							<!-- Ollama Host / Port -->
+							<div class="my-0.5 flex gap-2 pr-2 mt-2">
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('Ollama Host (default: 127.0.0.1)')}
+									bind:value={RAGConfig.KG1_OLLAMA_HOST}
+								/>
+								<input
+									class="w-24 text-sm bg-transparent outline-hidden text-right"
+									type="number"
+									placeholder="11434"
+									bind:value={RAGConfig.KG1_OLLAMA_PORT}
+								/>
+							</div>
+
+							<!-- Layout Device -->
+							<div class="flex w-full mt-2">
+								<div class="flex-1 flex justify-between">
+									<div class="self-center text-xs font-medium">
+										{$i18n.t('Layout Device')}
+									</div>
+									<select
+										class="w-fit pr-8 rounded-sm px-2 text-xs bg-transparent outline-hidden"
+										bind:value={RAGConfig.KG1_LAYOUT_DEVICE}
+									>
+										<option value="cpu">{$i18n.t('CPU')}</option>
+										<option value="mps">{$i18n.t('MPS (Apple Silicon)')}</option>
+										<option value="cuda">{$i18n.t('CUDA')}</option>
+									</select>
+								</div>
+							</div>
+
+							<!-- LibreOffice Path -->
+							<div class="flex w-full mt-2">
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('LibreOffice Path (default: soffice)')}
+									bind:value={RAGConfig.KG1_SOFFICE_PATH}
+								/>
+							</div>
+
+							<!-- Timeout -->
+							<div class="flex w-full mt-2">
+								<div class="flex-1 flex justify-between">
+									<div class="self-center text-xs font-medium">
+										{$i18n.t('Timeout (seconds)')}
+									</div>
+									<input
+										class="w-16 text-sm bg-transparent outline-hidden text-right"
+										type="number"
+										min="1"
+										bind:value={RAGConfig.KG1_TIMEOUT}
+										placeholder="600"
+									/>
+								</div>
+							</div>
+
+							<!-- Concurrency -->
+							<div class="flex w-full mt-2">
+								<div class="flex-1 flex justify-between">
+									<div class="self-center text-xs font-medium">
+										{$i18n.t('GLM-OCR Concurrency')}
+									</div>
+									<input
+										class="w-16 text-sm bg-transparent outline-hidden text-right"
+										type="number"
+										min="1"
+										bind:value={RAGConfig.KG1_GLM_OCR_CONCURRENCY}
+										placeholder="1"
+									/>
+								</div>
+							</div>
 						{/if}
 					</div>
+
+					<!-- Image Analysis Pipeline -->
+					<hr class="border-gray-100 dark:border-gray-850 my-2" />
+
+					<div class="mb-2.5 flex w-full justify-between">
+						<div class="self-center text-xs font-medium">
+							{$i18n.t('Image Analysis')}
+						</div>
+						<div class="flex items-center relative">
+							<Tooltip
+								content={RAGConfig.IMAGE_ANALYSIS_ENABLED
+									? $i18n.t(
+											'Uploaded images are automatically classified and analyzed (OCR or description) for use by all models including non-vision ones.'
+										)
+									: $i18n.t(
+											'Images are only usable by vision-capable models.'
+										)}
+							>
+								<Switch bind:state={RAGConfig.IMAGE_ANALYSIS_ENABLED} />
+							</Tooltip>
+						</div>
+					</div>
+
+					{#if RAGConfig.IMAGE_ANALYSIS_ENABLED}
+						<div class="flex w-full mt-1">
+							<input
+								class="flex-1 w-full text-sm bg-transparent outline-hidden"
+								placeholder={$i18n.t('Classifier Model ID (e.g. lmstudio.qwen3.5-35b-a3b)')}
+								bind:value={RAGConfig.IMAGE_ANALYSIS_CLASSIFIER_MODEL}
+							/>
+						</div>
+						<div class="flex w-full mt-1 gap-2">
+							<div class="flex-1 flex items-center gap-1">
+								<span class="text-xs text-gray-500">{$i18n.t('Max Width (px)')}</span>
+								<input
+									class="w-20 text-sm bg-transparent outline-hidden"
+									type="number"
+									min="256"
+									max="4096"
+									placeholder="2000"
+									bind:value={RAGConfig.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH}
+								/>
+							</div>
+						</div>
+					{/if}
 
 					<div class="  mb-2.5 flex w-full justify-between">
 						<div class=" self-center text-xs font-medium">
@@ -1333,6 +1463,57 @@
 								</Tooltip>
 							</div>
 						</div>
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class=" self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Export processed markdown files to a directory for external tools (e.g., OpenCode) to browse and organize. Files are auto-sorted by topic.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Knowledge Export')}
+								</Tooltip>
+							</div>
+							<div class="flex items-center relative">
+								<Switch bind:state={RAGConfig.RAG_KNOWLEDGE_EXPORT_ENABLED} />
+							</div>
+						</div>
+
+						{#if RAGConfig.RAG_KNOWLEDGE_EXPORT_ENABLED}
+							<div class="  mb-2.5 flex flex-col w-full">
+								<div class=" mb-1 text-xs font-medium">
+									{$i18n.t('Export Directory')}
+								</div>
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('Enter export directory path')}
+									bind:value={RAGConfig.RAG_KNOWLEDGE_EXPORT_DIR}
+								/>
+							</div>
+
+							<div class="  mb-2.5 flex flex-col w-full">
+								<div class=" mb-1 text-xs font-medium">
+									{$i18n.t('Research Model')}
+								</div>
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('e.g. lmstudio.unsloth/qwen3.5-35b-a3b')}
+									bind:value={RAGConfig.RAG_RESEARCH_MODEL}
+								/>
+							</div>
+
+							<div class="  mb-2.5 flex flex-col w-full">
+								<div class=" mb-1 text-xs font-medium">
+									{$i18n.t('Knowledge Organizer Model')}
+								</div>
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('e.g. lmstudio.qwen3.5-9b')}
+									bind:value={RAGConfig.RAG_KNOWLEDGE_ORGANIZER_MODEL}
+								/>
+							</div>
+						{/if}
 					</div>
 				{/if}
 

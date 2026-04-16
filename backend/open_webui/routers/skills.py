@@ -210,17 +210,17 @@ MAX_ZIP_SIZE = 50 * 1024 * 1024  # 50MB
 
 def _slugify(name: str) -> str:
     slug = name.lower().strip()
-    slug = re.sub(r"[^\w\s-]", "", slug)
-    slug = re.sub(r"[-\s]+", "-", slug)
-    return slug.strip("-")
+    slug = re.sub(r'[^\w\s-]', '', slug)
+    slug = re.sub(r'[-\s]+', '-', slug)
+    return slug.strip('-')
 
 
 def _parse_skill_md_frontmatter(content: str) -> dict:
     import yaml
 
-    if not content.startswith("---"):
+    if not content.startswith('---'):
         return {}
-    parts = content.split("---", 2)
+    parts = content.split('---', 2)
     if len(parts) < 3:
         return {}
     try:
@@ -229,91 +229,91 @@ def _parse_skill_md_frontmatter(content: str) -> dict:
         return {}
 
 
-@router.post("/upload-zip", response_model=Optional[SkillResponse])
+@router.post('/upload-zip', response_model=Optional[SkillResponse])
 async def upload_skill_zip(
     request: Request,
     file: UploadFile = File(...),
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
-    if user.role != "admin" and not has_permission(
-        user.id, "workspace.skills", request.app.state.config.USER_PERMISSIONS, db=db
+    if user.role != 'admin' and not has_permission(
+        user.id, 'workspace.skills', request.app.state.config.USER_PERMISSIONS, db=db
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.UNAUTHORIZED,
         )
 
-    if not file.filename or not file.filename.lower().endswith(".zip"):
+    if not file.filename or not file.filename.lower().endswith('.zip'):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only .zip files are accepted",
+            detail='Only .zip files are accepted',
         )
 
     content = await file.read()
     if len(content) > MAX_ZIP_SIZE:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File too large. Maximum size is {MAX_ZIP_SIZE // (1024*1024)}MB",
+            detail=f'File too large. Maximum size is {MAX_ZIP_SIZE // (1024 * 1024)}MB',
         )
 
     tmp_zip = None
     tmp_extract = None
     try:
-        tmp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        tmp_zip = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
         tmp_zip.write(content)
         tmp_zip.close()
 
         if not zipfile.is_zipfile(tmp_zip.name):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid zip file",
+                detail='Invalid zip file',
             )
 
-        with zipfile.ZipFile(tmp_zip.name, "r") as zf:
+        with zipfile.ZipFile(tmp_zip.name, 'r') as zf:
             total_size = sum(info.file_size for info in zf.infolist())
             if total_size > MAX_ZIP_SIZE:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Uncompressed size too large ({total_size // (1024*1024)}MB). Maximum is {MAX_ZIP_SIZE // (1024*1024)}MB",
+                    detail=f'Uncompressed size too large ({total_size // (1024 * 1024)}MB). Maximum is {MAX_ZIP_SIZE // (1024 * 1024)}MB',
                 )
 
-        tmp_extract = tempfile.mkdtemp(prefix="skill-zip-")
-        with zipfile.ZipFile(tmp_zip.name, "r") as zf:
+        tmp_extract = tempfile.mkdtemp(prefix='skill-zip-')
+        with zipfile.ZipFile(tmp_zip.name, 'r') as zf:
             zf.extractall(tmp_extract)
 
         skill_md_path = None
         skill_root = None
         extract_path = Path(tmp_extract)
 
-        if (extract_path / "SKILL.md").exists():
-            skill_md_path = extract_path / "SKILL.md"
+        if (extract_path / 'SKILL.md').exists():
+            skill_md_path = extract_path / 'SKILL.md'
             skill_root = extract_path
         else:
             for child in extract_path.iterdir():
-                if child.is_dir() and (child / "SKILL.md").exists():
-                    skill_md_path = child / "SKILL.md"
+                if child.is_dir() and (child / 'SKILL.md').exists():
+                    skill_md_path = child / 'SKILL.md'
                     skill_root = child
                     break
 
         if not skill_md_path:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No SKILL.md found in zip archive (checked root and one level deep)",
+                detail='No SKILL.md found in zip archive (checked root and one level deep)',
             )
 
-        skill_content = skill_md_path.read_text(encoding="utf-8")
+        skill_content = skill_md_path.read_text(encoding='utf-8')
         frontmatter = _parse_skill_md_frontmatter(skill_content)
 
-        skill_name = frontmatter.get("name", "")
+        skill_name = frontmatter.get('name', '')
         if not skill_name:
-            skill_name = skill_root.name if skill_root != extract_path else file.filename.replace(".zip", "")
+            skill_name = skill_root.name if skill_root != extract_path else file.filename.replace('.zip', '')
 
-        description = frontmatter.get("description", "")
+        description = frontmatter.get('description', '')
 
         skill_id = _slugify(skill_name)
         if not skill_id:
-            skill_id = f"agent-skill-{int(time.time())}"
+            skill_id = f'agent-skill-{int(time.time())}'
 
         existing = Skills.get_skill_by_id(skill_id, db=db)
         if existing is not None:
@@ -322,7 +322,7 @@ async def upload_skill_zip(
                 detail=ERROR_MESSAGES.ID_TAKEN,
             )
 
-        persistent_dir = Path.home() / ".claude" / "skills" / skill_id
+        persistent_dir = Path.home() / '.claude' / 'skills' / skill_id
         persistent_dir.mkdir(parents=True, exist_ok=True)
         shutil.copytree(str(skill_root), str(persistent_dir), dirs_exist_ok=True)
 
@@ -332,9 +332,9 @@ async def upload_skill_zip(
             description=description,
             content=skill_content,
             meta=SkillMeta(
-                type="agent_skill",
+                type='agent_skill',
                 disk_path=str(persistent_dir),
-                tags=frontmatter.get("tags", []) or [],
+                tags=frontmatter.get('tags', []) or [],
             ),
             is_active=True,
         )
@@ -346,13 +346,13 @@ async def upload_skill_zip(
             shutil.rmtree(str(persistent_dir), ignore_errors=True)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT("Error creating agent skill"),
+                detail=ERROR_MESSAGES.DEFAULT('Error creating agent skill'),
             )
 
     except HTTPException:
         raise
     except Exception as e:
-        log.exception(f"Failed to upload agent skill zip: {e}")
+        log.exception(f'Failed to upload agent skill zip: {e}')
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.DEFAULT(str(e)),
@@ -601,16 +601,16 @@ async def delete_skill_by_id(
     if skill.meta and isinstance(skill.meta, dict):
         meta = skill.meta
     else:
-        meta = skill.meta.model_dump() if hasattr(skill.meta, "model_dump") else {}
+        meta = skill.meta.model_dump() if hasattr(skill.meta, 'model_dump') else {}
 
-    if meta.get("type") == "agent_skill" and meta.get("disk_path"):
+    if meta.get('type') == 'agent_skill' and meta.get('disk_path'):
         try:
-            disk_path = meta["disk_path"]
+            disk_path = meta['disk_path']
             if os.path.isdir(disk_path):
                 shutil.rmtree(disk_path, ignore_errors=True)
-                log.info(f"Cleaned up agent skill files at {disk_path}")
+                log.info(f'Cleaned up agent skill files at {disk_path}')
         except Exception as e:
-            log.warning(f"Failed to cleanup agent skill disk path: {e}")
+            log.warning(f'Failed to cleanup agent skill disk path: {e}')
 
     result = Skills.delete_skill_by_id(id, db=db)
     return result

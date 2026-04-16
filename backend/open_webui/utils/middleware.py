@@ -1885,16 +1885,14 @@ def expand_sources_to_full_documents(sources: list) -> list:
     seen_files = {}  # file_id -> { source_info, name }
     for source in sources:
         # `or []` handles both missing key AND metadata=None
-        metadatas = source.get("metadata") or []
-        source_info = source.get("source", {})
+        metadatas = source.get('metadata') or []
+        source_info = source.get('source', {})
         for meta in metadatas:
-            file_id = meta.get("file_id")
+            file_id = meta.get('file_id')
             if file_id and file_id not in seen_files:
                 seen_files[file_id] = {
-                    "source_info": source_info,
-                    "name": meta.get("name")
-                    or meta.get("source")
-                    or source_info.get("name", ""),
+                    'source_info': source_info,
+                    'name': meta.get('name') or meta.get('source') or source_info.get('name', ''),
                 }
 
     if not seen_files:
@@ -1904,44 +1902,42 @@ def expand_sources_to_full_documents(sources: list) -> list:
     for file_id, info in seen_files.items():
         file_obj = Files.get_file_by_id(file_id)
         if file_obj and file_obj.data:
-            full_content = file_obj.data.get("content", "")
-            index_content = file_obj.data.get("index_content", "")
+            full_content = file_obj.data.get('content', '')
+            index_content = file_obj.data.get('index_content', '')
             if full_content:
                 # Combine content + index for richer context
                 combined = full_content
                 if index_content:
-                    combined = (
-                        f"{full_content}\n\n---\n\n## Document Index\n\n{index_content}"
-                    )
+                    combined = f'{full_content}\n\n---\n\n## Document Index\n\n{index_content}'
                 log.info(
-                    f"[RAG] expand {info['name']}: "
-                    f"content={len(full_content)} chars, "
-                    f"index={len(index_content)} chars, "
-                    f"combined={len(combined)} chars"
+                    f'[RAG] expand {info["name"]}: '
+                    f'content={len(full_content)} chars, '
+                    f'index={len(index_content)} chars, '
+                    f'combined={len(combined)} chars'
                 )
                 expanded.append(
                     {
-                        "source": info["source_info"],
-                        "document": [combined],
-                        "metadata": [
+                        'source': info['source_info'],
+                        'document': [combined],
+                        'metadata': [
                             {
-                                "file_id": file_id,
-                                "name": info["name"],
-                                "source": info["name"],
+                                'file_id': file_id,
+                                'name': info['name'],
+                                'source': info['name'],
                             }
                         ],
                     }
                 )
             else:
-                log.warning(f"[RAG] expand: file {file_id} ({info['name']}) has no content")
+                log.warning(f'[RAG] expand: file {file_id} ({info["name"]}) has no content')
         else:
-            log.warning(f"[RAG] expand: could not load file {file_id}")
+            log.warning(f'[RAG] expand: could not load file {file_id}')
 
-    log.info(f"[RAG] expand_sources: {len(seen_files)} files -> {len(expanded)} sources")
+    log.info(f'[RAG] expand_sources: {len(seen_files)} files -> {len(expanded)} sources')
     return expanded if expanded else sources
 
 
-def estimate_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
+def estimate_tokens(text: str, encoding_name: str = 'cl100k_base') -> int:
     """Estimate token count using tiktoken, with character-based fallback."""
     try:
         import tiktoken
@@ -1952,16 +1948,12 @@ def estimate_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
         return len(text) // 4
 
 
-def estimate_sources_total_tokens(
-    sources: list, encoding_name: str = "cl100k_base"
-) -> int:
+def estimate_sources_total_tokens(sources: list, encoding_name: str = 'cl100k_base') -> int:
     """Sum token estimates across all source documents."""
     total = 0
     for source in sources:
-        for doc in source.get("document", []):
-            total += estimate_tokens(
-                doc if isinstance(doc, str) else str(doc), encoding_name
-            )
+        for doc in source.get('document', []):
+            total += estimate_tokens(doc if isinstance(doc, str) else str(doc), encoding_name)
     return total
 
 
@@ -1981,36 +1973,36 @@ def build_index_only_sources(sources: list) -> Optional[list]:
 
     for source in sources:
         # `or []` handles both missing key AND metadata=None
-        metadatas = source.get("metadata") or []
-        file_id = metadatas[0].get("file_id") if metadatas else None
+        metadatas = source.get('metadata') or []
+        file_id = metadatas[0].get('file_id') if metadatas else None
 
-        index_content = ""
+        index_content = ''
         if file_id:
             file_obj = Files.get_file_by_id(file_id)
             if file_obj and file_obj.data:
-                index_content = (file_obj.data.get("index_content") or "").strip()
+                index_content = (file_obj.data.get('index_content') or '').strip()
 
         if index_content:
             any_replaced = True
             new_sources.append(
                 {
-                    "source": source.get("source", {}),
-                    "document": [index_content],
-                    "metadata": source.get("metadata") or [],
+                    'source': source.get('source', {}),
+                    'document': [index_content],
+                    'metadata': source.get('metadata') or [],
                 }
             )
         else:
             # Keep original document content for files without index
-            src_name = source.get("source", {}).get("name", "unknown")
+            src_name = source.get('source', {}).get('name', 'unknown')
             log.warning(
                 f"[RAG] cascade Tier 2: file '{src_name}' (id={file_id}) "
-                f"has no index_content — retaining original content"
+                f'has no index_content — retaining original content'
             )
             new_sources.append(
                 {
-                    "source": source.get("source", {}),
-                    "document": list(source.get("document", [])),
-                    "metadata": source.get("metadata") or [],
+                    'source': source.get('source', {}),
+                    'document': list(source.get('document', [])),
+                    'metadata': source.get('metadata') or [],
                 }
             )
 
@@ -2043,9 +2035,7 @@ async def apply_token_budget_cascade(
 
     # --- Tier 1 check ---
     tier1_tokens = estimate_sources_total_tokens(sources)
-    log.info(
-        f"[RAG] cascade: Tier 1 (full content) tokens={tier1_tokens} budget={max_tokens}"
-    )
+    log.info(f'[RAG] cascade: Tier 1 (full content) tokens={tier1_tokens} budget={max_tokens}')
     if tier1_tokens <= max_tokens:
         return sources
 
@@ -2053,51 +2043,48 @@ async def apply_token_budget_cascade(
     index_only = build_index_only_sources(sources)
     if index_only is not None:
         tier2_tokens = estimate_sources_total_tokens(index_only)
-        log.info(
-            f"[RAG] cascade: Tier 2 (index-only) tokens={tier2_tokens} budget={max_tokens}"
-        )
+        log.info(f'[RAG] cascade: Tier 2 (index-only) tokens={tier2_tokens} budget={max_tokens}')
         if tier2_tokens <= max_tokens:
             if event_emitter:
                 await event_emitter(
                     {
-                        "type": "status",
-                        "data": {
-                            "action": "rag_cascade",
-                            "description": "Using document summaries to fit token budget",
-                            "done": False,
+                        'type': 'status',
+                        'data': {
+                            'action': 'rag_cascade',
+                            'description': 'Using document summaries to fit token budget',
+                            'done': False,
                         },
                     }
                 )
-            log.info("[RAG] cascade: Tier 2 (index-only) within budget")
+            log.info('[RAG] cascade: Tier 2 (index-only) within budget')
             return index_only
 
     # --- Tier 3: sub-chat extraction on ORIGINAL full content ---
-    model_id = body["model"]
-    user_query = get_last_user_message(body["messages"])
+    model_id = body['model']
+    user_query = get_last_user_message(body['messages'])
 
     # Guard: sub-chat extraction without a user query is meaningless —
     # the LLM needs a query to know what to extract. Fall back to the
     # best available tier instead of making a pointless API call.
     if user_query is None:
         log.warning(
-            "[RAG] cascade: Tier 3 skipped — no user query available. "
-            "Returning %s",
-            "Tier 2 (index-only)" if index_only is not None else "Tier 1 (full, over budget)",
+            '[RAG] cascade: Tier 3 skipped — no user query available. Returning %s',
+            'Tier 2 (index-only)' if index_only is not None else 'Tier 1 (full, over budget)',
         )
         return index_only if index_only is not None else sources
 
     if event_emitter:
         await event_emitter(
             {
-                "type": "status",
-                "data": {
-                    "action": "rag_cascade",
-                    "description": "Extracting relevant content via sub-chat (over budget)",
-                    "done": False,
+                'type': 'status',
+                'data': {
+                    'action': 'rag_cascade',
+                    'description': 'Extracting relevant content via sub-chat (over budget)',
+                    'done': False,
                 },
             }
         )
-    log.info("[RAG] cascade: Tier 3 (sub-chat extraction)")
+    log.info('[RAG] cascade: Tier 3 (sub-chat extraction)')
     concurrency = request.app.state.config.RAG_SUBCHAT_CONCURRENCY or 3
     semaphore = asyncio.Semaphore(concurrency)
 
@@ -2120,14 +2107,10 @@ async def apply_token_budget_cascade(
     tasks = []
     for src_idx, source in enumerate(sources):
         # `or []` handles both missing key AND metadata=None
-        metadatas = source.get("metadata") or []
-        for doc_idx, doc in enumerate(source.get("document", [])):
-            meta = (
-                metadatas[min(doc_idx, len(metadatas) - 1)]
-                if metadatas
-                else {}
-            )
-            doc_name = meta.get("name") or f"doc_{src_idx}"
+        metadatas = source.get('metadata') or []
+        for doc_idx, doc in enumerate(source.get('document', [])):
+            meta = metadatas[min(doc_idx, len(metadatas) - 1)] if metadatas else {}
+            doc_name = meta.get('name') or f'doc_{src_idx}'
             tasks.append(_extract(src_idx, doc_idx, doc, doc_name))
 
     # Deep copy sources so we don't mutate the original
@@ -2135,10 +2118,10 @@ async def apply_token_budget_cascade(
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for result in results:
         if isinstance(result, Exception):
-            log.error(f"[RAG] cascade Tier 3 extraction failed: {result}")
+            log.error(f'[RAG] cascade Tier 3 extraction failed: {result}')
             continue
         src_idx, doc_idx, extracted = result
-        extracted_sources[src_idx]["document"][doc_idx] = extracted
+        extracted_sources[src_idx]['document'][doc_idx] = extracted
 
     return extracted_sources
 
@@ -2150,7 +2133,7 @@ async def extract_relevant_content_from_document(
     document_content: str,
     document_name: str,
     user,
-    extraction_template: str = "",
+    extraction_template: str = '',
 ) -> str:
     """
     Spawn a sub-completion to extract query-relevant content from a document.
@@ -2162,42 +2145,40 @@ async def extract_relevant_content_from_document(
         extraction_template = DEFAULT_RAG_SUBCHAT_EXTRACTION_TEMPLATE
 
     payload = {
-        "model": model_id,
-        "messages": [
-            {"role": "system", "content": extraction_template},
+        'model': model_id,
+        'messages': [
+            {'role': 'system', 'content': extraction_template},
             {
-                "role": "user",
-                "content": (
-                    f"Query: {user_query}\n\n"
-                    f"Document ({document_name}):\n"
-                    f"{document_content}\n\n"
-                    f"Extract the relevant information:"
+                'role': 'user',
+                'content': (
+                    f'Query: {user_query}\n\n'
+                    f'Document ({document_name}):\n'
+                    f'{document_content}\n\n'
+                    f'Extract the relevant information:'
                 ),
             },
         ],
-        "stream": False,
-        "metadata": {"task": "rag_subchat_extraction"},
+        'stream': False,
+        'metadata': {'task': 'rag_subchat_extraction'},
     }
 
     try:
-        response = await generate_chat_completion(
-            request, form_data=payload, user=user, bypass_filter=True
-        )
-        if hasattr(response, "body_iterator"):
+        response = await generate_chat_completion(request, form_data=payload, user=user, bypass_filter=True)
+        if hasattr(response, 'body_iterator'):
             content = None
             async for chunk in response.body_iterator:
-                data = json.loads(chunk.decode("utf-8", "replace"))
-                if "choices" in data and data["choices"]:
-                    content = data["choices"][0].get("message", {}).get("content")
-            if hasattr(response, "background") and response.background is not None:
+                data = json.loads(chunk.decode('utf-8', 'replace'))
+                if 'choices' in data and data['choices']:
+                    content = data['choices'][0].get('message', {}).get('content')
+            if hasattr(response, 'background') and response.background is not None:
                 await response.background()
             return content or document_content
-        elif isinstance(response, dict) and "choices" in response:
-            return response["choices"][0]["message"]["content"]
+        elif isinstance(response, dict) and 'choices' in response:
+            return response['choices'][0]['message']['content']
         else:
             return document_content
     except Exception as e:
-        log.error(f"Sub-chat extraction failed for {document_name}: {e}")
+        log.error(f'Sub-chat extraction failed for {document_name}: {e}')
         return document_content
 
 
@@ -2213,7 +2194,7 @@ def _build_direct_file_sources(
     """
     sources = []
     for item in items:
-        file_id = item.get("id")
+        file_id = item.get('id')
         if not file_id:
             return None
 
@@ -2221,35 +2202,30 @@ def _build_direct_file_sources(
         if not file_obj or not file_obj.data:
             return None
 
-        content = (file_obj.data.get("content") or "").strip()
+        content = (file_obj.data.get('content') or '').strip()
         if not content:
             return None
 
         # Combine extracted content and AI-generated index
-        index_content = (file_obj.data.get("index_content") or "").strip()
+        index_content = (file_obj.data.get('index_content') or '').strip()
         if index_content:
-            combined = (
-                f"{content}\n\n"
-                f"---\n"
-                f"## Document Index\n\n"
-                f"{index_content}"
-            )
+            combined = f'{content}\n\n---\n## Document Index\n\n{index_content}'
         else:
             combined = content
 
         sources.append(
             {
-                "source": {
-                    "id": file_id,
-                    "name": item.get("name") or file_obj.filename,
-                    "type": "file",
+                'source': {
+                    'id': file_id,
+                    'name': item.get('name') or file_obj.filename,
+                    'type': 'file',
                 },
-                "document": [combined],
-                "metadata": [
+                'document': [combined],
+                'metadata': [
                     {
-                        "file_id": file_id,
-                        "name": item.get("name") or file_obj.filename,
-                        "source": item.get("name") or file_obj.filename,
+                        'file_id': file_id,
+                        'name': item.get('name') or file_obj.filename,
+                        'source': item.get('name') or file_obj.filename,
                     }
                 ],
             }
@@ -2271,17 +2247,13 @@ async def chat_completion_files_handler(
     # When the user only uploaded files (no collections), bypass vector search
     # and inject full .md + .index.md content directly. This gives the LLM
     # complete document context instead of top-k chunks.
-    only_uploaded_files = (
-        files
-        and all(item.get('type') == 'file' for item in files)
-    )
+    only_uploaded_files = files and all(item.get('type') == 'file' for item in files)
 
     if only_uploaded_files:
         direct_sources = _build_direct_file_sources(files)
         if direct_sources is not None:
             log.info(
-                f"[RAG] direct content mode: {len(direct_sources)} files, "
-                f"bypassing vector search for uploaded files"
+                f'[RAG] direct content mode: {len(direct_sources)} files, bypassing vector search for uploaded files'
             )
             sources = direct_sources
 
@@ -2313,10 +2285,7 @@ async def chat_completion_files_handler(
                 for meta in source.get('metadata') or []:
                     unique_ids.add(meta.get('source') or meta.get('file_id') or 'N/A')
             total_ctx_tokens = estimate_sources_total_tokens(sources)
-            log.info(
-                f"[RAG] direct content final: {len(unique_ids)} sources, "
-                f"~{total_ctx_tokens} tokens"
-            )
+            log.info(f'[RAG] direct content final: {len(unique_ids)} sources, ~{total_ctx_tokens} tokens')
             await __event_emitter__(
                 {
                     'type': 'status',
@@ -2400,9 +2369,7 @@ async def chat_completion_files_handler(
         if request.app.state.config.RAG_USER_COLLECTION_ENABLED and not skip_user_collection:
             user_collection_name = f'user-{user.id}'
             # Avoid duplicating if already present
-            existing_collections = {
-                item.get('collection_name') for item in files if item.get('collection_name')
-            }
+            existing_collections = {item.get('collection_name') for item in files if item.get('collection_name')}
             if user_collection_name not in existing_collections:
                 files.append(
                     {
@@ -2417,8 +2384,7 @@ async def chat_completion_files_handler(
         user_collection_items = [item for item in files if item.get('type') == 'user_collection']
         other_items = [item for item in files if item.get('type') != 'user_collection']
         log.info(
-            f'[RAG] retrieval split: other_items={len(other_items)}, '
-            f'user_collection_items={len(user_collection_items)}'
+            f'[RAG] retrieval split: other_items={len(other_items)}, user_collection_items={len(user_collection_items)}'
         )
 
         # Common kwargs shared by both retrieval calls
@@ -2430,11 +2396,7 @@ async def chat_completion_files_handler(
             ),
             k=request.app.state.config.TOP_K,
             reranking_function=(
-                (
-                    lambda query, documents: request.app.state.RERANKING_FUNCTION(
-                        query, documents, user=user
-                    )
-                )
+                (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
                 if request.app.state.RERANKING_FUNCTION
                 else None
             ),
@@ -2480,10 +2442,7 @@ async def chat_completion_files_handler(
             name = metas[0].get('name', '?') if metas else '?'
             doc_lens = [len(d) if isinstance(d, str) else 0 for d in docs]
             meta_types = [m.get('type', '-') for m in metas]
-            log.info(
-                f'[RAG] retrieval hit [{i}]: {name} '
-                f'chunks={len(docs)} lens={doc_lens} types={meta_types}'
-            )
+            log.info(f'[RAG] retrieval hit [{i}]: {name} chunks={len(docs)} lens={doc_lens} types={meta_types}')
 
         # ── Phase A + 3-tier cascade ──────────────────────────────
         # User collection: ALWAYS expand + cascade (vector search is file selector)
@@ -2491,13 +2450,8 @@ async def chat_completion_files_handler(
         max_tokens = request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS
 
         if user_collection_sources:
-            user_collection_sources = expand_sources_to_full_documents(
-                user_collection_sources
-            )
-            log.info(
-                f'[RAG] user collection Phase A: expanded to '
-                f'{len(user_collection_sources)} full document sources'
-            )
+            user_collection_sources = expand_sources_to_full_documents(user_collection_sources)
+            log.info(f'[RAG] user collection Phase A: expanded to {len(user_collection_sources)} full document sources')
             user_collection_sources = await apply_token_budget_cascade(
                 sources=user_collection_sources,
                 max_tokens=max_tokens,
@@ -2509,10 +2463,7 @@ async def chat_completion_files_handler(
 
         if other_sources and request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT:
             other_sources = expand_sources_to_full_documents(other_sources)
-            log.info(
-                f'[RAG] other sources Phase A: expanded to '
-                f'{len(other_sources)} full document sources'
-            )
+            log.info(f'[RAG] other sources Phase A: expanded to {len(other_sources)} full document sources')
             other_sources = await apply_token_budget_cascade(
                 sources=other_sources,
                 max_tokens=max_tokens,
@@ -2535,19 +2486,12 @@ async def chat_completion_files_handler(
 
             for index, _ in enumerate(documents):
                 metadata = metadatas[index] if index < len(metadatas) else None
-                _id = (
-                    (metadata or {}).get('source')
-                    or (src_info or {}).get('id')
-                    or 'N/A'
-                )
+                _id = (metadata or {}).get('source') or (src_info or {}).get('id') or 'N/A'
                 unique_ids.add(_id)
 
         sources_count = len(unique_ids)
         total_ctx_tokens = estimate_sources_total_tokens(sources) if sources else 0
-        log.info(
-            f'[RAG] final: {sources_count} sources, '
-            f'~{total_ctx_tokens} tokens injected into context'
-        )
+        log.info(f'[RAG] final: {sources_count} sources, ~{total_ctx_tokens} tokens injected into context')
         await __event_emitter__(
             {
                 'type': 'status',
@@ -2666,6 +2610,75 @@ def load_messages_from_db(chat_id: str, message_id: str) -> Optional[list[dict]]
     return [{k: v for k, v in msg.items() if k in ('role', 'content', 'output', 'files')} for msg in db_messages]
 
 
+def inject_analyzed_images(form_data: dict, model: dict) -> dict:
+    """
+    For images that have been analyzed (file.data.content exists):
+      1. Add to metadata.files so they enter the RAG pipeline (like .pdf/.doc)
+      2. For non-vision models: strip image_url from message content
+
+    Must run BEFORE convert_url_images_to_base64, while image URLs are still
+    file UUIDs (not yet base64).
+    """
+    model_has_vision = (((model.get('info') or {}).get('meta') or {}).get('capabilities') or {}).get('vision', True)
+
+    files_metadata = form_data.get('metadata', {}).get('files', None) or []
+    existing_file_ids = {f.get('id') for f in files_metadata}
+
+    for message in form_data.get('messages', []):
+        content = message.get('content')
+        if not isinstance(content, list):
+            continue
+
+        new_content = []
+        for item in content:
+            if not isinstance(item, dict) or item.get('type') != 'image_url':
+                new_content.append(item)
+                continue
+
+            url = item.get('image_url', {}).get('url', '')
+
+            # Already base64 or external URL — can't look up file
+            if url.startswith('data:') or url.startswith('http'):
+                if model_has_vision:
+                    new_content.append(item)
+                # Non-vision: drop image (no analyzed text available for temp/external)
+                continue
+
+            # URL is a file UUID — look up analyzed content
+            file_obj = Files.get_file_by_id(url)
+
+            # Add analyzed image to files metadata for RAG context injection
+            if file_obj and file_obj.data and file_obj.data.get('content') and url not in existing_file_ids:
+                files_metadata.append(
+                    {
+                        'id': url,
+                        'name': file_obj.filename,
+                        'type': 'file',
+                        'content_type': (file_obj.meta.get('content_type') if file_obj.meta else None),
+                    }
+                )
+                existing_file_ids.add(url)
+
+            if model_has_vision:
+                # Vision model: keep image_url for direct viewing
+                new_content.append(item)
+            else:
+                # Non-vision: strip image (text will come via RAG context)
+                if not (file_obj and file_obj.data and file_obj.data.get('content')):
+                    # Analysis not complete — add placeholder
+                    filename = file_obj.filename if file_obj else 'unknown'
+                    new_content.append(
+                        {
+                            'type': 'text',
+                            'text': f'[Image: {filename} — analysis pending]',
+                        }
+                    )
+
+        message['content'] = new_content
+
+    return form_data
+
+
 def process_messages_with_output(messages: list[dict]) -> list[dict]:
     """
     Process messages with OR-aligned output items for LLM consumption.
@@ -2728,9 +2741,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     log.debug(f'form_data: {form_data}')
 
     # Check if this model should bypass all RAG processing (default False)
-    skip_rag = (
-        ((model.get('info') or {}).get('meta') or {}).get('capabilities') or {}
-    ).get('skip_rag', False)
+    skip_rag = (((model.get('info') or {}).get('meta') or {}).get('capabilities') or {}).get('skip_rag', False)
 
     # Load messages from DB when available — DB preserves structured 'output' items
     # which the frontend strips, causing tool calls to be merged into content.
@@ -2779,6 +2790,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         except Exception:
             pass
 
+    form_data = inject_analyzed_images(form_data, model)
     form_data = await convert_url_images_to_base64(form_data)
 
     event_emitter = get_event_emitter(metadata)
@@ -2847,11 +2859,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     user_message = get_last_user_message(form_data['messages'])
     model_knowledge = model.get('info', {}).get('meta', {}).get('knowledge', False)
 
-    if (
-        model_knowledge
-        and not skip_rag
-        and metadata.get('params', {}).get('function_calling') != 'native'
-    ):
+    if model_knowledge and not skip_rag and metadata.get('params', {}).get('function_calling') != 'native':
         await event_emitter(
             {
                 'type': 'status',
@@ -3301,10 +3309,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         except Exception as e:
             log.exception(e)
     elif skip_rag:
-        log.info(
-            '[skip_rag] RAG bypass active — skipping query generation, '
-            'user collection, and KB retrieval'
-        )
+        log.info('[skip_rag] RAG bypass active — skipping query generation, user collection, and KB retrieval')
 
         # ── Docling-based direct MD injection for skip_rag ─────────
         # PDF/DOCX/PPTX/XLSX → docling CLI (ocrmac, zh-Hant/zh-Hans/en-US)
@@ -3347,56 +3352,38 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     cached_md = (file_obj.data or {}).get('docling_md')
                     if cached_md:
                         content = cached_md
-                        log.info(
-                            f'[skip_rag] using cached docling MD for {filename}'
-                        )
+                        log.info(f'[skip_rag] using cached docling MD for {filename}')
                     else:
                         if not file_obj.path:
-                            log.warning(
-                                f'[skip_rag] file {file_id} ({filename}) '
-                                'has no storage path — skipping'
-                            )
+                            log.warning(f'[skip_rag] file {file_id} ({filename}) has no storage path — skipping')
                             continue
                         try:
                             raw_path = _Storage.get_file(file_obj.path)
                             content = await _docling_convert(raw_path)
                             # Cache so subsequent messages don't re-run docling
-                            Files.update_file_data_by_id(
-                                file_id, {'docling_md': content}
-                            )
-                            log.info(
-                                f'[skip_rag] docling converted {filename} → '
-                                f'{len(content)} chars of markdown'
-                            )
+                            Files.update_file_data_by_id(file_id, {'docling_md': content})
+                            log.info(f'[skip_rag] docling converted {filename} → {len(content)} chars of markdown')
                         except _DoclingError as e:
-                            log.error(
-                                f'[skip_rag] docling failed for {filename}: {e}'
-                            )
+                            log.error(f'[skip_rag] docling failed for {filename}: {e}')
                             continue
                 else:
                     # ── Plain text / markdown / other ──
                     # Try data["content"] first (populated if upload processing ran).
                     # If empty (e.g. process=false was sent), read raw file from disk.
-                    content = (
-                        (file_obj.data or {}).get('content') or ''
-                    ).strip()
+                    content = ((file_obj.data or {}).get('content') or '').strip()
                     if not content and file_obj.path:
                         try:
                             raw_path = _Storage.get_file(file_obj.path)
-                            content = _Path(raw_path).read_text(
-                                encoding='utf-8', errors='replace'
-                            )[:_SKIP_RAG_MAX_CHARS].strip()
-                        except Exception as e:
-                            log.warning(
-                                f'[skip_rag] failed to read raw file '
-                                f'{filename}: {e}'
+                            content = (
+                                _Path(raw_path)
+                                .read_text(encoding='utf-8', errors='replace')[:_SKIP_RAG_MAX_CHARS]
+                                .strip()
                             )
+                        except Exception as e:
+                            log.warning(f'[skip_rag] failed to read raw file {filename}: {e}')
 
                 if not content:
-                    log.warning(
-                        f'[skip_rag] file {file_id} ({filename}) '
-                        'produced no content — skipping'
-                    )
+                    log.warning(f'[skip_rag] file {file_id} ({filename}) produced no content — skipping')
                     continue
 
                 context_parts.append(f'## File: {filename}\n\n{content}')
@@ -3443,10 +3430,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     f'directly into prompt ({len(direct_context)} chars)'
                 )
             else:
-                log.info(
-                    '[skip_rag] files attached but none produced content — '
-                    'no injection performed'
-                )
+                log.info('[skip_rag] files attached but none produced content — no injection performed')
 
     # Save the pre-RAG message state so the native tool call loop can
     # restore to the true original (before file-source injection) rather
@@ -3516,11 +3500,24 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     from open_webui.models.files import Files as _FilesModel
                     from open_webui.utils.sanitize import sanitize_filename as _sanitize_fn
 
-                    _SKILL_EXTS = frozenset({
-                        '.pdf', '.doc', '.docx', '.md', '.txt',
-                        '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff',
-                        '.pptx', '.xlsx',
-                    })
+                    _SKILL_EXTS = frozenset(
+                        {
+                            '.pdf',
+                            '.doc',
+                            '.docx',
+                            '.md',
+                            '.txt',
+                            '.jpg',
+                            '.jpeg',
+                            '.png',
+                            '.bmp',
+                            '.gif',
+                            '.webp',
+                            '.tiff',
+                            '.pptx',
+                            '.xlsx',
+                        }
+                    )
 
                     _file_ids = set()
                     for _msg in form_data.get('messages', []):
@@ -3552,30 +3549,32 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                                 _dest = _os.path.join(_input_dir, _safe_name)
                                 if _os.path.exists(_dest):
                                     _stem, _sext = _os.path.splitext(_safe_name)
-                                    _safe_name = f"{_stem}-{_fid[:8]}{_sext}"
+                                    _safe_name = f'{_stem}-{_fid[:8]}{_sext}'
                                     _dest = _os.path.join(_input_dir, _safe_name)
                                 _shutil.copy2(_src, _dest)
                                 _copied_files.append(_dest)
                             except Exception as _e:
-                                log.warning(f"Failed to copy file {_fid} to skill input: {_e}")
+                                log.warning(f'Failed to copy file {_fid} to skill input: {_e}')
 
                 # Parameter extraction (only for translation-class skills)
-                _EXTRACTION_SKILL_PREFIXES = ("anything-to-docx",)
+                _EXTRACTION_SKILL_PREFIXES = ('anything-to-docx',)
                 _extracted_params = {}
                 if any(matched_skill.name.lower().startswith(p) for p in _EXTRACTION_SKILL_PREFIXES):
                     try:
                         from open_webui.utils.skill_params import extract_skill_params, build_enriched_skill_prompt
+
                         _extracted_params = await extract_skill_params(
                             request.app, _pre_rag_messages, matched_skill.name, task_model_id
                         )
                     except Exception as _e:
-                        log.warning(f"Param extraction failed for {matched_skill.name}: {_e}")
+                        log.warning(f'Param extraction failed for {matched_skill.name}: {_e}')
 
                 # Build enriched prompt
                 _skill_message = _pre_rag_last_user_msg
                 if _extracted_params or _copied_files:
                     try:
                         from open_webui.utils.skill_params import build_enriched_skill_prompt
+
                         _skill_message = build_enriched_skill_prompt(
                             _extracted_params, _copied_files, _pre_rag_last_user_msg, matched_skill.name
                         )
@@ -3584,6 +3583,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
                 # Execute the agent skill
                 from open_webui.tools.builtin import run_agent_skill
+
                 _skill_result = await run_agent_skill(
                     skill_name=matched_skill.name,
                     message=_skill_message,
@@ -3594,7 +3594,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 )
                 metadata['__agent_skill_result__'] = _skill_result
             except Exception as _e:
-                log.exception(f"Agent skill intercept failed: {_e}")
+                log.exception(f'Agent skill intercept failed: {_e}')
 
     # Strip empty text content blocks from multimodal messages
     # to prevent errors from providers like Gemini and Claude

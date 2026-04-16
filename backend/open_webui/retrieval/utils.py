@@ -120,7 +120,9 @@ class VectorSearchRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> list[Document]:
-        embedding = await self.embedding_function(query, (RAG_EMBEDDING_QUERY_PREFIX.value if RAG_EMBEDDING_QUERY_PREFIX.value else None))
+        embedding = await self.embedding_function(
+            query, (RAG_EMBEDDING_QUERY_PREFIX.value if RAG_EMBEDDING_QUERY_PREFIX.value else None)
+        )
         result = VECTOR_DB_CLIENT.search(
             collection_name=self.collection_name,
             vectors=[embedding],
@@ -452,7 +454,9 @@ async def query_collection(
             return None, e
 
     # Generate all query embeddings (in one call)
-    query_embeddings = await embedding_function(queries, prefix=(RAG_EMBEDDING_QUERY_PREFIX.value if RAG_EMBEDDING_QUERY_PREFIX.value else None))
+    query_embeddings = await embedding_function(
+        queries, prefix=(RAG_EMBEDDING_QUERY_PREFIX.value if RAG_EMBEDDING_QUERY_PREFIX.value else None)
+    )
     log.debug(f'query_collection: processing {len(queries)} queries across {len(collection_names)} collections')
 
     with ThreadPoolExecutor() as executor:
@@ -554,7 +558,9 @@ def generate_openai_batch_embeddings(
 ) -> list[list[float]]:
     log.debug(f'generate_openai_batch_embeddings:model {model} batch size: {len(texts)}')
     json_data = {'input': texts, 'model': model}
-    if (isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value) and isinstance(prefix, str):
+    if (
+        isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value
+    ) and isinstance(prefix, str):
         json_data[RAG_EMBEDDING_PREFIX_FIELD_NAME.value] = prefix
 
     headers = {
@@ -587,7 +593,9 @@ async def agenerate_openai_batch_embeddings(
 ) -> list[list[float]]:
     log.debug(f'agenerate_openai_batch_embeddings:model {model} batch size: {len(texts)}')
     form_data = {'input': texts, 'model': model}
-    if (isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value) and isinstance(prefix, str):
+    if (
+        isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value
+    ) and isinstance(prefix, str):
         form_data[RAG_EMBEDDING_PREFIX_FIELD_NAME.value] = prefix
 
     headers = {
@@ -625,7 +633,9 @@ def generate_azure_openai_batch_embeddings(
 ) -> list[list[float]]:
     log.debug(f'generate_azure_openai_batch_embeddings:deployment {model} batch size: {len(texts)}')
     json_data = {'input': texts}
-    if (isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value) and isinstance(prefix, str):
+    if (
+        isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value
+    ) and isinstance(prefix, str):
         json_data[RAG_EMBEDDING_PREFIX_FIELD_NAME.value] = prefix
 
     url = f'{url}/openai/deployments/{model}/embeddings?api-version={version}'
@@ -667,7 +677,9 @@ async def agenerate_azure_openai_batch_embeddings(
 ) -> list[list[float]]:
     log.debug(f'agenerate_azure_openai_batch_embeddings:deployment {model} batch size: {len(texts)}')
     form_data = {'input': texts}
-    if (isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value) and isinstance(prefix, str):
+    if (
+        isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value
+    ) and isinstance(prefix, str):
         form_data[RAG_EMBEDDING_PREFIX_FIELD_NAME.value] = prefix
 
     full_url = f'{url}/openai/deployments/{model}/embeddings?api-version={version}'
@@ -706,7 +718,9 @@ def generate_ollama_batch_embeddings(
 ) -> list[list[float]]:
     log.debug(f'generate_ollama_batch_embeddings:model {model} batch size: {len(texts)}')
     json_data = {'input': texts, 'model': model, 'truncate': True}
-    if (isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value) and isinstance(prefix, str):
+    if (
+        isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value
+    ) and isinstance(prefix, str):
         json_data[RAG_EMBEDDING_PREFIX_FIELD_NAME.value] = prefix
 
     headers = {
@@ -742,7 +756,9 @@ async def agenerate_ollama_batch_embeddings(
 ) -> list[list[float]]:
     log.debug(f'agenerate_ollama_batch_embeddings:model {model} batch size: {len(texts)}')
     form_data = {'input': texts, 'model': model, 'truncate': True}
-    if (isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value) and isinstance(prefix, str):
+    if (
+        isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME.value, str) and RAG_EMBEDDING_PREFIX_FIELD_NAME.value
+    ) and isinstance(prefix, str):
         form_data[RAG_EMBEDDING_PREFIX_FIELD_NAME.value] = prefix
 
     headers = {
@@ -1271,7 +1287,8 @@ class RerankCompressor(BaseDocumentCompressor):
                 query, (RAG_EMBEDDING_QUERY_PREFIX.value if RAG_EMBEDDING_QUERY_PREFIX.value else None)
             )
             document_embedding = await self.embedding_function(
-                [doc.page_content for doc in documents], (RAG_EMBEDDING_CONTENT_PREFIX.value if RAG_EMBEDDING_CONTENT_PREFIX.value else None)
+                [doc.page_content for doc in documents],
+                (RAG_EMBEDDING_CONTENT_PREFIX.value if RAG_EMBEDDING_CONTENT_PREFIX.value else None),
             )
             scores = util.cos_sim(query_embedding, document_embedding)[0]
 

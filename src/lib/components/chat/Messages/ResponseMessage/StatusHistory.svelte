@@ -8,7 +8,10 @@
 
 	let showHistory = true;
 
-	$: if (expand) {
+	// Auto-expand for agent skill events so users see the full timeline
+	$: hasAgentSkill = history.some((s) => s?.action === 'agent_skill');
+
+	$: if (expand || hasAgentSkill) {
 		showHistory = true;
 	} else {
 		showHistory = false;

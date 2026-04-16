@@ -778,9 +778,7 @@ async def delete_file_by_id(id: str, user=Depends(get_verified_user), db: Sessio
         if RAG_USER_COLLECTION_ENABLED.value:
             try:
                 user_collection = f'user-{file.user_id}'
-                VECTOR_DB_CLIENT.delete(
-                    collection_name=user_collection, filter={'file_id': id}
-                )
+                VECTOR_DB_CLIENT.delete(collection_name=user_collection, filter={'file_id': id})
             except Exception as e:
                 log.debug(f'User collection cleanup for {id}: {e}')
 

@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 # Default status event action — reuse "agent_skill" so existing
 # AgentSkillStatus.svelte renders tool progress with zero frontend changes.
 # ---------------------------------------------------------------------------
-_STATUS_ACTION = "agent_skill"
+_STATUS_ACTION = 'agent_skill'
 
 
 class Pipe:
@@ -33,21 +33,21 @@ class Pipe:
 
     class Valves(BaseModel):
         hermes_api_url: str = Field(
-            default="http://localhost:8642",
-            description="Hermes API server base URL (e.g. http://localhost:8642)",
+            default='http://localhost:8642',
+            description='Hermes API server base URL (e.g. http://localhost:8642)',
         )
         hermes_api_key: str = Field(
-            default="",
-            description="Bearer token for hermes API (matches API_SERVER_KEY)",
-            json_schema_extra={"input": {"type": "password"}},
+            default='',
+            description='Bearer token for hermes API (matches API_SERVER_KEY)',
+            json_schema_extra={'input': {'type': 'password'}},
         )
         request_timeout: int = Field(
             default=600,
-            description="HTTP request timeout in seconds (long for agent tasks)",
+            description='HTTP request timeout in seconds (long for agent tasks)',
         )
         health_check_timeout: float = Field(
             default=2.0,
-            description="Timeout for health check / model discovery (seconds)",
+            description='Timeout for health check / model discovery (seconds)',
         )
 
     def __init__(self):
@@ -63,24 +63,19 @@ class Pipe:
         model, or returns [] if hermes is unreachable (models disappear
         from dropdown — no error shown).
         """
-        url = self.valves.hermes_api_url.rstrip("/")
+        url = self.valves.hermes_api_url.rstrip('/')
         headers = self._auth_headers()
         try:
-            async with httpx.AsyncClient(
-                timeout=self.valves.health_check_timeout
-            ) as client:
-                r = await client.get(f"{url}/v1/models", headers=headers)
+            async with httpx.AsyncClient(timeout=self.valves.health_check_timeout) as client:
+                r = await client.get(f'{url}/v1/models', headers=headers)
                 if r.status_code != 200:
                     return []
-                data = r.json().get("data", [])
+                data = r.json().get('data', [])
                 if not data:
-                    return [{"id": "default", "name": "Hermes Agent"}]
-                return [
-                    {"id": m.get("id", "default"), "name": m.get("id", "Hermes Agent")}
-                    for m in data
-                ]
+                    return [{'id': 'default', 'name': 'Hermes Agent'}]
+                return [{'id': m.get('id', 'default'), 'name': m.get('id', 'Hermes Agent')} for m in data]
         except (httpx.ConnectError, httpx.TimeoutException, Exception) as e:
-            log.debug(f"Hermes unreachable for model discovery: {e}")
+            log.debug(f'Hermes unreachable for model discovery: {e}')
             return []
 
     # ------------------------------------------------------------------
@@ -101,44 +96,44 @@ class Pipe:
         Yields OpenAI-format chunk dicts for content streaming.
         Emits status events via __event_emitter__ for tool progress.
         """
-        url = self.valves.hermes_api_url.rstrip("/")
+        url = self.valves.hermes_api_url.rstrip('/')
         headers = {
-            "Content-Type": "application/json",
+            'Content-Type': 'application/json',
             **self._auth_headers(),
         }
 
         # Session continuity: pass chat_id as hermes session ID
         if __chat_id__:
-            headers["X-Hermes-Session-Id"] = str(__chat_id__)
+            headers['X-Hermes-Session-Id'] = str(__chat_id__)
 
         # Inject uploaded file paths into system prompt so hermes can
         # read them from the shared filesystem.
-        messages = list(body.get("messages", []))
+        messages = list(body.get('messages', []))
         file_context = await self._resolve_file_paths(__files__)
         if file_context:
             messages = self._inject_file_context(messages, file_context)
 
         # Resolve sub-model ID (strip pipe prefix: "hermes_agent.profile" → "profile")
-        model_id = body.get("model", "")
-        if "." in model_id:
-            _, model_id = model_id.split(".", 1)
+        model_id = body.get('model', '')
+        if '.' in model_id:
+            _, model_id = model_id.split('.', 1)
 
         payload = {
-            "model": model_id,
-            "messages": messages,
-            "stream": True,
+            'model': model_id,
+            'messages': messages,
+            'stream': True,
         }
         # Pass through optional params
-        for key in ("temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty"):
+        for key in ('temperature', 'max_tokens', 'top_p', 'frequency_penalty', 'presence_penalty'):
             if key in body:
                 payload[key] = body[key]
 
         # Emit start status
         await self._emit_status(
             __event_emitter__,
-            "start",
-            "Hermes Agent is working...",
-            skill_name="Hermes Agent",
+            'start',
+            'Hermes Agent is working...',
+            skill_name='Hermes Agent',
         )
 
         try:
@@ -150,20 +145,20 @@ class Pipe:
             )
             async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream(
-                    "POST",
-                    f"{url}/v1/chat/completions",
+                    'POST',
+                    f'{url}/v1/chat/completions',
                     headers=headers,
                     json=payload,
                 ) as response:
                     if response.status_code != 200:
                         error_body = await response.aread()
-                        error_msg = f"Hermes returned HTTP {response.status_code}"
+                        error_msg = f'Hermes returned HTTP {response.status_code}'
                         try:
-                            error_msg = json.loads(error_body).get("error", {}).get("message", error_msg)
+                            error_msg = json.loads(error_body).get('error', {}).get('message', error_msg)
                         except Exception:
                             pass
-                        await self._emit_status(__event_emitter__, "error", error_msg, done=True)
-                        yield {"error": {"detail": error_msg}}
+                        await self._emit_status(__event_emitter__, 'error', error_msg, done=True)
+                        yield {'error': {'detail': error_msg}}
                         return
 
                     # Parse mixed SSE stream
@@ -177,32 +172,30 @@ class Pipe:
                             continue
 
                         # Keepalive comment
-                        if line.startswith(":"):
+                        if line.startswith(':'):
                             continue
 
                         # Custom event type header
-                        if line.startswith("event:"):
-                            current_event_type = line[len("event:"):].strip()
+                        if line.startswith('event:'):
+                            current_event_type = line[len('event:') :].strip()
                             continue
 
                         # Data line
-                        if line.startswith("data:"):
-                            data_str = line[len("data:"):].strip()
+                        if line.startswith('data:'):
+                            data_str = line[len('data:') :].strip()
 
                             # Stream terminator
-                            if data_str == "[DONE]":
-                                yield "data: [DONE]"
+                            if data_str == '[DONE]':
+                                yield 'data: [DONE]'
                                 break
 
                             # Hermes tool progress event
-                            if current_event_type == "hermes.tool.progress":
+                            if current_event_type == 'hermes.tool.progress':
                                 try:
                                     payload_data = json.loads(data_str)
-                                    await self._emit_tool_progress(
-                                        __event_emitter__, payload_data
-                                    )
+                                    await self._emit_tool_progress(__event_emitter__, payload_data)
                                 except json.JSONDecodeError:
-                                    log.warning(f"Bad tool progress JSON: {data_str}")
+                                    log.warning(f'Bad tool progress JSON: {data_str}')
                                 current_event_type = None
                                 continue
 
@@ -210,42 +203,40 @@ class Pipe:
                             try:
                                 chunk = json.loads(data_str)
                                 # Check for reasoning content and emit as thinking
-                                delta = (chunk.get("choices") or [{}])[0].get("delta", {})
-                                reasoning = delta.pop("reasoning_content", None) or delta.pop("reasoning", None)
+                                delta = (chunk.get('choices') or [{}])[0].get('delta', {})
+                                reasoning = delta.pop('reasoning_content', None) or delta.pop('reasoning', None)
                                 if reasoning:
                                     await self._emit_status(
                                         __event_emitter__,
-                                        "thinking",
+                                        'thinking',
                                         reasoning[:500],
                                     )
                                 yield chunk
                             except json.JSONDecodeError:
-                                log.warning(f"Bad SSE JSON: {data_str}")
+                                log.warning(f'Bad SSE JSON: {data_str}')
 
                             current_event_type = None
 
             # Stream completed normally
-            await self._emit_status(
-                __event_emitter__, "complete", "Hermes Agent completed", done=True
-            )
+            await self._emit_status(__event_emitter__, 'complete', 'Hermes Agent completed', done=True)
 
         except httpx.ConnectError as e:
-            msg = f"Cannot connect to Hermes at {url}: {e}"
+            msg = f'Cannot connect to Hermes at {url}: {e}'
             log.error(msg)
-            await self._emit_status(__event_emitter__, "error", msg, done=True)
-            yield {"error": {"detail": msg}}
+            await self._emit_status(__event_emitter__, 'error', msg, done=True)
+            yield {'error': {'detail': msg}}
 
         except httpx.ReadTimeout as e:
-            msg = f"Hermes read timeout: {e}"
+            msg = f'Hermes read timeout: {e}'
             log.error(msg)
-            await self._emit_status(__event_emitter__, "error", msg, done=True)
-            yield {"error": {"detail": msg}}
+            await self._emit_status(__event_emitter__, 'error', msg, done=True)
+            yield {'error': {'detail': msg}}
 
         except Exception as e:
-            msg = f"Hermes pipe error: {e}"
+            msg = f'Hermes pipe error: {e}'
             log.exception(msg)
-            await self._emit_status(__event_emitter__, "error", msg, done=True)
-            yield {"error": {"detail": msg}}
+            await self._emit_status(__event_emitter__, 'error', msg, done=True)
+            yield {'error': {'detail': msg}}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -253,13 +244,13 @@ class Pipe:
 
     def _auth_headers(self) -> dict:
         if self.valves.hermes_api_key:
-            return {"Authorization": f"Bearer {self.valves.hermes_api_key}"}
+            return {'Authorization': f'Bearer {self.valves.hermes_api_key}'}
         return {}
 
     async def _resolve_file_paths(self, files: list | None) -> str:
         """Resolve Open WebUI file IDs to filesystem paths."""
         if not files:
-            return ""
+            return ''
 
         lines = []
         try:
@@ -268,7 +259,7 @@ class Pipe:
             import os
 
             for f in files:
-                fid = f.get("id") if isinstance(f, dict) else None
+                fid = f.get('id') if isinstance(f, dict) else None
                 if not fid:
                     continue
                 record = Files.get_file_by_id(fid)
@@ -276,72 +267,70 @@ class Pipe:
                     continue
                 abs_path = os.path.join(UPLOAD_DIR, record.path)
                 if os.path.exists(abs_path):
-                    lines.append(f"- {abs_path} ({record.filename})")
+                    lines.append(f'- {abs_path} ({record.filename})')
         except Exception as e:
-            log.warning(f"File resolution failed: {e}")
+            log.warning(f'File resolution failed: {e}')
 
-        return "\n".join(lines)
+        return '\n'.join(lines)
 
     @staticmethod
     def _inject_file_context(messages: list, file_context: str) -> list:
         """Prepend file paths to the system prompt."""
         file_block = (
-            "\n\n[Shared filesystem — files uploaded by the user]\n"
-            f"{file_context}\n"
-            "You can read these files directly from the paths above."
+            '\n\n[Shared filesystem — files uploaded by the user]\n'
+            f'{file_context}\n'
+            'You can read these files directly from the paths above.'
         )
         # Find existing system message or create one
-        if messages and messages[0].get("role") == "system":
+        if messages and messages[0].get('role') == 'system':
             messages = [dict(messages[0]), *messages[1:]]
-            messages[0]["content"] = messages[0].get("content", "") + file_block
+            messages[0]['content'] = messages[0].get('content', '') + file_block
         else:
-            messages = [{"role": "system", "content": file_block.strip()}, *messages]
+            messages = [{'role': 'system', 'content': file_block.strip()}, *messages]
         return messages
 
     @staticmethod
-    async def _emit_status(
-        emitter, sub_action: str, description: str, done: bool = False, **extra
-    ):
+    async def _emit_status(emitter, sub_action: str, description: str, done: bool = False, **extra):
         if not emitter:
             return
         try:
             await emitter(
                 {
-                    "type": "status",
-                    "data": {
-                        "action": _STATUS_ACTION,
-                        "sub_action": sub_action,
-                        "description": description,
-                        "done": done,
+                    'type': 'status',
+                    'data': {
+                        'action': _STATUS_ACTION,
+                        'sub_action': sub_action,
+                        'description': description,
+                        'done': done,
                         **extra,
                     },
                 }
             )
         except Exception as e:
-            log.debug(f"Event emit failed: {e}")
+            log.debug(f'Event emit failed: {e}')
 
     @staticmethod
     async def _emit_tool_progress(emitter, payload: dict):
         """Translate hermes.tool.progress into Open WebUI status event."""
         if not emitter:
             return
-        tool = payload.get("tool", "unknown")
-        emoji = payload.get("emoji", "")
-        label = payload.get("label", "")
-        desc = f"{emoji} {tool}: {label}".strip() if label else f"{emoji} {tool}".strip()
+        tool = payload.get('tool', 'unknown')
+        emoji = payload.get('emoji', '')
+        label = payload.get('label', '')
+        desc = f'{emoji} {tool}: {label}'.strip() if label else f'{emoji} {tool}'.strip()
         try:
             await emitter(
                 {
-                    "type": "status",
-                    "data": {
-                        "action": _STATUS_ACTION,
-                        "sub_action": "tool_use",
-                        "tool_name": tool,
-                        "tool_input": label,
-                        "description": desc,
-                        "done": False,
+                    'type': 'status',
+                    'data': {
+                        'action': _STATUS_ACTION,
+                        'sub_action': 'tool_use',
+                        'tool_name': tool,
+                        'tool_input': label,
+                        'description': desc,
+                        'done': False,
                     },
                 }
             )
         except Exception as e:
-            log.debug(f"Tool progress emit failed: {e}")
+            log.debug(f'Tool progress emit failed: {e}')
