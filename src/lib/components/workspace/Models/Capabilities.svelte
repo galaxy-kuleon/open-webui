@@ -19,6 +19,12 @@
 			label: $i18n.t('File Context'),
 			description: $i18n.t('Inject file content into conversation context')
 		},
+		skip_rag: {
+			label: $i18n.t('Skip RAG'),
+			description: $i18n.t(
+				'Skip all RAG processing (embedding, retrieval, knowledge base). Files are converted to Markdown and injected directly into the prompt.'
+			)
+		},
 		web_search: {
 			label: $i18n.t('Web Search'),
 			description: $i18n.t('Model can search the web for information')
@@ -64,11 +70,12 @@
 		citations?: boolean;
 		status_updates?: boolean;
 		builtin_tools?: boolean;
+		skip_rag?: boolean;
 	} = {};
 
-	// Hide file_context when file_upload is disabled
+	// Hide file-dependent capabilities when file_upload is disabled
 	$: visibleCapabilities = Object.keys(capabilityLabels).filter((cap) => {
-		if (cap === 'file_context' && !capabilities.file_upload) {
+		if ((cap === 'file_context' || cap === 'skip_rag') && !capabilities.file_upload) {
 			return false;
 		}
 		return true;

@@ -48,9 +48,10 @@ from open_webui.routers.audio import transcribe
 from open_webui.storage.provider import Storage
 
 
-from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
+from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, RAG_USER_COLLECTION_ENABLED
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import strict_match_mime_type
+from open_webui.utils.sanitize import sanitize_filename
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -203,8 +204,7 @@ def upload_file_handler(
     file_metadata = metadata if metadata else {}
 
     try:
-        unsanitized_filename = file.filename
-        filename = os.path.basename(unsanitized_filename)
+        filename = sanitize_filename(file.filename or '')
 
         file_extension = os.path.splitext(filename)[1]
         # Remove the leading dot from the file extension
@@ -223,7 +223,9 @@ def upload_file_handler(
 
         # replace filename with uuid
         id = str(uuid.uuid4())
-        name = filename
+        # Display name preserves original filename for UI readability;
+        # disk path uses sanitized version for filesystem/prompt safety.
+        name = os.path.basename(file.filename) if file.filename else 'unnamed'
         filename = f'{id}_{filename}'
         contents, file_path = Storage.upload_file(
             file.file,
@@ -771,6 +773,16 @@ async def delete_file_by_id(id: str, user=Depends(get_verified_user), db: Sessio
                     VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'hash': file.hash})
             except Exception as e:
                 log.debug(f'KB embedding cleanup for {knowledge.id}: {e}')
+
+        # Clean up user collection embeddings
+        if RAG_USER_COLLECTION_ENABLED.value:
+            try:
+                user_collection = f'user-{file.user_id}'
+                VECTOR_DB_CLIENT.delete(
+                    collection_name=user_collection, filter={'file_id': id}
+                )
+            except Exception as e:
+                log.debug(f'User collection cleanup for {id}: {e}')
 
         result = Files.delete_file_by_id(id, db=db)
         if result:

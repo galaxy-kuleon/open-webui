@@ -281,6 +281,9 @@ async def get_embedding_config(request: Request, user=Depends(get_admin_user)):
         'RAG_EMBEDDING_BATCH_SIZE': request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
         'ENABLE_ASYNC_EMBEDDING': request.app.state.config.ENABLE_ASYNC_EMBEDDING,
         'RAG_EMBEDDING_CONCURRENT_REQUESTS': request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
+        'RAG_EMBEDDING_QUERY_PREFIX': request.app.state.config.RAG_EMBEDDING_QUERY_PREFIX,
+        'RAG_EMBEDDING_CONTENT_PREFIX': request.app.state.config.RAG_EMBEDDING_CONTENT_PREFIX,
+        'RAG_EMBEDDING_PREFIX_FIELD_NAME': request.app.state.config.RAG_EMBEDDING_PREFIX_FIELD_NAME,
         'openai_config': {
             'url': request.app.state.config.RAG_OPENAI_API_BASE_URL,
             'key': request.app.state.config.RAG_OPENAI_API_KEY,
@@ -322,6 +325,9 @@ class EmbeddingModelUpdateForm(BaseModel):
     RAG_EMBEDDING_BATCH_SIZE: Optional[int] = 1
     ENABLE_ASYNC_EMBEDDING: Optional[bool] = True
     RAG_EMBEDDING_CONCURRENT_REQUESTS: Optional[int] = 0
+    RAG_EMBEDDING_QUERY_PREFIX: Optional[str] = None
+    RAG_EMBEDDING_CONTENT_PREFIX: Optional[str] = None
+    RAG_EMBEDDING_PREFIX_FIELD_NAME: Optional[str] = None
 
 
 def unload_embedding_model(request: Request):
@@ -351,6 +357,33 @@ async def update_embedding_config(request: Request, form_data: EmbeddingModelUpd
         request.app.state.config.RAG_EMBEDDING_BATCH_SIZE = form_data.RAG_EMBEDDING_BATCH_SIZE
         request.app.state.config.ENABLE_ASYNC_EMBEDDING = form_data.ENABLE_ASYNC_EMBEDDING
         request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS = form_data.RAG_EMBEDDING_CONCURRENT_REQUESTS
+
+        if form_data.RAG_EMBEDDING_QUERY_PREFIX is not None:
+            request.app.state.config.RAG_EMBEDDING_QUERY_PREFIX = (
+                form_data.RAG_EMBEDDING_QUERY_PREFIX
+            )
+        if form_data.RAG_EMBEDDING_CONTENT_PREFIX is not None:
+            request.app.state.config.RAG_EMBEDDING_CONTENT_PREFIX = (
+                form_data.RAG_EMBEDDING_CONTENT_PREFIX
+            )
+        if form_data.RAG_EMBEDDING_PREFIX_FIELD_NAME is not None:
+            request.app.state.config.RAG_EMBEDDING_PREFIX_FIELD_NAME = (
+                form_data.RAG_EMBEDDING_PREFIX_FIELD_NAME
+            )
+
+        # Sync PersistentConfig values for utils.py access
+        from open_webui.config import (
+            RAG_EMBEDDING_QUERY_PREFIX as _QUERY_PREFIX_CONFIG,
+            RAG_EMBEDDING_CONTENT_PREFIX as _CONTENT_PREFIX_CONFIG,
+            RAG_EMBEDDING_PREFIX_FIELD_NAME as _PREFIX_FIELD_CONFIG,
+        )
+
+        if form_data.RAG_EMBEDDING_QUERY_PREFIX is not None:
+            _QUERY_PREFIX_CONFIG.save()
+        if form_data.RAG_EMBEDDING_CONTENT_PREFIX is not None:
+            _CONTENT_PREFIX_CONFIG.save()
+        if form_data.RAG_EMBEDDING_PREFIX_FIELD_NAME is not None:
+            _PREFIX_FIELD_CONFIG.save()
 
         if request.app.state.config.RAG_EMBEDDING_ENGINE in [
             'ollama',
@@ -414,6 +447,9 @@ async def update_embedding_config(request: Request, form_data: EmbeddingModelUpd
             'RAG_EMBEDDING_BATCH_SIZE': request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
             'ENABLE_ASYNC_EMBEDDING': request.app.state.config.ENABLE_ASYNC_EMBEDDING,
             'RAG_EMBEDDING_CONCURRENT_REQUESTS': request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
+            'RAG_EMBEDDING_QUERY_PREFIX': request.app.state.config.RAG_EMBEDDING_QUERY_PREFIX,
+            'RAG_EMBEDDING_CONTENT_PREFIX': request.app.state.config.RAG_EMBEDDING_CONTENT_PREFIX,
+            'RAG_EMBEDDING_PREFIX_FIELD_NAME': request.app.state.config.RAG_EMBEDDING_PREFIX_FIELD_NAME,
             'openai_config': {
                 'url': request.app.state.config.RAG_OPENAI_API_BASE_URL,
                 'key': request.app.state.config.RAG_OPENAI_API_KEY,
@@ -445,6 +481,17 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'TOP_K': request.app.state.config.TOP_K,
         'BYPASS_EMBEDDING_AND_RETRIEVAL': request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
         'RAG_FULL_CONTEXT': request.app.state.config.RAG_FULL_CONTEXT,
+        'RAG_FULL_DOCUMENT_CONTEXT': request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT,
+        'RAG_FULL_DOCUMENT_MAX_TOKENS': request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS,
+        'RAG_SUBCHAT_CONCURRENCY': request.app.state.config.RAG_SUBCHAT_CONCURRENCY,
+        'RAG_DOCUMENT_INDEX_GENERATION': request.app.state.config.RAG_DOCUMENT_INDEX_GENERATION,
+        'RAG_DOCUMENT_INDEX_MODEL': request.app.state.config.RAG_DOCUMENT_INDEX_MODEL,
+        'RAG_DOCUMENT_INDEX_TIMEOUT': request.app.state.config.RAG_DOCUMENT_INDEX_TIMEOUT,
+        'RAG_KNOWLEDGE_EXPORT_ENABLED': request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED,
+        'RAG_KNOWLEDGE_EXPORT_DIR': request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR,
+        'RAG_RESEARCH_MODEL': request.app.state.config.RAG_RESEARCH_MODEL,
+        'RAG_KNOWLEDGE_ORGANIZER_MODEL': request.app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL,
+        'RAG_USER_COLLECTION_ENABLED': request.app.state.config.RAG_USER_COLLECTION_ENABLED,
         # Hybrid search settings
         'ENABLE_RAG_HYBRID_SEARCH': request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
         'ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS': request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
@@ -483,6 +530,18 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'MINERU_API_KEY': request.app.state.config.MINERU_API_KEY,
         'MINERU_API_TIMEOUT': request.app.state.config.MINERU_API_TIMEOUT,
         'MINERU_PARAMS': request.app.state.config.MINERU_PARAMS,
+        # KG1 (GLM-OCR) settings
+        'KG1_GLMOCR_PROJECT_DIR': request.app.state.config.KG1_GLMOCR_PROJECT_DIR,
+        'KG1_OLLAMA_HOST': request.app.state.config.KG1_OLLAMA_HOST,
+        'KG1_OLLAMA_PORT': request.app.state.config.KG1_OLLAMA_PORT,
+        'KG1_LAYOUT_DEVICE': request.app.state.config.KG1_LAYOUT_DEVICE,
+        'KG1_SOFFICE_PATH': request.app.state.config.KG1_SOFFICE_PATH,
+        'KG1_TIMEOUT': request.app.state.config.KG1_TIMEOUT,
+        'KG1_GLM_OCR_CONCURRENCY': request.app.state.config.KG1_GLM_OCR_CONCURRENCY,
+        # Image Analysis Pipeline
+        'IMAGE_ANALYSIS_ENABLED': request.app.state.config.IMAGE_ANALYSIS_ENABLED,
+        'IMAGE_ANALYSIS_CLASSIFIER_MODEL': request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL,
+        'IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH': request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH,
         # Reranking settings
         'RAG_RERANKING_MODEL': request.app.state.config.RAG_RERANKING_MODEL,
         'RAG_RERANKING_ENGINE': request.app.state.config.RAG_RERANKING_ENGINE,
@@ -645,6 +704,17 @@ class ConfigForm(BaseModel):
     TOP_K: Optional[int] = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
     RAG_FULL_CONTEXT: Optional[bool] = None
+    RAG_FULL_DOCUMENT_CONTEXT: Optional[bool] = None
+    RAG_FULL_DOCUMENT_MAX_TOKENS: Optional[int] = None
+    RAG_SUBCHAT_CONCURRENCY: Optional[int] = None
+    RAG_DOCUMENT_INDEX_GENERATION: Optional[bool] = None
+    RAG_DOCUMENT_INDEX_MODEL: Optional[str] = None
+    RAG_DOCUMENT_INDEX_TIMEOUT: Optional[int] = None
+    RAG_KNOWLEDGE_EXPORT_ENABLED: Optional[bool] = None
+    RAG_KNOWLEDGE_EXPORT_DIR: Optional[str] = None
+    RAG_RESEARCH_MODEL: Optional[str] = None
+    RAG_KNOWLEDGE_ORGANIZER_MODEL: Optional[str] = None
+    RAG_USER_COLLECTION_ENABLED: Optional[bool] = None
 
     # Hybrid search settings
     ENABLE_RAG_HYBRID_SEARCH: Optional[bool] = None
@@ -689,6 +759,20 @@ class ConfigForm(BaseModel):
     MINERU_API_KEY: Optional[str] = None
     MINERU_API_TIMEOUT: Optional[str] = None
     MINERU_PARAMS: Optional[dict] = None
+
+    # KG1 (GLM-OCR) settings
+    KG1_GLMOCR_PROJECT_DIR: Optional[str] = None
+    KG1_OLLAMA_HOST: Optional[str] = None
+    KG1_OLLAMA_PORT: Optional[str] = None
+    KG1_LAYOUT_DEVICE: Optional[str] = None
+    KG1_SOFFICE_PATH: Optional[str] = None
+    KG1_TIMEOUT: Optional[str] = None
+    KG1_GLM_OCR_CONCURRENCY: Optional[str] = None
+
+    # Image Analysis Pipeline
+    IMAGE_ANALYSIS_ENABLED: Optional[bool] = None
+    IMAGE_ANALYSIS_CLASSIFIER_MODEL: Optional[str] = None
+    IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH: Optional[int] = None
 
     # Reranking settings
     RAG_RERANKING_MODEL: Optional[str] = None
@@ -735,6 +819,61 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         form_data.RAG_FULL_CONTEXT
         if form_data.RAG_FULL_CONTEXT is not None
         else request.app.state.config.RAG_FULL_CONTEXT
+    )
+    request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT = (
+        form_data.RAG_FULL_DOCUMENT_CONTEXT
+        if form_data.RAG_FULL_DOCUMENT_CONTEXT is not None
+        else request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT
+    )
+    request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS = (
+        form_data.RAG_FULL_DOCUMENT_MAX_TOKENS
+        if form_data.RAG_FULL_DOCUMENT_MAX_TOKENS is not None
+        else request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS
+    )
+    request.app.state.config.RAG_SUBCHAT_CONCURRENCY = (
+        form_data.RAG_SUBCHAT_CONCURRENCY
+        if form_data.RAG_SUBCHAT_CONCURRENCY is not None
+        else request.app.state.config.RAG_SUBCHAT_CONCURRENCY
+    )
+    request.app.state.config.RAG_DOCUMENT_INDEX_GENERATION = (
+        form_data.RAG_DOCUMENT_INDEX_GENERATION
+        if form_data.RAG_DOCUMENT_INDEX_GENERATION is not None
+        else request.app.state.config.RAG_DOCUMENT_INDEX_GENERATION
+    )
+    request.app.state.config.RAG_DOCUMENT_INDEX_MODEL = (
+        form_data.RAG_DOCUMENT_INDEX_MODEL
+        if form_data.RAG_DOCUMENT_INDEX_MODEL is not None
+        else request.app.state.config.RAG_DOCUMENT_INDEX_MODEL
+    )
+    request.app.state.config.RAG_DOCUMENT_INDEX_TIMEOUT = (
+        form_data.RAG_DOCUMENT_INDEX_TIMEOUT
+        if form_data.RAG_DOCUMENT_INDEX_TIMEOUT is not None
+        else request.app.state.config.RAG_DOCUMENT_INDEX_TIMEOUT
+    )
+    request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED = (
+        form_data.RAG_KNOWLEDGE_EXPORT_ENABLED
+        if form_data.RAG_KNOWLEDGE_EXPORT_ENABLED is not None
+        else request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED
+    )
+    request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR = (
+        form_data.RAG_KNOWLEDGE_EXPORT_DIR
+        if form_data.RAG_KNOWLEDGE_EXPORT_DIR is not None
+        else request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR
+    )
+    request.app.state.config.RAG_RESEARCH_MODEL = (
+        form_data.RAG_RESEARCH_MODEL
+        if form_data.RAG_RESEARCH_MODEL is not None
+        else request.app.state.config.RAG_RESEARCH_MODEL
+    )
+    request.app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL = (
+        form_data.RAG_KNOWLEDGE_ORGANIZER_MODEL
+        if form_data.RAG_KNOWLEDGE_ORGANIZER_MODEL is not None
+        else request.app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL
+    )
+    request.app.state.config.RAG_USER_COLLECTION_ENABLED = (
+        form_data.RAG_USER_COLLECTION_ENABLED
+        if form_data.RAG_USER_COLLECTION_ENABLED is not None
+        else request.app.state.config.RAG_USER_COLLECTION_ENABLED
     )
 
     # Hybrid search settings
@@ -900,6 +1039,60 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
     )
     request.app.state.config.MINERU_PARAMS = (
         form_data.MINERU_PARAMS if form_data.MINERU_PARAMS is not None else request.app.state.config.MINERU_PARAMS
+    )
+
+    # KG1 (GLM-OCR) settings
+    request.app.state.config.KG1_GLMOCR_PROJECT_DIR = (
+        form_data.KG1_GLMOCR_PROJECT_DIR
+        if form_data.KG1_GLMOCR_PROJECT_DIR is not None
+        else request.app.state.config.KG1_GLMOCR_PROJECT_DIR
+    )
+    request.app.state.config.KG1_OLLAMA_HOST = (
+        form_data.KG1_OLLAMA_HOST
+        if form_data.KG1_OLLAMA_HOST is not None
+        else request.app.state.config.KG1_OLLAMA_HOST
+    )
+    request.app.state.config.KG1_OLLAMA_PORT = (
+        form_data.KG1_OLLAMA_PORT
+        if form_data.KG1_OLLAMA_PORT is not None
+        else request.app.state.config.KG1_OLLAMA_PORT
+    )
+    request.app.state.config.KG1_LAYOUT_DEVICE = (
+        form_data.KG1_LAYOUT_DEVICE
+        if form_data.KG1_LAYOUT_DEVICE is not None
+        else request.app.state.config.KG1_LAYOUT_DEVICE
+    )
+    request.app.state.config.KG1_SOFFICE_PATH = (
+        form_data.KG1_SOFFICE_PATH
+        if form_data.KG1_SOFFICE_PATH is not None
+        else request.app.state.config.KG1_SOFFICE_PATH
+    )
+    request.app.state.config.KG1_TIMEOUT = (
+        form_data.KG1_TIMEOUT
+        if form_data.KG1_TIMEOUT is not None
+        else request.app.state.config.KG1_TIMEOUT
+    )
+    request.app.state.config.KG1_GLM_OCR_CONCURRENCY = (
+        form_data.KG1_GLM_OCR_CONCURRENCY
+        if form_data.KG1_GLM_OCR_CONCURRENCY is not None
+        else request.app.state.config.KG1_GLM_OCR_CONCURRENCY
+    )
+
+    # Image Analysis Pipeline
+    request.app.state.config.IMAGE_ANALYSIS_ENABLED = (
+        form_data.IMAGE_ANALYSIS_ENABLED
+        if form_data.IMAGE_ANALYSIS_ENABLED is not None
+        else request.app.state.config.IMAGE_ANALYSIS_ENABLED
+    )
+    request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL = (
+        form_data.IMAGE_ANALYSIS_CLASSIFIER_MODEL
+        if form_data.IMAGE_ANALYSIS_CLASSIFIER_MODEL is not None
+        else request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL
+    )
+    request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH = (
+        form_data.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH
+        if form_data.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH is not None
+        else request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH
     )
 
     # Reranking settings
@@ -1110,6 +1303,17 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'TOP_K': request.app.state.config.TOP_K,
         'BYPASS_EMBEDDING_AND_RETRIEVAL': request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
         'RAG_FULL_CONTEXT': request.app.state.config.RAG_FULL_CONTEXT,
+        'RAG_FULL_DOCUMENT_CONTEXT': request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT,
+        'RAG_FULL_DOCUMENT_MAX_TOKENS': request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS,
+        'RAG_SUBCHAT_CONCURRENCY': request.app.state.config.RAG_SUBCHAT_CONCURRENCY,
+        'RAG_DOCUMENT_INDEX_GENERATION': request.app.state.config.RAG_DOCUMENT_INDEX_GENERATION,
+        'RAG_DOCUMENT_INDEX_MODEL': request.app.state.config.RAG_DOCUMENT_INDEX_MODEL,
+        'RAG_DOCUMENT_INDEX_TIMEOUT': request.app.state.config.RAG_DOCUMENT_INDEX_TIMEOUT,
+        'RAG_KNOWLEDGE_EXPORT_ENABLED': request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED,
+        'RAG_KNOWLEDGE_EXPORT_DIR': request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR,
+        'RAG_RESEARCH_MODEL': request.app.state.config.RAG_RESEARCH_MODEL,
+        'RAG_KNOWLEDGE_ORGANIZER_MODEL': request.app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL,
+        'RAG_USER_COLLECTION_ENABLED': request.app.state.config.RAG_USER_COLLECTION_ENABLED,
         # Hybrid search settings
         'ENABLE_RAG_HYBRID_SEARCH': request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
         'TOP_K_RERANKER': request.app.state.config.TOP_K_RERANKER,
@@ -1146,6 +1350,18 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'MINERU_API_KEY': request.app.state.config.MINERU_API_KEY,
         'MINERU_API_TIMEOUT': request.app.state.config.MINERU_API_TIMEOUT,
         'MINERU_PARAMS': request.app.state.config.MINERU_PARAMS,
+        # KG1 (GLM-OCR) settings
+        'KG1_GLMOCR_PROJECT_DIR': request.app.state.config.KG1_GLMOCR_PROJECT_DIR,
+        'KG1_OLLAMA_HOST': request.app.state.config.KG1_OLLAMA_HOST,
+        'KG1_OLLAMA_PORT': request.app.state.config.KG1_OLLAMA_PORT,
+        'KG1_LAYOUT_DEVICE': request.app.state.config.KG1_LAYOUT_DEVICE,
+        'KG1_SOFFICE_PATH': request.app.state.config.KG1_SOFFICE_PATH,
+        'KG1_TIMEOUT': request.app.state.config.KG1_TIMEOUT,
+        'KG1_GLM_OCR_CONCURRENCY': request.app.state.config.KG1_GLM_OCR_CONCURRENCY,
+        # Image Analysis Pipeline
+        'IMAGE_ANALYSIS_ENABLED': request.app.state.config.IMAGE_ANALYSIS_ENABLED,
+        'IMAGE_ANALYSIS_CLASSIFIER_MODEL': request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL,
+        'IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH': request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH,
         # Reranking settings
         'RAG_RERANKING_MODEL': request.app.state.config.RAG_RERANKING_MODEL,
         'RAG_RERANKING_ENGINE': request.app.state.config.RAG_RERANKING_ENGINE,
@@ -1407,6 +1623,17 @@ def save_docs_to_vector_db(
                 add_start_index=True,
             )
             docs = text_splitter.split_documents(docs)
+        elif request.app.state.config.TEXT_SPLITTER == 'markdown':
+            log.info('Using markdown-aware text splitter')
+            from langchain_text_splitters import Language
+
+            text_splitter = RecursiveCharacterTextSplitter.from_language(
+                Language.MARKDOWN,
+                chunk_size=request.app.state.config.CHUNK_SIZE,
+                chunk_overlap=request.app.state.config.CHUNK_OVERLAP,
+                add_start_index=True,
+            )
+            docs = text_splitter.split_documents(docs)
         elif request.app.state.config.TEXT_SPLITTER == 'token':
             log.info(f'Using token text splitter: {request.app.state.config.TIKTOKEN_ENCODING_NAME}')
 
@@ -1488,7 +1715,11 @@ def save_docs_to_vector_db(
         future = asyncio.run_coroutine_threadsafe(
             embedding_function(
                 list(map(lambda x: x.replace('\n', ' '), texts)),
-                prefix=RAG_EMBEDDING_CONTENT_PREFIX,
+                prefix=(
+                    RAG_EMBEDDING_CONTENT_PREFIX.value
+                    if RAG_EMBEDDING_CONTENT_PREFIX.value
+                    else None
+                ),
                 user=user,
             ),
             request.app.state.main_loop,
@@ -1523,6 +1754,149 @@ class ProcessFileForm(BaseModel):
     file_id: str
     content: Optional[str] = None
     collection_name: Optional[str] = None
+
+
+INDEX_CHUNK_SIZE = 128_000  # tokens per chunk for large document indexing
+INDEX_CHUNK_OVERLAP = 32_000  # token overlap between chunks
+
+
+def _split_text_by_tokens(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """Split text into token-bounded chunks using tiktoken cl100k_base."""
+    enc = tiktoken.get_encoding('cl100k_base')
+    tokens = enc.encode(text)
+    total = len(tokens)
+
+    if total <= chunk_size:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < total:
+        end = min(start + chunk_size, total)
+        chunk_tokens = tokens[start:end]
+        chunks.append(enc.decode(chunk_tokens))
+        if end >= total:
+            break
+        start = end - overlap  # overlap for continuity
+
+    log.info(
+        f'Document index: split {total} tokens into {len(chunks)} chunks '
+        f'(chunk_size={chunk_size}, overlap={overlap})'
+    )
+    return chunks
+
+
+def _call_index_llm(
+    request, model_id: str, system_prompt: str, user_content: str, user, timeout: int = 600
+) -> Optional[str]:
+    """Call the LLM for index generation. Returns content string or None."""
+    from open_webui.utils.chat import generate_chat_completion
+
+    payload = {
+        'model': model_id,
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_content},
+        ],
+        'stream': False,
+        'metadata': {'task': 'rag_document_index'},
+    }
+
+    future = asyncio.run_coroutine_threadsafe(
+        generate_chat_completion(
+            request, form_data=payload, user=user, bypass_filter=True
+        ),
+        request.app.state.main_loop,
+    )
+    response = future.result(timeout=timeout)  # 600s default to handle large docs
+
+    if hasattr(response, 'body'):
+        import json as _json
+        body = _json.loads(response.body.decode('utf-8'))
+        return body['choices'][0]['message']['content']
+    elif isinstance(response, dict) and 'choices' in response:
+        return response['choices'][0]['message']['content']
+    else:
+        log.warning('Document index generation: unexpected response format')
+        return None
+
+
+def generate_document_index(
+    request: Request,
+    text_content: str,
+    filename: str,
+    user,
+) -> Optional[str]:
+    """
+    Generate a structured index/summary of a document using AI.
+    Called during document processing to create an additional embedding anchor.
+
+    For large documents (>128k tokens), splits into chunks with 32k overlap,
+    generates index for each chunk sequentially, then merges all part indexes.
+
+    Returns the index text, or None on failure.
+    """
+    from open_webui.config import DEFAULT_RAG_DOCUMENT_INDEX_PROMPT
+
+    model_id = request.app.state.config.RAG_DOCUMENT_INDEX_MODEL
+    if not model_id:
+        models = request.app.state.MODELS or {}
+        if models:
+            model_id = next(iter(models))
+        else:
+            log.warning('Document index generation: no model available')
+            return None
+
+    if not text_content or not text_content.strip():
+        return None
+
+    timeout = getattr(
+        request.app.state.config, 'RAG_DOCUMENT_INDEX_TIMEOUT', 600
+    ) or 600
+
+    chunks = _split_text_by_tokens(text_content, INDEX_CHUNK_SIZE, INDEX_CHUNK_OVERLAP)
+
+    try:
+        if len(chunks) == 1:
+            # Small document: single pass
+            return _call_index_llm(
+                request, model_id, DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
+                f'Document: {filename}\n\n{text_content}',
+                user, timeout=timeout,
+            )
+
+        # Large document: index each chunk sequentially, then merge
+        part_indexes = []
+        for i, chunk in enumerate(chunks):
+            part_label = f'Part {i + 1}/{len(chunks)}'
+            log.info(f'Document index: generating index for {filename} [{part_label}]')
+            part_index = _call_index_llm(
+                request, model_id, DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
+                f'Document: {filename} [{part_label}]\n\n{chunk}',
+                user, timeout=timeout,
+            )
+            if part_index:
+                part_indexes.append(f'## {part_label}\n\n{part_index}')
+            else:
+                log.warning(f'Document index: {filename} [{part_label}] returned empty')
+
+        if not part_indexes:
+            log.error(f'Document index: all {len(chunks)} parts failed for {filename}')
+            return None
+
+        merged = '\n\n---\n\n'.join(part_indexes)
+        log.info(
+            f'Document index: merged {len(part_indexes)}/{len(chunks)} parts '
+            f'({len(merged)} chars) for {filename}'
+        )
+        return merged
+
+    except Exception as e:
+        log.error(
+            f'Document index generation failed for {filename}: '
+            f'{type(e).__name__}: {e or "(no message)"}'
+        )
+        return None
 
 
 @router.post('/process/file')
@@ -1610,6 +1984,13 @@ def process_file(
                 file_path = file.path
                 if file_path:
                     file_path = Storage.get_file(file_path)
+
+                    # Progress: extracting content
+                    Files.update_file_data_by_id(
+                        file.id, {'status': 'processing:extracting'}, db=db
+                    )
+                    db.commit()
+
                     loader = Loader(
                         engine=request.app.state.config.CONTENT_EXTRACTION_ENGINE,
                         user=user,
@@ -1642,6 +2023,16 @@ def process_file(
                         MINERU_API_KEY=request.app.state.config.MINERU_API_KEY,
                         MINERU_API_TIMEOUT=request.app.state.config.MINERU_API_TIMEOUT,
                         MINERU_PARAMS=request.app.state.config.MINERU_PARAMS,
+                        KG1_GLMOCR_PROJECT_DIR=request.app.state.config.KG1_GLMOCR_PROJECT_DIR,
+                        KG1_OLLAMA_HOST=request.app.state.config.KG1_OLLAMA_HOST,
+                        KG1_OLLAMA_PORT=request.app.state.config.KG1_OLLAMA_PORT,
+                        KG1_LAYOUT_DEVICE=request.app.state.config.KG1_LAYOUT_DEVICE,
+                        KG1_SOFFICE_PATH=request.app.state.config.KG1_SOFFICE_PATH,
+                        KG1_TIMEOUT=request.app.state.config.KG1_TIMEOUT,
+                        KG1_GLM_OCR_CONCURRENCY=request.app.state.config.KG1_GLM_OCR_CONCURRENCY,
+                        status_callback=lambda s: Files.update_file_data_by_id(
+                            file.id, {'status': s}
+                        ),
                     )
                     docs = loader.load(file.filename, file.meta.get('content_type'), file_path)
 
@@ -1692,6 +2083,10 @@ def process_file(
                 }
             else:
                 try:
+                    # Progress: embedding
+                    Files.update_file_data_by_id(
+                        file.id, {'status': 'processing:embedding'}, db=db
+                    )
                     # Commit any pending changes before the slow embedding step.
                     # Note: file is already a Pydantic model (not ORM), so no expunge needed.
                     db.commit()
@@ -1712,6 +2107,127 @@ def process_file(
                     )
                     log.info(f'added {len(docs)} items to collection {collection_name}')
 
+                    # Generate document index if enabled
+                    index_content = None
+                    if (
+                        result
+                        and request.app.state.config.RAG_DOCUMENT_INDEX_GENERATION
+                    ):
+                        try:
+                            log.info(f'Generating document index for {file.filename}')
+                            with get_db() as session:
+                                Files.update_file_data_by_id(
+                                    file.id,
+                                    {'status': 'processing:indexing'},
+                                    db=session,
+                                )
+                            index_content = generate_document_index(
+                                request=request,
+                                text_content=text_content,
+                                filename=file.filename,
+                                user=user,
+                            )
+                            if index_content:
+                                log.info(
+                                    f'Document index generated: {len(index_content)} chars '
+                                    f'for {file.filename}'
+                                )
+
+                                # Embed index into the same collection
+                                index_docs = [
+                                    Document(
+                                        page_content=index_content,
+                                        metadata={
+                                            **file.meta,
+                                            'name': file.filename,
+                                            'created_by': file.user_id,
+                                            'file_id': file.id,
+                                            'source': file.filename,
+                                            'type': 'index',
+                                        },
+                                    )
+                                ]
+                                save_docs_to_vector_db(
+                                    request,
+                                    docs=index_docs,
+                                    collection_name=collection_name,
+                                    metadata={
+                                        'file_id': file.id,
+                                        'name': file.filename,
+                                        'hash': hash,
+                                    },
+                                    add=True,
+                                    user=user,
+                                )
+                                log.info(
+                                    f'Document index embedded into {collection_name}'
+                                )
+                        except Exception as e:
+                            log.error(
+                                f'Document index generation failed for '
+                                f'{file.filename}, continuing without index: {e}'
+                            )
+
+                    # User collection: embed docs + index into user-{user_id}
+                    if result and request.app.state.config.RAG_USER_COLLECTION_ENABLED:
+                        try:
+                            user_collection = f'user-{user.id}'
+                            # First, remove any previous entries for this file
+                            try:
+                                VECTOR_DB_CLIENT.delete(
+                                    collection_name=user_collection,
+                                    filter={'file_id': file.id},
+                                )
+                            except Exception:
+                                pass  # Collection may not exist yet
+
+                            save_docs_to_vector_db(
+                                request,
+                                docs=docs,
+                                collection_name=user_collection,
+                                metadata={
+                                    'file_id': file.id,
+                                    'name': file.filename,
+                                    'hash': hash,
+                                },
+                                add=True,
+                                user=user,
+                            )
+                            if index_content:
+                                index_docs_for_user = [
+                                    Document(
+                                        page_content=index_content,
+                                        metadata={
+                                            **file.meta,
+                                            'name': file.filename,
+                                            'created_by': file.user_id,
+                                            'file_id': file.id,
+                                            'source': file.filename,
+                                            'type': 'index',
+                                        },
+                                    )
+                                ]
+                                save_docs_to_vector_db(
+                                    request,
+                                    docs=index_docs_for_user,
+                                    collection_name=user_collection,
+                                    metadata={
+                                        'file_id': file.id,
+                                        'name': file.filename,
+                                        'hash': hash,
+                                    },
+                                    add=True,
+                                    user=user,
+                                )
+                            log.info(
+                                f'User collection: embedded {file.filename} into {user_collection}'
+                            )
+                        except Exception as e:
+                            log.error(
+                                f'User collection embedding failed for '
+                                f'{file.filename}: {e}'
+                            )
+
                     if result:
                         # Fresh session for the final update.
                         with get_db() as session:
@@ -1723,19 +2239,49 @@ def process_file(
                                 db=session,
                             )
 
+                            # Store index_content alongside content
+                            update_data = {'status': 'completed'}
+                            if index_content:
+                                update_data['index_content'] = index_content
+
                             Files.update_file_data_by_id(
                                 file.id,
-                                {'status': 'completed'},
+                                update_data,
                                 db=session,
                             )
                             Files.update_file_hash_by_id(file.id, hash, db=session)
 
-                            return {
-                                'status': True,
-                                'collection_name': collection_name,
-                                'filename': file.filename,
-                                'content': text_content,
-                            }
+                        # Knowledge export: write .md + .index.md to filesystem (non-blocking)
+                        export_dir = request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR
+                        if (
+                            request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED
+                            and export_dir
+                        ):
+                            try:
+                                from open_webui.utils.knowledge_export import (
+                                    export_document_files,
+                                    enqueue_organization,
+                                )
+
+                                export_document_files(
+                                    export_dir=export_dir,
+                                    file_id=file.id,
+                                    filename=file.filename,
+                                    content=text_content,
+                                    index_content=index_content,
+                                )
+                                enqueue_organization(app=request.app)
+                            except Exception as e:
+                                log.error(
+                                    f'Knowledge export failed for {file.filename}: {e}'
+                                )
+
+                        return {
+                            'status': True,
+                            'collection_name': collection_name,
+                            'filename': file.filename,
+                            'content': text_content,
+                        }
                     else:
                         raise Exception('Error saving document to vector database')
                 except Exception as e:
@@ -2402,7 +2948,13 @@ async def query_doc_handler(
             )
         else:
             query_embedding = await request.app.state.EMBEDDING_FUNCTION(
-                form_data.query, prefix=RAG_EMBEDDING_QUERY_PREFIX, user=user
+                form_data.query,
+                prefix=(
+                    RAG_EMBEDDING_QUERY_PREFIX.value
+                    if RAG_EMBEDDING_QUERY_PREFIX.value
+                    else None
+                ),
+                user=user,
             )
             return query_doc(
                 collection_name=form_data.collection_name,
@@ -2556,7 +3108,16 @@ if ENV == 'dev':
 
     @router.get('/ef/{text}')
     async def get_embeddings(request: Request, text: Optional[str] = 'Hello World!'):
-        return {'result': await request.app.state.EMBEDDING_FUNCTION(text, prefix=RAG_EMBEDDING_QUERY_PREFIX)}
+        return {
+            'result': await request.app.state.EMBEDDING_FUNCTION(
+                text,
+                prefix=(
+                    RAG_EMBEDDING_QUERY_PREFIX.value
+                    if RAG_EMBEDDING_QUERY_PREFIX.value
+                    else None
+                ),
+            )
+        }
 
 
 class BatchProcessFilesForm(BaseModel):
