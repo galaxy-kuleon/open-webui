@@ -45,6 +45,7 @@
 	let RAG_EMBEDDING_CONCURRENT_REQUESTS = 0;
 	let RAG_EMBEDDING_QUERY_PREFIX = '';
 	let RAG_EMBEDDING_CONTENT_PREFIX = '';
+	let RAG_EMBEDDING_PREFIX_FIELD_NAME = '';
 
 	let rerankingModel = '';
 
@@ -118,6 +119,9 @@
 			RAG_EMBEDDING_BATCH_SIZE: RAG_EMBEDDING_BATCH_SIZE,
 			ENABLE_ASYNC_EMBEDDING: ENABLE_ASYNC_EMBEDDING,
 			RAG_EMBEDDING_CONCURRENT_REQUESTS: RAG_EMBEDDING_CONCURRENT_REQUESTS,
+			RAG_EMBEDDING_QUERY_PREFIX: RAG_EMBEDDING_QUERY_PREFIX,
+			RAG_EMBEDDING_CONTENT_PREFIX: RAG_EMBEDDING_CONTENT_PREFIX,
+			RAG_EMBEDDING_PREFIX_FIELD_NAME: RAG_EMBEDDING_PREFIX_FIELD_NAME,
 			ollama_config: {
 				key: OllamaKey,
 				url: OllamaUrl
@@ -253,6 +257,9 @@
 			RAG_EMBEDDING_BATCH_SIZE = embeddingConfig.RAG_EMBEDDING_BATCH_SIZE ?? 1;
 			ENABLE_ASYNC_EMBEDDING = embeddingConfig.ENABLE_ASYNC_EMBEDDING ?? true;
 			RAG_EMBEDDING_CONCURRENT_REQUESTS = embeddingConfig.RAG_EMBEDDING_CONCURRENT_REQUESTS ?? 0;
+			RAG_EMBEDDING_QUERY_PREFIX = embeddingConfig.RAG_EMBEDDING_QUERY_PREFIX ?? '';
+			RAG_EMBEDDING_CONTENT_PREFIX = embeddingConfig.RAG_EMBEDDING_CONTENT_PREFIX ?? '';
+			RAG_EMBEDDING_PREFIX_FIELD_NAME = embeddingConfig.RAG_EMBEDDING_PREFIX_FIELD_NAME ?? '';
 
 			OpenAIKey = embeddingConfig.openai_config.key;
 			OpenAIUrl = embeddingConfig.openai_config.url;
@@ -1206,6 +1213,69 @@
 								</div>
 							</div>
 						{/if}
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Prefix prepended to query text before embedding. Useful for asymmetric embedding models (e.g. "query: " for E5).'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Embedding Query Prefix')}
+								</Tooltip>
+							</div>
+							<div class="flex items-center relative">
+								<input
+									bind:value={RAG_EMBEDDING_QUERY_PREFIX}
+									type="text"
+									class="flex-1 w-full text-sm bg-transparent outline-hidden text-right"
+									placeholder={$i18n.t('e.g. query: ')}
+								/>
+							</div>
+						</div>
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Prefix prepended to document content before embedding. Useful for asymmetric embedding models (e.g. "passage: " for E5).'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Embedding Content Prefix')}
+								</Tooltip>
+							</div>
+							<div class="flex items-center relative">
+								<input
+									bind:value={RAG_EMBEDDING_CONTENT_PREFIX}
+									type="text"
+									class="flex-1 w-full text-sm bg-transparent outline-hidden text-right"
+									placeholder={$i18n.t('e.g. passage: ')}
+								/>
+							</div>
+						</div>
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Name of the field used to pass the prefix to the embedding model API (e.g. "instruction" for some providers).'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Embedding Prefix Field Name')}
+								</Tooltip>
+							</div>
+							<div class="flex items-center relative">
+								<input
+									bind:value={RAG_EMBEDDING_PREFIX_FIELD_NAME}
+									type="text"
+									class="flex-1 w-full text-sm bg-transparent outline-hidden text-right"
+									placeholder={$i18n.t('e.g. instruction')}
+								/>
+							</div>
+						</div>
 					</div>
 
 					<div class="mb-3">
@@ -1227,6 +1297,86 @@
 								>
 									<Switch bind:state={RAGConfig.RAG_FULL_CONTEXT} />
 								</Tooltip>
+							</div>
+						</div>
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'When enabled, the entire document is injected as context rather than retrieved chunks. Useful for short documents where full context is preferred.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Full Document Context')}
+								</Tooltip>
+							</div>
+							<div class="flex items-center relative">
+								<Switch bind:state={RAGConfig.RAG_FULL_DOCUMENT_CONTEXT} />
+							</div>
+						</div>
+
+						{#if RAGConfig.RAG_FULL_DOCUMENT_CONTEXT}
+							<div class="  mb-2.5 flex w-full justify-between">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Maximum number of tokens to include when injecting the full document as context. Set to 0 for unlimited.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Full Document Max Tokens')}
+									</Tooltip>
+								</div>
+								<div class="">
+									<input
+										bind:value={RAGConfig.RAG_FULL_DOCUMENT_MAX_TOKENS}
+										type="number"
+										class=" bg-transparent text-center w-20 outline-none"
+										min="0"
+										step="1"
+										placeholder="0"
+									/>
+								</div>
+							</div>
+						{/if}
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Number of concurrent subchat retrieval queries to run in parallel. Set to 0 for unlimited.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Subchat Concurrency')}
+								</Tooltip>
+							</div>
+							<div class="">
+								<input
+									bind:value={RAGConfig.RAG_SUBCHAT_CONCURRENCY}
+									type="number"
+									class=" bg-transparent text-center w-14 outline-none"
+									min="0"
+									step="1"
+									placeholder="0"
+								/>
+							</div>
+						</div>
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Allow users to search and retrieve from their own personal document collections in addition to shared knowledge bases.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('User Collection Retrieval')}
+								</Tooltip>
+							</div>
+							<div class="flex items-center relative">
+								<Switch bind:state={RAGConfig.RAG_USER_COLLECTION_ENABLED} />
 							</div>
 						</div>
 
@@ -1512,6 +1662,68 @@
 									placeholder={$i18n.t('e.g. lmstudio.qwen3.5-9b')}
 									bind:value={RAGConfig.RAG_KNOWLEDGE_ORGANIZER_MODEL}
 								/>
+							</div>
+						{/if}
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'When enabled, a compact index summary is generated for each document to speed up retrieval and improve relevance ranking.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Document Index Generation')}
+								</Tooltip>
+							</div>
+							<div class="flex items-center relative">
+								<Switch bind:state={RAGConfig.RAG_DOCUMENT_INDEX_GENERATION} />
+							</div>
+						</div>
+
+						{#if RAGConfig.RAG_DOCUMENT_INDEX_GENERATION}
+							<div class="  mb-2.5 flex w-full justify-between">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Model used to generate document index summaries. Leave empty to use the default model.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Document Index Model')}
+									</Tooltip>
+								</div>
+								<div class="flex items-center relative">
+									<input
+										bind:value={RAGConfig.RAG_DOCUMENT_INDEX_MODEL}
+										type="text"
+										class="flex-1 w-full text-sm bg-transparent outline-hidden text-right"
+										placeholder={$i18n.t('e.g. llama3.2')}
+									/>
+								</div>
+							</div>
+
+							<div class="  mb-2.5 flex w-full justify-between">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Timeout for document index generation requests (seconds).'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Document Index Timeout')}
+									</Tooltip>
+								</div>
+								<div class="">
+									<input
+										bind:value={RAGConfig.RAG_DOCUMENT_INDEX_TIMEOUT}
+										type="number"
+										class=" bg-transparent text-center w-20 outline-none"
+										min="0"
+										step="1"
+										placeholder="0"
+									/>
+								</div>
 							</div>
 						{/if}
 					</div>
