@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 from open_webui.utils.misc import strict_match_mime_type
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.sanitize import sanitize_filename
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.headers import include_user_info_headers
 from open_webui.config import (
@@ -1151,7 +1152,7 @@ def transcription(
         )
 
     try:
-        safe_name = os.path.basename(file.filename) if file.filename else ''
+        safe_name = sanitize_filename(file.filename) if file.filename else ''
         ext = safe_name.rsplit('.', 1)[-1] if '.' in safe_name else ''
 
         id = uuid.uuid4()

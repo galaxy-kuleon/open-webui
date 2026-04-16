@@ -189,7 +189,7 @@ async def generate_title(request: Request, form_data: dict, user=Depends(get_ver
 
     content = title_generation_template(template, form_data['messages'], user)
 
-    max_tokens = models[task_model_id].get('info', {}).get('params', {}).get('max_tokens', 1000)
+    max_tokens = models[task_model_id].get('info', {}).get('params', {}).get('max_tokens', 16000)
 
     payload = {
         'model': task_model_id,

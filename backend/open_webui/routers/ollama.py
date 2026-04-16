@@ -58,6 +58,7 @@ from open_webui.utils.payload import (
     apply_system_prompt_to_body,
 )
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.sanitize import sanitize_filename
 from open_webui.config import (
     UPLOAD_DIR,
 )
@@ -1799,7 +1800,7 @@ async def upload_model(
         url_idx = 0
     ollama_url = request.app.state.config.OLLAMA_BASE_URLS[url_idx]
 
-    filename = os.path.basename(file.filename)
+    filename = sanitize_filename(file.filename or '')
     file_path = os.path.join(UPLOAD_DIR, filename)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
