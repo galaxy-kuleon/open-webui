@@ -392,6 +392,9 @@
 													{#if !skill.is_active}
 														<Badge type="muted" content={$i18n.t('Inactive')} />
 													{/if}
+													{#if skill.meta?.type === 'agent_skill'}
+														<Badge type="info" content={$i18n.t('Agent')} />
+													{/if}
 												</div>
 											</Tooltip>
 											<div class="px-0.5">
@@ -424,6 +427,9 @@
 														</div>
 														{#if !skill.is_active}
 															<Badge type="muted" content={$i18n.t('Inactive')} />
+														{/if}
+														{#if skill.meta?.type === 'agent_skill'}
+															<Badge type="info" content={$i18n.t('Agent')} />
 														{/if}
 													</div>
 												</Tooltip>
@@ -540,3 +546,4 @@
 		<Spinner className="size-5" />
 	</div>
 {/if}
+

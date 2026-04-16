@@ -1785,7 +1785,31 @@ async def chat_completion(
         try:
             form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
 
-            response = await chat_completion_handler(request, form_data, user)
+            # ── Agent Skill Short-Circuit ──
+            # If the skill keyword intercept fired in middleware, skip the LLM
+            # and return the skill result as a synthetic streaming response.
+            if '__agent_skill_result__' in metadata:
+                import json as _json
+
+                _skill_result = metadata.pop('__agent_skill_result__')
+                try:
+                    _parsed = _json.loads(_skill_result)
+                    _content = _parsed.get('output', _parsed.get('error', str(_parsed)))
+                except Exception:
+                    _content = str(_skill_result)
+
+                async def _skill_stream():
+                    from open_webui.utils.misc import openai_chat_chunk_message_template
+                    chunk = openai_chat_chunk_message_template(form_data.get('model', ''), _content)
+                    yield f'data: {_json.dumps(chunk)}\n\n'
+                    finish = openai_chat_chunk_message_template(form_data.get('model', ''), '')
+                    finish['choices'][0]['finish_reason'] = 'stop'
+                    yield f'data: {_json.dumps(finish)}\n\n'
+                    yield 'data: [DONE]\n\n'
+
+                response = StreamingResponse(_skill_stream(), media_type='text/event-stream')
+            else:
+                response = await chat_completion_handler(request, form_data, user)
             if metadata.get('chat_id') and metadata.get('message_id'):
                 try:
                     if not metadata['chat_id'].startswith('local:'):

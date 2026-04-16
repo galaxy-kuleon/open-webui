@@ -16,6 +16,7 @@
 		content: string;
 		is_active: boolean;
 		access_grants: any[];
+		meta?: Record<string, any>;
 	} | null = null;
 
 	let clone = false;
@@ -45,7 +46,8 @@
 				description: _skill.description || '',
 				content: _skill.content || '',
 				is_active: _skill.is_active ?? true,
-				access_grants: _skill.access_grants !== undefined ? _skill.access_grants : []
+				access_grants: _skill.access_grants !== undefined ? _skill.access_grants : [],
+				meta: _skill.meta
 			};
 		}
 	});

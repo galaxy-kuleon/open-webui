@@ -35,6 +35,10 @@ class Skill(Base):
 
 class SkillMeta(BaseModel):
     tags: Optional[list[str]] = []
+    type: Optional[str] = None  # None = markdown (default), "agent_skill" = opencode-based
+    work_dir: Optional[str] = None  # direct-dir mode: opencode runs in this directory
+    disk_path: Optional[str] = None  # sandbox mode: skill files at this path
+    idle_timeout: Optional[int] = None  # per-skill idle timeout override (seconds)
 
 
 class SkillModel(BaseModel):

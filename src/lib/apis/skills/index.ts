@@ -1,5 +1,34 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
+export const uploadSkillZip = async (token: string, file: File) => {
+	let error = null;
+
+	const formData = new FormData();
+	formData.append('file', file);
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/skills/upload-zip`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`
+		},
+		body: formData
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? 'Failed to upload skill zip';
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const createNewSkill = async (token: string, skill: object) => {
 	let error = null;
 

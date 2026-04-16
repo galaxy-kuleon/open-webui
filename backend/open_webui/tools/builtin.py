@@ -2271,6 +2271,225 @@ async def query_knowledge_bases(
 # =============================================================================
 
 
+async def run_agent_skill(
+    skill_name: str,
+    message: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __event_emitter__: callable = None,
+    __metadata__: dict = None,
+) -> str:
+    """
+    Execute an agent skill using the opencode CLI.
+
+    Supports two execution modes:
+      1. Sandbox mode (default): skill files are copied into a temp sandbox,
+         opencode runs there, output files are collected by mtime, then cleaned up.
+      2. Direct-dir mode (work_dir): opencode runs directly in the user's project
+         directory. Output files are collected ONLY from {work_dir}/output/.
+
+    work_dir takes precedence over disk_path when both are set.
+
+    :param skill_name: Name of the agent skill to execute
+    :param message: The task/message to send to the agent skill
+    :return: The text output from the agent skill execution, including any file references
+    """
+    if __request__ is None:
+        return json.dumps({"error": "Request context not available"})
+
+    if not __user__:
+        return json.dumps({"error": "User context not available"})
+
+    try:
+        from open_webui.models.skills import Skills as SkillsModel
+        from open_webui.models.access_grants import AccessGrants
+        from open_webui.utils.opencode import (
+            generate_opencode_config,
+            setup_sandbox,
+            run_opencode,
+            collect_output_files,
+            collect_output_files_from_work_dir,
+            cleanup_sandbox,
+            _get_user_semaphore,
+        )
+        from open_webui.env import OPENCODE_PATH
+        import shutil
+        import time as _time
+
+        if not shutil.which(OPENCODE_PATH) and OPENCODE_PATH == "opencode":
+            return json.dumps({
+                "error": "opencode CLI is not installed or not found in PATH. "
+                "Set the OPENCODE_PATH environment variable to the correct path."
+            })
+
+        user_id = __user__.get("id")
+        user_role = __user__.get("role", "user")
+
+        skill = SkillsModel.get_skill_by_name(skill_name)
+        if not skill or not skill.is_active:
+            return json.dumps({"error": f"Agent skill '{skill_name}' not found or inactive"})
+
+        meta = skill.meta
+        if hasattr(meta, "model_dump"):
+            meta = meta.model_dump()
+        if not meta or meta.get("type") != "agent_skill":
+            return json.dumps({"error": f"'{skill_name}' is not an agent skill"})
+
+        work_dir = meta.get("work_dir")
+        use_work_dir = False
+
+        if work_dir:
+            import os as _os
+            if not _os.path.isdir(work_dir):
+                return json.dumps({"error": f"Agent skill '{skill_name}' work_dir does not exist: {work_dir}"})
+            use_work_dir = True
+            log.info(f"Agent skill '{skill_name}' using direct-dir mode: {work_dir}")
+        else:
+            disk_path = meta.get("disk_path")
+            if not disk_path:
+                return json.dumps({"error": f"Agent skill '{skill_name}' has no disk_path or work_dir configured"})
+
+        if user_role != "admin" and skill.user_id != user_id:
+            user_group_ids = [
+                group.id for group in Groups.get_groups_by_member_id(user_id)
+            ]
+            if not AccessGrants.has_access(
+                user_id=user_id,
+                resource_type="skill",
+                resource_id=skill.id,
+                permission="read",
+                user_group_ids=set(user_group_ids),
+            ):
+                return json.dumps({"error": "Access denied"})
+
+        semaphore = _get_user_semaphore(user_id)
+        if semaphore.locked():
+            return json.dumps({"error": "Maximum concurrent agent skill executions reached. Please wait."})
+
+        async with semaphore:
+            if __event_emitter__:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "action": "agent_skill",
+                        "sub_action": "start",
+                        "description": f"Running agent skill: {skill_name}",
+                        "skill_name": skill_name,
+                        "done": False,
+                    },
+                })
+
+            try:
+                openai_urls = getattr(__request__.app.state.config, "OPENAI_API_BASE_URLS", [])
+                openai_keys = getattr(__request__.app.state.config, "OPENAI_API_KEYS", [])
+                ollama_urls = getattr(__request__.app.state.config, "OLLAMA_BASE_URLS", [])
+                openai_api_configs = getattr(__request__.app.state.config, "OPENAI_API_CONFIGS", {})
+                generate_opencode_config(openai_urls, openai_keys, ollama_urls, openai_api_configs)
+            except Exception as e:
+                log.warning(f"Failed to generate opencode config: {e}")
+
+            skill_idle_timeout = meta.get("idle_timeout") or None
+            sandbox_dir_to_cleanup = None
+
+            try:
+                if use_work_dir:
+                    run_kwargs = {
+                        "sandbox_dir": work_dir,
+                        "message": message,
+                        "skill_name": skill_name,
+                        "event_emitter": __event_emitter__,
+                    }
+                    if skill_idle_timeout:
+                        run_kwargs["idle_timeout"] = skill_idle_timeout
+                    result = await run_opencode(**run_kwargs)
+                    output_files = collect_output_files_from_work_dir(work_dir)
+                else:
+                    sandbox_dir = setup_sandbox(skill.id, disk_path, skill.name)
+                    sandbox_dir_to_cleanup = sandbox_dir
+                    start_time = _time.time()
+
+                    run_kwargs = {
+                        "sandbox_dir": sandbox_dir,
+                        "message": message,
+                        "skill_name": skill_name,
+                        "event_emitter": __event_emitter__,
+                    }
+                    if skill_idle_timeout:
+                        run_kwargs["idle_timeout"] = skill_idle_timeout
+                    result = await run_opencode(**run_kwargs)
+                    output_files = collect_output_files(sandbox_dir, start_time)
+
+                file_refs = []
+                if output_files:
+                    try:
+                        from open_webui.models.files import Files, FileForm
+                        from open_webui.routers.files import Storage
+                        import io
+                        import uuid
+                        import mimetypes
+
+                        for fpath in output_files:
+                            try:
+                                filename = fpath.name
+                                file_content = fpath.read_bytes()
+                                content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                                file_obj = io.BytesIO(file_content)
+                                _, storage_filename = Storage.upload_file(
+                                    file_obj, filename,
+                                    {"source": "agent_skill", "skill_id": skill.id},
+                                )
+                                file_id = str(uuid.uuid4())
+                                file_record = Files.insert_new_file(
+                                    user_id,
+                                    FileForm(
+                                        id=file_id,
+                                        filename=filename,
+                                        path=storage_filename,
+                                        meta={
+                                            "name": filename,
+                                            "content_type": content_type,
+                                            "size": len(file_content),
+                                            "source": f"agent_skill:{skill.id}",
+                                        },
+                                    ),
+                                )
+                                if file_record:
+                                    file_refs.append(
+                                        f"- [{filename}](/api/v1/files/{file_record.id}/content)"
+                                    )
+                            except Exception as e:
+                                log.warning(f"Failed to upload output file {fpath}: {e}")
+                    except ImportError as e:
+                        log.warning(f"Cannot upload files: {e}")
+            finally:
+                if sandbox_dir_to_cleanup:
+                    cleanup_sandbox(sandbox_dir_to_cleanup)
+
+            output_parts = [result]
+            if file_refs:
+                output_parts.append("\n\nOutput files:\n" + "\n".join(file_refs))
+
+            if __event_emitter__:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "action": "agent_skill",
+                        "sub_action": "complete",
+                        "description": "Agent skill completed",
+                        "done": True,
+                    },
+                })
+
+            return json.dumps({
+                "status": "success",
+                "output": "\n".join(output_parts),
+            }, ensure_ascii=False)
+
+    except Exception as e:
+        log.exception(f"run_agent_skill error: {e}")
+        return json.dumps({"error": str(e)})
+
+
 async def view_skill(
     name: str,
     __request__: Request = None,
