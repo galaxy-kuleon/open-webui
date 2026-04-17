@@ -98,6 +98,26 @@ class Pipe:
         Falls back to stateless request-body history when no API key is
         configured, because Hermes only accepts session continuation on
         authenticated requests.
+
+        Connection vs. pipe:
+            Hermes exposes a standard OpenAI-compatible API on /v1/chat/completions
+            and /v1/models, so users who need none of the four pipe-only features
+            below can configure Hermes as a plain OpenAI Connection and skip this
+            pipe entirely. Use this pipe only when any of the following apply:
+
+            1. tool-progress translation — decodes custom ``event: hermes.tool.progress``
+               SSE frames into __event_emitter__ status events. Open WebUI's built-in
+               OpenAI SSE parser silently drops non-``data:`` SSE event types; this
+               pipe rescues them.
+            2. file-path injection — resolves Open WebUI upload IDs to absolute
+               filesystem paths and injects them into the system prompt. Hermes reads
+               files directly from disk rather than accepting base64 payloads.
+            3. manifold discovery — enumerates Hermes sub-models via /v1/models and
+               strips the ``pipe_id.`` namespace prefix from sub-model IDs before
+               dispatching requests (e.g. ``hermes_agent.profile`` → ``profile``).
+            4. session-header gate — conditionally sends ``X-Hermes-Session-Id`` only
+               when ``hermes_api_key`` is configured; Hermes returns 403 on
+               unauthenticated session-continuation requests.
         """
         url = self.valves.hermes_api_url.rstrip('/')
         headers = {
@@ -209,15 +229,6 @@ class Pipe:
                             # Standard OpenAI chunk — yield as dict for process_line
                             try:
                                 chunk = json.loads(data_str)
-                                # Check for reasoning content and emit as thinking
-                                delta = (chunk.get('choices') or [{}])[0].get('delta', {})
-                                reasoning = delta.pop('reasoning_content', None) or delta.pop('reasoning', None)
-                                if reasoning:
-                                    await self._emit_status(
-                                        __event_emitter__,
-                                        'thinking',
-                                        reasoning[:500],
-                                    )
                                 yield chunk
                             except json.JSONDecodeError:
                                 log.warning(f'Bad SSE JSON: {data_str}')

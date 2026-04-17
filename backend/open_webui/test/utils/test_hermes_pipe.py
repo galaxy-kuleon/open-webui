@@ -151,3 +151,47 @@ async def test_pipe_403_session_continuity_error_includes_hint(monkeypatch):
         'hermes_api_key in this pipe.'
     )
     assert emitted[-1]['data']['sub_action'] == 'error'
+
+
+@pytest.mark.asyncio
+async def test_pipe_passes_through_reasoning_content_unchanged(monkeypatch):
+    """Regression: reasoning_content in a delta must pass through unmodified.
+
+    The dead branch at hermes_agent.py:212-220 used to pop reasoning_content /
+    reasoning from the delta and emit a 'thinking' status.  After its removal
+    the chunk must be yielded with all fields intact and no 'thinking' status
+    event must be emitted.
+    """
+    pipe = Pipe()
+    recorder = {}
+    response = _FakeResponse(
+        lines=[
+            'data: {"choices":[{"delta":{"reasoning_content":"thinking out loud","content":"hi"}}]}',
+            'data: [DONE]',
+        ]
+    )
+
+    monkeypatch.setattr(
+        'open_webui.pipes.hermes_agent.httpx.AsyncClient',
+        _client_factory(recorder, response),
+    )
+
+    emitted = []
+
+    async def _emit(event):
+        emitted.append(event)
+
+    chunks = []
+    async for chunk in pipe.pipe(
+        {'model': 'hermes_agent.default', 'messages': [{'role': 'user', 'content': 'hello'}]},
+        __event_emitter__=_emit,
+    ):
+        chunks.append(chunk)
+
+    # First yielded chunk must be the parsed JSON with reasoning_content intact
+    expected_chunk = {'choices': [{'delta': {'reasoning_content': 'thinking out loud', 'content': 'hi'}}]}
+    assert chunks[0] == expected_chunk
+
+    # No emitter event should carry sub_action == 'thinking'
+    thinking_events = [e for e in emitted if e.get('data', {}).get('sub_action') == 'thinking']
+    assert thinking_events == []

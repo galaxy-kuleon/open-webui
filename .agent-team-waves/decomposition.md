@@ -1,72 +1,52 @@
-# Wave Decomposition
+# Wave Decomposition — Hermes Port Follow-up
 
-Total waves: 4
+Total waves: 2
 Mode: auto
 Max waves flag: none
+Source spec: `/Users/noelbao/.claude-kg/plans/dynamic-snacking-sprout.md`
+Base branch: `feat/v0.8.12-hermes-port`
+Prior /atw run archived at `./archive-2026-04-17-hermes-port-main/`
 
-## Wave 1: Make non-vision image upload conditional on actual image-analysis config availability
+## Wave 1: Pipe cleanup + Connection-vs-pipe docstring clarification
 
-- Data-flow segment: entry (upload gating decision)
-- Blast radius: smallest-isolated (single component conditional + config read)
-- Spec sections this wave receives: Remediation WS2 (remaining frontend gate), Handoff §1 (remaining P0 slice), Handoff §Important Limitation
+- Data-flow segment: error-path (dead code + docs + regression test)
+- Blast radius: smallest-isolated (single pipe file + its tests)
+- Spec sections this wave receives:
+  - "Wave 1 — Pipe cleanup + docstring clarification" block (spec lines 19-33)
+  - Context gap #1 and #2 (spec lines 9-11)
+  - Forbidden list, Wave-1-specific constraints (spec lines 62-69)
+  - Verification gate for Wave 1 (spec line 86)
 - Planned status: pending
 - Deferred items assigned here: None
 
-### Turn Plan
+### Wave 1 Turns
 
-| Turn | Primary Scope | Revisit | Lens | Notes |
-|------|---------------|---------|------|-------|
-| T1 | Investigate config/store surface for IMAGE_ANALYSIS_ENABLED; implement config-aware gate in MessageInput.svelte | — (first stroke) | — | Must find how frontend accesses backend config |
-| T2 | Edge case hardening: vision model still works, disabled config blocks correctly, error messaging | T1 | contract-alignment | Verify frontend gate ↔ backend dispatch contract |
-| T3 | Full cross-validation of image upload path end-to-end | T1, T2 | global-consistency | Wave coherence pass |
+| Turn | Primary Scope | Revisit | Lens |
+|------|---------------|---------|------|
+| T1 | Delete `reasoning_content` branch at `backend/open_webui/pipes/hermes_agent.py:212-220` + add regression test to `backend/open_webui/test/utils/test_hermes_pipe.py` asserting a chunk containing `reasoning_content` is yielded as `content` without triggering `thinking` status | — | — |
+| T2 | Add Connection-vs-pipe clarification to `pipe()` docstring at line 100: enumerate the 4 load-bearing pipe features (tool progress SSE translation, file-path injection, manifold prefix stripping, session header gate) | T1 | contract-alignment |
+| T3 | Full cross-validation: 18 tests pass, docstring coherent, no orphaned imports, no other call sites of deleted branch | T1, T2 | global-consistency |
 
-## Wave 2: Reconnect agent skill ZIP import UI + fix terminal selection persistence regression
+## Wave 2: Playwright smoke tests for Wave 1-3 UI features
 
-- Data-flow segment: entry + transform (file import path + state persistence)
-- Blast radius: small (two isolated UI components, no interaction between them)
-- Spec sections this wave receives: Remediation WS4 (ZIP import), Remediation WS6 (terminal persistence)
+- Data-flow segment: output (end-to-end behavioural verification)
+- Blast radius: moderate (3 new spec files + helper + fixture)
+- Spec sections this wave receives:
+  - "Wave 2 — Playwright smoke tests" block (spec lines 35-50)
+  - Critical reuse points (spec lines 53-59)
+  - Forbidden list, Wave-2-specific constraints (spec lines 62-70)
+  - Risks #1-#4 (spec lines 73-80)
+  - Verification gate for Wave 2 (spec line 88)
 - Planned status: pending
 - Deferred items assigned here: None
 
-### Turn Plan
+### Wave 2 Turns
 
-| Turn | Primary Scope | Revisit | Lens | Notes |
-|------|---------------|---------|------|-------|
-| T1 | ZIP import: add .zip to Skills.svelte accept list, wire handler to uploadSkillZip, refresh after import | — (first stroke) | — | Backend route and API helper already exist |
-| T2 | Terminal persistence: investigate intended v0.8.12 behavior, fix Chat.svelte ↔ layout.svelte consistency | T1 | shared-patterns | Both are UI state-wiring fixes; check patterns |
-| T3 | Full cross-validation of both import and persistence paths | T1, T2 | global-consistency | Wave coherence pass |
-
-## Wave 3: Restore RAG admin settings UI parity with A
-
-- Data-flow segment: transform (admin config round-trip: UI → API → persistence → reload)
-- Blast radius: moderate (admin settings page + API payloads + 9+ config values)
-- Spec sections this wave receives: Remediation WS3 (RAG settings parity)
-- Planned status: pending
-- Deferred items assigned here: None
-
-### Turn Plan
-
-| Turn | Primary Scope | Revisit | Lens | Notes |
-|------|---------------|---------|------|-------|
-| T1 | Add missing RAG settings controls to Documents.svelte; fix embedding prefix payload bug | — (first stroke) | — | 9+ settings: prefixes, full doc context, subchat concurrency, doc index gen, user collection |
-| T2 | Round-trip verification: load values from backend on page load, save persists, reload preserves | T1 | contract-alignment | UI ↔ retrieval API ↔ config persistence contract |
-| T3 | Full cross-validation: audit for any remaining A-era settings not surfaced | T1, T2 | global-consistency | Wave coherence pass |
-
-## Wave 4: Lockfile/packaging consistency + Hermes integration coverage hardening
-
-- Data-flow segment: output + error-path (build toolchain + test surface)
-- Blast radius: moderate-to-system-wide (dependency graph + new test files)
-- Spec sections this wave receives: Remediation WS7 (lockfile), Remediation WS8 (Hermes coverage), Verification Matrix, Definition of Done
-- Planned status: pending
-- Deferred items assigned here: None
-
-### Turn Plan
-
-| Turn | Primary Scope | Revisit | Lens | Notes |
-|------|---------------|---------|------|-------|
-| T1 | Lockfile regeneration: audit package.json, regenerate package-lock.json, verify fresh install leaves no diff | — (first stroke) | — | Mechanical but system-wide blast radius |
-| T2 | Hermes coverage: builtin pipe bootstrap tests, manifold discovery, SSE event translation, auth-gated session continuity | T1 | contract-alignment | Verify test contracts match actual Hermes behavior |
-| T3 | Full cross-validation + Definition of Done checklist against remediation plan | T1, T2 | global-consistency | Final wave coherence + DoD verification |
+| Turn | Primary Scope | Revisit | Lens |
+|------|---------------|---------|------|
+| T1 | `e2e/tests/image-upload.spec.ts` four quadrants: (vision × enabled/disabled) × (non-vision × enabled/disabled). Plus helper `e2e/helpers/admin.ts` (admin login + RAG config toggle, env-var overrides for ADMIN_EMAIL / ADMIN_PASSWORD). Uses existing `auth.ts` + `chat.ts` helpers. | — | — |
+| T2 | `e2e/tests/skill-zip-import.spec.ts` with fixture `e2e/fixtures/test-skill.zip` (valid `SKILL.md`) + negative test (invalid ZIP missing `SKILL.md`). ZIP fixture must conform to `routers/skills.py:289-295` validator. | T1 | contract-alignment |
+| T3 | `e2e/tests/admin-rag-settings.spec.ts`: set all 10 new RAG controls to non-default values via UI, save, reload, assert preserved. Final gate: `bunx playwright test --config=e2e/playwright.config.ts --list` shows 3 new specs collected without parse errors. | T1, T2 | global-consistency |
 
 ## Deferred Queue
 
