@@ -1,156 +1,127 @@
-import copy
-import time
-import logging
-import sys
-import os
-import base64
-import textwrap
-
-import asyncio
-from aiocache import cached
-from typing import Any, Optional
-import random
-import json
-import html
-import inspect
-import re
 import ast
-
+import asyncio
+import copy
+import html
+import json
+import logging
+import random
+import re
+import sys
+import textwrap
+import time
 from uuid import uuid4
-from concurrent.futures import ThreadPoolExecutor
 
-
-from fastapi import Request, HTTPException
+from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
-from starlette.responses import Response, StreamingResponse, JSONResponse
-
-
-from open_webui.utils.misc import is_string_allowed
-from open_webui.utils.sanitize import (
-    sanitize_filename as _sanitize_fn,
-    sanitize_llm_injected_markdown as _sanitize_injected_md,
-    _SKIP_RAG_MAX_BYTES,
+from open_webui.config import (
+    CODE_INTERPRETER_BLOCKED_MODULES,
+    CODE_INTERPRETER_PYODIDE_PROMPT,
+    DEFAULT_CODE_INTERPRETER_PROMPT,
+    DEFAULT_TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
+    DEFAULT_VOICE_MODE_PROMPT_TEMPLATE,
 )
-from open_webui.utils.skip_rag import (
-    build_skip_rag_context as _build_skip_rag_context,
-    _SKIP_RAG_PREAMBLE as _SKIP_RAG_PREAMBLE_FROM_MODULE,
+from open_webui.constants import TASKS
+from open_webui.env import (
+    CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES,
+    CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE,
+    ENABLE_CHAT_RESPONSE_BASE64_IMAGE_URL_CONVERSION,
+    ENABLE_FORWARD_USER_INFO_HEADERS,
+    ENABLE_QUERIES_CACHE,
+    ENABLE_REALTIME_CHAT_SAVE,
+    ENABLE_RESPONSES_API_STATEFUL,
+    FORWARD_SESSION_INFO_HEADER_CHAT_ID,
+    FORWARD_SESSION_INFO_HEADER_MESSAGE_ID,
+    GLOBAL_LOG_LEVEL,
+    RAG_SYSTEM_CONTEXT,
 )
-from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.chats import Chats
-from open_webui.models.folders import Folders
-from open_webui.models.users import Users
 from open_webui.models.files import Files
+from open_webui.models.folders import Folders
+from open_webui.models.functions import Functions
+from open_webui.models.users import UserModel, Users
+from open_webui.retrieval.utils import get_sources_from_items
+from open_webui.routers.images import (
+    CreateImageForm,
+    EditImageForm,
+    image_edits,
+    image_generations,
+)
+from open_webui.routers.memories import QueryMemoryForm, query_memory
+from open_webui.routers.pipelines import (
+    process_pipeline_inlet_filter,
+)
+from open_webui.routers.retrieval import (
+    SearchForm,
+    process_web_search,
+)
+from open_webui.routers.tasks import (
+    generate_chat_tags,
+    generate_follow_ups,
+    generate_image_prompt,
+    generate_queries,
+    generate_title,
+)
 from open_webui.socket.main import (
     get_event_call,
     get_event_emitter,
 )
-from open_webui.routers.tasks import (
-    generate_queries,
-    generate_title,
-    generate_follow_ups,
-    generate_image_prompt,
-    generate_chat_tags,
-)
-from open_webui.routers.retrieval import (
-    process_web_search,
-    SearchForm,
-)
-from open_webui.utils.tools import get_builtin_tools
-from open_webui.routers.images import (
-    image_generations,
-    CreateImageForm,
-    image_edits,
-    EditImageForm,
-)
-from open_webui.routers.pipelines import (
-    process_pipeline_inlet_filter,
-    process_pipeline_outlet_filter,
-)
-from open_webui.routers.memories import query_memory, QueryMemoryForm
-
-from open_webui.utils.webhook import post_webhook
+from open_webui.utils.access_control import has_connection_access
+from open_webui.utils.chat import generate_chat_completion
+from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.files import (
     convert_markdown_base64_images,
     get_file_url_from_base64,
     get_image_base64_from_url,
     get_image_url_from_base64,
 )
-
-
-from open_webui.models.users import UserModel
-from open_webui.models.functions import Functions
-from open_webui.models.models import Models
-
-from open_webui.retrieval.utils import get_sources_from_items
-
-
-from open_webui.utils.sanitize import sanitize_code
-from open_webui.utils.chat import generate_chat_completion
+from open_webui.utils.filter import (
+    get_sorted_filter_ids,
+    process_filter_functions,
+)
+from open_webui.utils.headers import include_user_info_headers
+from open_webui.utils.mcp.client import MCPClient
+from open_webui.utils.misc import (
+    add_or_update_system_message,
+    add_or_update_user_message,
+    convert_logit_bias_input_to_json,
+    convert_output_to_messages,
+    deep_update,
+    get_content_from_message,
+    get_last_assistant_message,
+    get_last_user_message,
+    get_last_user_message_item,
+    get_message_list,
+    get_system_message,
+    is_string_allowed,
+    merge_system_messages,
+    replace_system_message_content,
+    set_last_user_message_content,
+    strip_empty_content_blocks,
+)
+from open_webui.utils.payload import apply_system_prompt_to_body
+from open_webui.utils.response import normalize_usage
+from open_webui.utils.sanitize import (
+    sanitize_code,
+)
+from open_webui.utils.skip_rag import (
+    _SKIP_RAG_PREAMBLE as _SKIP_RAG_PREAMBLE_FROM_MODULE,
+)
+from open_webui.utils.skip_rag import (
+    build_skip_rag_context as _build_skip_rag_context,
+)
 from open_webui.utils.task import (
     get_task_model_id,
     rag_template,
     tools_function_calling_generation_template,
 )
-from open_webui.utils.misc import (
-    deep_update,
-    extract_urls,
-    get_message_list,
-    add_or_update_system_message,
-    add_or_update_user_message,
-    set_last_user_message_content,
-    get_last_user_message,
-    get_last_user_message_item,
-    get_last_assistant_message,
-    get_system_message,
-    merge_system_messages,
-    replace_system_message_content,
-    prepend_to_first_user_message_content,
-    convert_logit_bias_input_to_json,
-    get_content_from_message,
-    convert_output_to_messages,
-    strip_empty_content_blocks,
-)
 from open_webui.utils.tools import (
+    get_builtin_tools,
+    get_terminal_tools,
     get_tools,
     get_updated_tool_function,
-    get_terminal_tools,
 )
-from open_webui.utils.access_control import has_connection_access
-from open_webui.utils.plugin import load_function_module_by_id
-from open_webui.utils.filter import (
-    get_sorted_filter_ids,
-    process_filter_functions,
-)
-from open_webui.utils.code_interpreter import execute_code_jupyter
-from open_webui.utils.payload import apply_system_prompt_to_body
-from open_webui.utils.response import normalize_usage
-from open_webui.utils.mcp.client import MCPClient
-
-
-from open_webui.config import (
-    CACHE_DIR,
-    DEFAULT_VOICE_MODE_PROMPT_TEMPLATE,
-    DEFAULT_TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
-    DEFAULT_CODE_INTERPRETER_PROMPT,
-    CODE_INTERPRETER_PYODIDE_PROMPT,
-    CODE_INTERPRETER_BLOCKED_MODULES,
-)
-from open_webui.env import (
-    GLOBAL_LOG_LEVEL,
-    ENABLE_CHAT_RESPONSE_BASE64_IMAGE_URL_CONVERSION,
-    CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE,
-    CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES,
-    BYPASS_MODEL_ACCESS_CONTROL,
-    ENABLE_REALTIME_CHAT_SAVE,
-    ENABLE_QUERIES_CACHE,
-    RAG_SYSTEM_CONTEXT,
-    ENABLE_FORWARD_USER_INFO_HEADERS,
-    FORWARD_SESSION_INFO_HEADER_CHAT_ID,
-    FORWARD_SESSION_INFO_HEADER_MESSAGE_ID,
-    ENABLE_RESPONSES_API_STATEFUL,
-)
-from open_webui.utils.headers import include_user_info_headers
-from open_webui.constants import TASKS
+from open_webui.utils.webhook import post_webhook
+from starlette.responses import JSONResponse, StreamingResponse
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -1197,7 +1168,7 @@ async def terminal_event_handler(
 async def chat_completion_tools_handler(
     request: Request, body: dict, extra_params: dict, user: UserModel, models, tools
 ) -> tuple[dict, dict]:
-    async def get_content_from_response(response) -> Optional[str]:
+    async def get_content_from_response(response) -> str | None:
         content = None
         if hasattr(response, 'body_iterator'):
             async for chunk in response.body_iterator:
@@ -1483,7 +1454,7 @@ async def chat_web_search_handler(request: Request, form_data: dict, extra_param
             response = response[bracket_start:bracket_end]
             queries = json.loads(response)
             queries = queries.get('queries', [])
-        except Exception as e:
+        except Exception:
             queries = [response]
 
         if ENABLE_QUERIES_CACHE:
@@ -1780,7 +1751,7 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
                 {
                     'type': 'status',
                     'data': {
-                        'description': f'An error occurred while generating an image',
+                        'description': 'An error occurred while generating an image',
                         'done': True,
                     },
                 }
@@ -1814,7 +1785,7 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
                     response = response[bracket_start:bracket_end]
                     response = json.loads(response)
                     prompt = response.get('prompt', [])
-                except Exception as e:
+                except Exception:
                     prompt = user_message
 
             except Exception as e:
@@ -1869,7 +1840,7 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
                 {
                     'type': 'status',
                     'data': {
-                        'description': f'An error occurred while generating an image',
+                        'description': 'An error occurred while generating an image',
                         'done': True,
                     },
                 }
@@ -1971,7 +1942,7 @@ def estimate_sources_total_tokens(sources: list, encoding_name: str = 'cl100k_ba
     return total
 
 
-def build_index_only_sources(sources: list) -> Optional[list]:
+def build_index_only_sources(sources: list) -> list | None:
     """
     Produce a new sources list where each source's document content is replaced
     with only the index_content from the DB (Tier 2 of the token budget cascade).
@@ -2025,7 +1996,7 @@ def build_index_only_sources(sources: list) -> Optional[list]:
 
 async def apply_token_budget_cascade(
     sources: list,
-    max_tokens: Optional[int],
+    max_tokens: int | None,
     request,
     body: dict,
     user,
@@ -2130,12 +2101,70 @@ async def apply_token_budget_cascade(
     # Deep copy sources so we don't mutate the original
     extracted_sources = copy.deepcopy(sources)
     results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Track per-doc success/failure for partial-failure event
+    failure_map: dict[str, str] = {}  # key: "src_idx/doc_idx" → reason
+    success_map: dict[str, bool] = {}
+
     for result in results:
         if isinstance(result, Exception):
-            log.error(f'[RAG] cascade Tier 3 extraction failed: {result}')
+            # We cannot recover src_idx/doc_idx from the exception tuple here —
+            # the task raised before returning the tuple. Log and record generically.
+            log.error(f'[RAG] cascade Tier 3 extraction task raised: {result}')
             continue
         src_idx, doc_idx, extracted = result
-        extracted_sources[src_idx]['document'][doc_idx] = extracted
+        key = f'{src_idx}/{doc_idx}'
+        if extracted is None:
+            # Sentinel: helper returned None — treat as extraction failure.
+            # Leave extracted_sources unchanged (retains Tier-1 content for this slot).
+            log.error(f'[RAG] cascade Tier 3 extraction returned None for doc {key}')
+            failure_map[key] = 'extraction_returned_none'
+        else:
+            extracted_sources[src_idx]['document'][doc_idx] = extracted
+            success_map[key] = True
+
+    # Emit partial-failure event if any extraction failed or raised.
+    # Guard: suppress the partial event when both maps are empty — this happens when
+    # every task raised an Exception (the exception path uses `continue`, so neither
+    # map is populated).  In that case only token_cascade_failed should fire (below).
+    any_failed = bool(failure_map) or any(isinstance(r, Exception) for r in results)
+    has_any_map_data = bool(success_map) or bool(failure_map)
+    if any_failed and has_any_map_data and event_emitter:
+        await event_emitter(
+            {
+                'type': 'status',
+                'data': {
+                    'action': 'token_cascade_partial',
+                    'description': 'Some documents failed Tier-3 extraction',
+                    'done': False,
+                    'success_map': success_map,
+                    'failure_map': failure_map,
+                },
+            }
+        )
+
+    # Re-measure after gather; if still over budget, escalate to cascade failure
+    post_tier3_tokens = estimate_sources_total_tokens(extracted_sources)
+    log.info(f'[RAG] cascade Tier 3 post-gather tokens={post_tier3_tokens} budget={max_tokens}')
+    if post_tier3_tokens > max_tokens:
+        log.error(
+            '[RAG] cascade Tier 3 completed but still over budget '
+            f'({post_tier3_tokens} > {max_tokens}); emitting token_cascade_failed'
+        )
+        if event_emitter:
+            await event_emitter(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'token_cascade_failed',
+                        'description': 'Tier-3 extraction could not fit sources within token budget',
+                        'done': True,
+                        'tokens': post_tier3_tokens,
+                        'max_tokens': max_tokens,
+                    },
+                }
+            )
+        return []
 
     return extracted_sources
 
@@ -2148,10 +2177,19 @@ async def extract_relevant_content_from_document(
     document_name: str,
     user,
     extraction_template: str = '',
-) -> str:
+) -> str | None:
     """
     Spawn a sub-completion to extract query-relevant content from a document.
-    Falls back to original content on failure.
+
+    Returns ``None`` (sentinel) on dispatch or exception failures — specifically
+    when ``generate_chat_completion`` raises any exception (network error, timeout,
+    model unavailability, etc.).  Returns ``document_content`` (the original input,
+    unchanged) on degenerate non-exception cases: empty streaming content (the
+    ``body_iterator`` path yields no ``choices[0].message.content``) or an
+    unrecognized response format (neither ``body_iterator`` nor a ``choices``-keyed
+    dict).  Callers MUST handle the ``None`` sentinel explicitly; returning
+    ``document_content`` on the degenerate cases preserves the Tier-1 content
+    without masking the failure.
     """
     from open_webui.config import DEFAULT_RAG_SUBCHAT_EXTRACTION_TEMPLATE
 
@@ -2193,12 +2231,12 @@ async def extract_relevant_content_from_document(
             return document_content
     except Exception as e:
         log.error(f'Sub-chat extraction failed for {document_name}: {e}')
-        return document_content
+        return None  # Sentinel: caller must handle None; do NOT silently return original content
 
 
 def _build_direct_file_sources(
     items: list[dict],
-) -> Optional[list[dict]]:
+) -> list[dict] | None:
     """
     Build RAG sources directly from file DB content (.md + .index.md),
     bypassing vector search entirely.
@@ -2340,7 +2378,7 @@ async def chat_completion_files_handler(
 
                     queries_response = queries_response[bracket_start:bracket_end]
                     queries_response = json.loads(queries_response)
-                except Exception as e:
+                except Exception:
                     queries_response = {'queries': [queries_response]}
 
                 queries = queries_response.get('queries', [])
@@ -2608,7 +2646,7 @@ async def convert_url_images_to_base64(form_data):
     return form_data
 
 
-def load_messages_from_db(chat_id: str, message_id: str) -> Optional[list[dict]]:
+def load_messages_from_db(chat_id: str, message_id: str) -> list[dict] | None:
     """
     Load the message chain from DB up to message_id,
     keeping only LLM-relevant fields (role, content, output).
@@ -3335,11 +3373,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         # continue to intercept correctly without patching skip_rag.py internals.
         skip_rag_files = form_data.get('metadata', {}).get('files', None) or []
         if skip_rag_files:
+            from open_webui.storage.provider import Storage as _Storage
             from open_webui.utils.docling import (
-                convert_to_markdown as _docling_convert,
                 SUPPORTED_EXTENSIONS as _DOCLING_EXTS,
             )
-            from open_webui.storage.provider import Storage as _Storage
+            from open_webui.utils.docling import (
+                convert_to_markdown as _docling_convert,
+            )
 
             _skip_rag_ctx = await _build_skip_rag_context(
                 files_list=skip_rag_files,
@@ -3452,6 +3492,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 if _sk_work_dir:
                     import os as _os
                     import shutil as _shutil
+
                     from open_webui.models.files import Files as _FilesModel
                     from open_webui.utils.sanitize import sanitize_filename as _skill_sanitize_fn
 
@@ -3516,7 +3557,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 _extracted_params = {}
                 if any(matched_skill.name.lower().startswith(p) for p in _EXTRACTION_SKILL_PREFIXES):
                     try:
-                        from open_webui.utils.skill_params import extract_skill_params, build_enriched_skill_prompt
+                        from open_webui.utils.skill_params import build_enriched_skill_prompt, extract_skill_params
 
                         _extracted_params = await extract_skill_params(
                             request.app, _pre_rag_messages, matched_skill.name, task_model_id
@@ -3755,7 +3796,7 @@ async def background_tasks_handler(ctx):
                                 },
                             )
 
-                    except Exception as e:
+                    except Exception:
                         pass
 
             if not metadata.get('chat_id', '').startswith('local:'):  # Only update titles and tags for non-temp chats
@@ -3794,7 +3835,7 @@ async def background_tasks_handler(ctx):
 
                             try:
                                 title = json.loads(title_string).get('title', user_message)
-                            except Exception as e:
+                            except Exception:
                                 title = ''
 
                             if not title:
@@ -3854,7 +3895,7 @@ async def background_tasks_handler(ctx):
                                     'data': tags,
                                 }
                             )
-                        except Exception as e:
+                        except Exception:
                             pass
 
 
@@ -4258,7 +4299,7 @@ async def streaming_chat_response_handler(response, ctx):
             try:
                 if form_data['messages'][-1]['role'] == 'assistant':
                     last_assistant_message = get_last_assistant_message(form_data['messages'])
-            except Exception as e:
+            except Exception:
                 pass
 
             content = (
