@@ -319,3 +319,16 @@ AI_MEMORIES/
 test-results/
 playwright-report/
 e2e/test-results/
+
+*.png
+
+/knowledge-base/
+
+/.playwright-cli/
+/backend/.playwright-cli/
+/backend/open_webui/frontend/
+/backend/GLM-4.5V.pdf
+/backend/open_webui_data.zip
+
+# Generated ZIP test fixtures (reproducible via _build_fixtures.py — do not commit binaries)
+backend/open_webui/test/fixtures/skills/*.zip

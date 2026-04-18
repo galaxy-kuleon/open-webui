@@ -797,6 +797,114 @@ class ConfigForm(BaseModel):
     web: Optional[WebConfig] = None
 
 
+# ---------------------------------------------------------------------------
+# Directory-path validation helpers (F-4b, F-5)
+# ---------------------------------------------------------------------------
+
+
+def _kg1_allowed_roots() -> list[str]:
+    """Return the list of allowed filesystem roots for KG1_GLMOCR_PROJECT_DIR.
+
+    Default: ~/.kg1-ocr (created if absent so a fresh install works).
+    Override: KG1_GLMOCR_ALLOWED_ROOT env var; split on ':' for multi-root.
+    """
+    env_override = os.environ.get('KG1_GLMOCR_ALLOWED_ROOT', '').strip()
+    if env_override:
+        roots = [r.strip() for r in env_override.split(':') if r.strip()]
+    else:
+        roots = [os.path.expanduser('~/.kg1-ocr')]
+
+    # Ensure each root exists so a fresh install with defaults succeeds.
+    for root in roots:
+        os.makedirs(root, exist_ok=True)
+
+    return roots
+
+
+def _rag_export_allowed_roots() -> list[str]:
+    """Return the list of allowed filesystem roots for RAG_KNOWLEDGE_EXPORT_DIR.
+
+    Default: ~/.open-webui/knowledge-export (created if absent).
+    Override: RAG_KNOWLEDGE_EXPORT_ROOT env var; split on ':' for multi-root.
+    """
+    env_override = os.environ.get('RAG_KNOWLEDGE_EXPORT_ROOT', '').strip()
+    if env_override:
+        roots = [r.strip() for r in env_override.split(':') if r.strip()]
+    else:
+        roots = [os.path.expanduser('~/.open-webui/knowledge-export')]
+
+    for root in roots:
+        os.makedirs(root, exist_ok=True)
+
+    return roots
+
+
+def _validate_admin_dir(value: str, *, allowed_roots: list[str], setting_name: str) -> str:
+    """Validate an admin-supplied directory path.
+
+    Returns the resolved absolute path on success.
+    Raises HTTPException(400) on any violation.
+
+    The ``detail`` field MUST NOT echo the raw ``value`` — it names only the
+    ``setting_name`` and a fixed reason class, so it is safe to surface to
+    the client without leaking internal filesystem layout.
+
+    Validation order (fail-fast):
+    1. Empty / whitespace-only value.
+    2. Null byte (\\x00) or traversal segment ('..') in value.
+    3. Resolve to absolute path via os.path.realpath (collapses symlinks).
+    4. Containment check: resolved path must be under one of allowed_roots.
+    5. Resolved path must exist.
+    6. Resolved path must be a directory.
+    """
+    import stat as _stat
+
+    # 1. Empty / whitespace
+    if not value or not value.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{setting_name}: value is empty',
+        )
+
+    # 2. Null byte or traversal segment — defense-in-depth before realpath
+    if '\x00' in value or '..' in Path(value).parts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{setting_name}: invalid path',
+        )
+
+    # 3. Resolve symlinks to get the true absolute path
+    resolved = os.path.realpath(value)
+
+    # 4. Containment check — must be under (or equal to) one of the allowed roots.
+    # Use the trailing-sep form so '/tmp/ok-evil' does NOT match root '/tmp/ok'.
+    def _within(resolved_path: str, root: str) -> bool:
+        real_root = os.path.realpath(root)
+        return resolved_path == real_root or resolved_path.startswith(real_root + os.sep)
+
+    if not any(_within(resolved, r) for r in allowed_roots):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{setting_name}: path outside allowed roots',
+        )
+
+    # 5. Path must exist
+    if not os.path.exists(resolved):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{setting_name}: path does not exist',
+        )
+
+    # 6. Path must be a directory
+    if not os.path.isdir(resolved):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{setting_name}: not a directory',
+        )
+
+    return resolved
+
+
 @router.post('/config/update')
 async def update_rag_config(request: Request, form_data: ConfigForm, user=Depends(get_admin_user)):
     # RAG settings
@@ -849,11 +957,14 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         if form_data.RAG_KNOWLEDGE_EXPORT_ENABLED is not None
         else request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED
     )
-    request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR = (
-        form_data.RAG_KNOWLEDGE_EXPORT_DIR
-        if form_data.RAG_KNOWLEDGE_EXPORT_DIR is not None
-        else request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR
-    )
+    if form_data.RAG_KNOWLEDGE_EXPORT_DIR is not None:
+        # F-5: validate before accepting the admin-supplied path.
+        request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR = _validate_admin_dir(
+            value=form_data.RAG_KNOWLEDGE_EXPORT_DIR,
+            allowed_roots=_rag_export_allowed_roots(),
+            setting_name='RAG_KNOWLEDGE_EXPORT_DIR',
+        )
+    # else: keep the existing value unchanged
     request.app.state.config.RAG_RESEARCH_MODEL = (
         form_data.RAG_RESEARCH_MODEL
         if form_data.RAG_RESEARCH_MODEL is not None
@@ -1036,11 +1147,14 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
     )
 
     # KG1 (GLM-OCR) settings
-    request.app.state.config.KG1_GLMOCR_PROJECT_DIR = (
-        form_data.KG1_GLMOCR_PROJECT_DIR
-        if form_data.KG1_GLMOCR_PROJECT_DIR is not None
-        else request.app.state.config.KG1_GLMOCR_PROJECT_DIR
-    )
+    if form_data.KG1_GLMOCR_PROJECT_DIR is not None:
+        # F-4b: validate before accepting the admin-supplied path.
+        request.app.state.config.KG1_GLMOCR_PROJECT_DIR = _validate_admin_dir(
+            value=form_data.KG1_GLMOCR_PROJECT_DIR,
+            allowed_roots=_kg1_allowed_roots(),
+            setting_name='KG1_GLMOCR_PROJECT_DIR',
+        )
+    # else: keep the existing value unchanged
     request.app.state.config.KG1_OLLAMA_HOST = (
         form_data.KG1_OLLAMA_HOST if form_data.KG1_OLLAMA_HOST is not None else request.app.state.config.KG1_OLLAMA_HOST
     )

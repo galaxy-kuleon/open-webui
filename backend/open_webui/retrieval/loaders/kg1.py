@@ -1,15 +1,16 @@
-import os
 import glob
+import logging
+import os
 import shutil
 import subprocess
 import tempfile
 import threading
-import logging
+import time
 from pathlib import Path
 from typing import List, Optional
 
-from langchain_core.documents import Document
 from fastapi import HTTPException, status
+from langchain_core.documents import Document
 
 log = logging.getLogger(__name__)
 
@@ -18,133 +19,209 @@ _semaphore: Optional[threading.Semaphore] = None
 _semaphore_value: int = 0
 _semaphore_lock = threading.Lock()
 
+# Bounded drain reader cap — 64 KiB per line.  Lines longer than this are
+# truncated; the surplus bytes are consumed-and-discarded, a WARN log is
+# emitted once, and the truncation marker is appended to the returned string.
+_DRAIN_LINE_CAP: int = 64 * 1024
+
+
+def _read_bounded_line(stream, *, identity: str) -> Optional[str]:
+    """Read one newline-terminated (or EOF-terminated) line from a raw binary
+    *stream* with a hard cap of ``_DRAIN_LINE_CAP`` bytes.
+
+    Uses ``stream.readline(cap + 1)`` so the OS/buffered layer handles newline
+    detection and short lines return instantly (no blocking wait for cap bytes).
+
+    Returns:
+        ``None``  — stream is at EOF (no bytes readable).
+        ``str``   — decoded line, trailing whitespace stripped.
+                    If the raw line exceeded the cap, the returned string ends
+                    with the ASCII marker::
+
+                        ...[drain-truncated: <N> bytes omitted]
+
+                    where ``<N>`` is the count of bytes discarded beyond the cap.
+                    The marker length may push the total return length slightly
+                    beyond 64 KiB; that is intentional per spec.
+
+    Side-effects on truncation (once per truncated line):
+        - Logs WARNING with identity, cap size, omitted byte count, and
+          monotonic timestamp.
+        - Consumes-and-discards bytes from the stream until the next ``\\n``
+          or EOF.
+
+    Does NOT raise. Does NOT kill any subprocess.
+    """
+    cap = _DRAIN_LINE_CAP
+    _DISCARD_CHUNK = 65536
+
+    # readline(cap + 1) reads at most cap+1 bytes.
+    # - Short line (< cap bytes + newline): returns complete line including '\n'.
+    # - Line exactly cap bytes + newline: returns cap+1 bytes including '\n'.
+    # - Line longer than cap bytes: returns cap+1 bytes WITHOUT newline.
+    raw = stream.readline(cap + 1)
+
+    if not raw:
+        return None  # EOF
+
+    if raw.endswith(b'\n') or len(raw) <= cap:
+        # Normal path: line fit within cap (or ended at exactly cap with '\n').
+        return raw.decode('utf-8', errors='replace').rstrip()
+
+    # Overflow path: len(raw) == cap+1 and no newline yet.
+    # Keep first `cap` bytes; discard the rest up to the next '\n' or EOF.
+    body = raw[:cap]
+    omitted = 1  # the (cap+1)-th byte we already read beyond the cap
+
+    while True:
+        chunk = stream.readline(_DISCARD_CHUNK)
+        if not chunk:
+            break  # EOF
+        if chunk.endswith(b'\n'):
+            omitted += len(chunk) - 1  # exclude the newline from omitted-bytes count
+            break
+        omitted += len(chunk)
+
+    ts = time.monotonic()
+    log.warning(
+        '[%s] drain-truncated: line exceeded %d-byte cap; %d bytes omitted (monotonic=%.3f)',
+        identity,
+        cap,
+        omitted,
+        ts,
+    )
+
+    decoded = body.decode('utf-8', errors='replace').rstrip()
+    return f'{decoded}...[drain-truncated: {omitted} bytes omitted]'
+
+
 # File extensions that glm-ocr can process directly (no LibreOffice conversion needed)
-DIRECT_OCR_EXTENSIONS = {"pdf", "jpg", "jpeg", "png", "bmp", "gif", "webp"}
+DIRECT_OCR_EXTENSIONS = {'pdf', 'jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'}
 
 # Plain text extensions: read directly, skip soffice + glm-ocr entirely
 PLAINTEXT_EXTENSIONS = {
     # Markup / prose
-    "txt",
-    "md",
-    "rst",
-    "org",
-    "adoc",
+    'txt',
+    'md',
+    'rst',
+    'org',
+    'adoc',
     # Data / config
-    "json",
-    "yaml",
-    "yml",
-    "toml",
-    "ini",
-    "conf",
-    "env",
-    "csv",
-    "tsv",
+    'json',
+    'yaml',
+    'yml',
+    'toml',
+    'ini',
+    'conf',
+    'env',
+    'csv',
+    'tsv',
     # Programming languages
-    "py",
-    "js",
-    "ts",
-    "jsx",
-    "tsx",
-    "rs",
-    "go",
-    "java",
-    "c",
-    "cpp",
-    "h",
-    "hpp",
-    "cs",
-    "swift",
-    "dart",
-    "rb",
-    "pl",
-    "pm",
-    "php",
-    "lua",
-    "r",
-    "scala",
-    "ex",
-    "exs",
-    "erl",
-    "hs",
-    "lhs",
-    "sh",
-    "bash",
-    "bat",
-    "ps1",
-    "cmd",
+    'py',
+    'js',
+    'ts',
+    'jsx',
+    'tsx',
+    'rs',
+    'go',
+    'java',
+    'c',
+    'cpp',
+    'h',
+    'hpp',
+    'cs',
+    'swift',
+    'dart',
+    'rb',
+    'pl',
+    'pm',
+    'php',
+    'lua',
+    'r',
+    'scala',
+    'ex',
+    'exs',
+    'erl',
+    'hs',
+    'lhs',
+    'sh',
+    'bash',
+    'bat',
+    'ps1',
+    'cmd',
     # Web / style
-    "css",
-    "html",
-    "htm",
-    "xml",
-    "svg",
-    "vue",
-    "svelte",
+    'css',
+    'html',
+    'htm',
+    'xml',
+    'svg',
+    'vue',
+    'svelte',
     # Database / query
-    "sql",
-    "plsql",
-    "db2",
+    'sql',
+    'plsql',
+    'db2',
     # Other
-    "log",
-    "dockerfile",
-    "makefile",
-    "cmake",
+    'log',
+    'dockerfile',
+    'makefile',
+    'cmake',
 }
 
 # Extensions whose content is already markdown or plain text — use as-is
-RAW_MARKDOWN_EXTENSIONS = {"md", "txt", "rst", "org", "adoc"}
+RAW_MARKDOWN_EXTENSIONS = {'md', 'txt', 'rst', 'org', 'adoc'}
 
 # Map file extension → markdown code fence language identifier
 EXTENSION_LANG_MAP = {
-    "py": "python",
-    "js": "javascript",
-    "ts": "typescript",
-    "jsx": "jsx",
-    "tsx": "tsx",
-    "rs": "rust",
-    "go": "go",
-    "java": "java",
-    "rb": "ruby",
-    "sh": "bash",
-    "bash": "bash",
-    "ps1": "powershell",
-    "bat": "batch",
-    "cmd": "batch",
-    "css": "css",
-    "html": "html",
-    "htm": "html",
-    "xml": "xml",
-    "svg": "xml",
-    "sql": "sql",
-    "json": "json",
-    "yaml": "yaml",
-    "yml": "yaml",
-    "toml": "toml",
-    "ini": "ini",
-    "conf": "ini",
-    "c": "c",
-    "cpp": "cpp",
-    "h": "c",
-    "hpp": "cpp",
-    "cs": "csharp",
-    "swift": "swift",
-    "dart": "dart",
-    "lua": "lua",
-    "r": "r",
-    "scala": "scala",
-    "ex": "elixir",
-    "exs": "elixir",
-    "erl": "erlang",
-    "hs": "haskell",
-    "lhs": "haskell",
-    "pl": "perl",
-    "pm": "perl",
-    "php": "php",
-    "vue": "vue",
-    "svelte": "svelte",
-    "dockerfile": "dockerfile",
-    "makefile": "makefile",
-    "cmake": "cmake",
+    'py': 'python',
+    'js': 'javascript',
+    'ts': 'typescript',
+    'jsx': 'jsx',
+    'tsx': 'tsx',
+    'rs': 'rust',
+    'go': 'go',
+    'java': 'java',
+    'rb': 'ruby',
+    'sh': 'bash',
+    'bash': 'bash',
+    'ps1': 'powershell',
+    'bat': 'batch',
+    'cmd': 'batch',
+    'css': 'css',
+    'html': 'html',
+    'htm': 'html',
+    'xml': 'xml',
+    'svg': 'xml',
+    'sql': 'sql',
+    'json': 'json',
+    'yaml': 'yaml',
+    'yml': 'yaml',
+    'toml': 'toml',
+    'ini': 'ini',
+    'conf': 'ini',
+    'c': 'c',
+    'cpp': 'cpp',
+    'h': 'c',
+    'hpp': 'cpp',
+    'cs': 'csharp',
+    'swift': 'swift',
+    'dart': 'dart',
+    'lua': 'lua',
+    'r': 'r',
+    'scala': 'scala',
+    'ex': 'elixir',
+    'exs': 'elixir',
+    'erl': 'erlang',
+    'hs': 'haskell',
+    'lhs': 'haskell',
+    'pl': 'perl',
+    'pm': 'perl',
+    'php': 'php',
+    'vue': 'vue',
+    'svelte': 'svelte',
+    'dockerfile': 'dockerfile',
+    'makefile': 'makefile',
+    'cmake': 'cmake',
 }
 
 
@@ -155,7 +232,7 @@ def _get_semaphore(concurrency: int) -> threading.Semaphore:
         if _semaphore is None or _semaphore_value != concurrency:
             _semaphore = threading.Semaphore(max(1, concurrency))
             _semaphore_value = concurrency
-            log.info(f"KG1 task queue semaphore set to concurrency={concurrency}")
+            log.info(f'KG1 task queue semaphore set to concurrency={concurrency}')
         return _semaphore
 
 
@@ -175,10 +252,10 @@ class KG1Loader:
         self,
         file_path: str,
         glmocr_project_dir: str,
-        ollama_host: str = "127.0.0.1",
+        ollama_host: str = '127.0.0.1',
         ollama_port: int = 11434,
-        layout_device: str = "mps",
-        soffice_path: str = "soffice",
+        layout_device: str = 'mps',
+        soffice_path: str = 'soffice',
         timeout: int = 600,
         concurrency: int = 1,
         status_callback: Optional[callable] = None,
@@ -199,7 +276,7 @@ class KG1Loader:
         Acquires semaphore to control concurrency before processing.
         """
         semaphore = _get_semaphore(self.concurrency)
-        log.info(f"KG1: Waiting for task queue slot (concurrency={self.concurrency})")
+        log.info(f'KG1: Waiting for task queue slot (concurrency={self.concurrency})')
 
         semaphore.acquire()
         try:
@@ -214,13 +291,10 @@ class KG1Loader:
         """
         filename = os.path.basename(file_path)
         try:
-            with open(file_path, "r", encoding="utf-8-sig", errors="strict") as f:
+            with open(file_path, 'r', encoding='utf-8-sig', errors='strict') as f:
                 content = f.read()
         except (UnicodeDecodeError, UnicodeError):
-            log.warning(
-                f"KG1: '{filename}' has .{file_ext} extension but is not valid UTF-8, "
-                f"falling back to OCR"
-            )
+            log.warning(f"KG1: '{filename}' has .{file_ext} extension but is not valid UTF-8, falling back to OCR")
             return None
         except OSError as e:
             log.error(f"KG1: Failed to read '{filename}': {e}")
@@ -235,24 +309,24 @@ class KG1Loader:
 
         # Code/data files: wrap in fenced code block with language annotation
         lang = EXTENSION_LANG_MAP.get(file_ext, file_ext)
-        return f"```{lang}\n{content}\n```"
+        return f'```{lang}\n{content}\n```'
 
     @staticmethod
     def _get_pdf_page_count(pdf_path: str) -> Optional[int]:
         """Get page count from a PDF file. Returns None if not a PDF or unreadable."""
         try:
-            with open(pdf_path, "rb") as f:
+            with open(pdf_path, 'rb') as f:
                 # Quick scan for /Count in PDF trailer (avoid heavy deps)
                 # Fallback: count /Type /Page occurrences
                 data = f.read()
             import re
 
             # Try /Count N pattern (most reliable)
-            counts = re.findall(rb"/Count\s+(\d+)", data)
+            counts = re.findall(rb'/Count\s+(\d+)', data)
             if counts:
                 return max(int(c) for c in counts)
             # Fallback: count page objects
-            pages = len(re.findall(rb"/Type\s*/Page[^s]", data))
+            pages = len(re.findall(rb'/Type\s*/Page[^s]', data))
             return pages if pages > 0 else None
         except Exception:
             return None
@@ -264,13 +338,13 @@ class KG1Loader:
             return self.timeout
 
         dynamic = max(300, page_count * 60)
-        log.info(f"KG1: {page_count} pages detected, timeout set to {dynamic}s")
+        log.info(f'KG1: {page_count} pages detected, timeout set to {dynamic}s')
         return dynamic
 
     def _process(self) -> List[Document]:
         """Core processing logic: read text directly, convert if needed, then OCR."""
         filename = os.path.basename(self.file_path)
-        file_ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        file_ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
 
         log.info(f"KG1: Processing file '{filename}' (ext={file_ext})")
 
@@ -278,19 +352,16 @@ class KG1Loader:
         if file_ext in PLAINTEXT_EXTENSIONS:
             content = self._read_as_text(self.file_path, file_ext)
             if content is not None:
-                log.info(
-                    f"KG1: Direct text read for '{filename}': "
-                    f"{len(content)} chars (skipped OCR)"
-                )
+                log.info(f"KG1: Direct text read for '{filename}': {len(content)} chars (skipped OCR)")
                 metadata = {
-                    "source": filename,
-                    "processing_engine": "kg1",
-                    "processing_mode": "direct_text",
+                    'source': filename,
+                    'processing_engine': 'kg1',
+                    'processing_mode': 'direct_text',
                 }
                 return [Document(page_content=content, metadata=metadata)]
             log.info(f"KG1: '{filename}' failed UTF-8 validation, proceeding with OCR")
 
-        with tempfile.TemporaryDirectory(prefix="kg1_") as work_dir:
+        with tempfile.TemporaryDirectory(prefix='kg1_') as work_dir:
             # Step 1: Determine the file to OCR
             if file_ext in DIRECT_OCR_EXTENSIONS:
                 ocr_input_path = self.file_path
@@ -299,7 +370,7 @@ class KG1Loader:
 
             # Step 2: Calculate dynamic timeout based on page count, then run glm-ocr
             ocr_timeout = self._calculate_timeout(ocr_input_path)
-            output_dir = os.path.join(work_dir, "output")
+            output_dir = os.path.join(work_dir, 'output')
             os.makedirs(output_dir, exist_ok=True)
             self._run_glmocr(ocr_input_path, output_dir, timeout=ocr_timeout)
 
@@ -315,16 +386,13 @@ class KG1Loader:
                 detail=f"KG1: glm-ocr returned empty content for '{filename}'",
             )
 
-        log.info(
-            f"KG1: Successfully extracted {len(markdown_content)} chars, "
-            f"{image_count} images from '{filename}'"
-        )
+        log.info(f"KG1: Successfully extracted {len(markdown_content)} chars, {image_count} images from '{filename}'")
 
         metadata = {
-            "source": filename,
-            "processing_engine": "kg1",
-            "layout_device": self.layout_device,
-            "image_count": image_count,
+            'source': filename,
+            'processing_engine': 'kg1',
+            'layout_device': self.layout_device,
+            'image_count': image_count,
         }
 
         return [Document(page_content=markdown_content, metadata=metadata)]
@@ -334,15 +402,15 @@ class KG1Loader:
         filename = os.path.basename(file_path)
         log.info(f"KG1: Converting '{filename}' to PDF via LibreOffice")
 
-        convert_dir = os.path.join(work_dir, "converted")
+        convert_dir = os.path.join(work_dir, 'converted')
         os.makedirs(convert_dir, exist_ok=True)
 
         cmd = [
             self.soffice_path,
-            "--headless",
-            "--convert-to",
-            "pdf",
-            "--outdir",
+            '--headless',
+            '--convert-to',
+            'pdf',
+            '--outdir',
             convert_dir,
             file_path,
         ]
@@ -350,10 +418,12 @@ class KG1Loader:
         soffice_stderr = []
 
         def _drain_soffice(stream, label, collect=None):
-            for raw in iter(stream.readline, b""):
-                line = raw.decode("utf-8", errors="replace").rstrip()
+            while True:
+                line = _read_bounded_line(stream, identity=f'soffice:{label}')
+                if line is None:
+                    break  # EOF
                 if line:
-                    log.info(f"[soffice:{label}] {line[:5000]}")
+                    log.info('[soffice:%s] %s', label, line[:5000])
                 if collect is not None:
                     collect.append(line)
             stream.close()
@@ -368,18 +438,16 @@ class KG1Loader:
             raise HTTPException(
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=(
-                    "LibreOffice (soffice) not found. "
-                    "Install LibreOffice for non-PDF file conversion, "
+                    'LibreOffice (soffice) not found. '
+                    'Install LibreOffice for non-PDF file conversion, '
                     f"or check the configured path: '{self.soffice_path}'"
                 ),
             )
 
-        t_out = threading.Thread(
-            target=_drain_soffice, args=(proc.stdout, "stdout"), daemon=True
-        )
+        t_out = threading.Thread(target=_drain_soffice, args=(proc.stdout, 'stdout'), daemon=True)
         t_err = threading.Thread(
             target=_drain_soffice,
-            args=(proc.stderr, "stderr", soffice_stderr),
+            args=(proc.stderr, 'stderr', soffice_stderr),
             daemon=True,
         )
         t_out.start()
@@ -399,17 +467,14 @@ class KG1Loader:
         t_err.join(timeout=10)
 
         if proc.returncode != 0:
-            stderr = "\n".join(soffice_stderr) or "No error output"
+            stderr = '\n'.join(soffice_stderr) or 'No error output'
             raise HTTPException(
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=(
-                    f"KG1: LibreOffice conversion failed for '{filename}': "
-                    f"{stderr[:500]}"
-                ),
+                detail=(f"KG1: LibreOffice conversion failed for '{filename}': {stderr[:500]}"),
             )
 
         # Find the converted PDF
-        pdf_files = glob.glob(os.path.join(convert_dir, "*.pdf"))
+        pdf_files = glob.glob(os.path.join(convert_dir, '*.pdf'))
         if not pdf_files:
             raise HTTPException(
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -417,12 +482,10 @@ class KG1Loader:
             )
 
         pdf_path = pdf_files[0]
-        log.info(f"KG1: Converted to PDF: {os.path.basename(pdf_path)}")
+        log.info(f'KG1: Converted to PDF: {os.path.basename(pdf_path)}')
         return pdf_path
 
-    def _run_glmocr(
-        self, input_path: str, output_dir: str, timeout: Optional[int] = None
-    ) -> None:
+    def _run_glmocr(self, input_path: str, output_dir: str, timeout: Optional[int] = None) -> None:
         """Run glm-ocr via subprocess using uv run."""
         filename = os.path.basename(input_path)
         log.info(f"KG1: Running glm-ocr on '{filename}'")
@@ -431,37 +494,37 @@ class KG1Loader:
         # Remove venv/conda env vars that would cause uv run to resolve
         # the wrong Python interpreter or site-packages in the glm-ocr project
         for key in [
-            "VIRTUAL_ENV",
-            "CONDA_PREFIX",
-            "CONDA_DEFAULT_ENV",
-            "PYTHONHOME",
-            "PYTHONPATH",
-            "UV_PROJECT_ENVIRONMENT",
+            'VIRTUAL_ENV',
+            'CONDA_PREFIX',
+            'CONDA_DEFAULT_ENV',
+            'PYTHONHOME',
+            'PYTHONPATH',
+            'UV_PROJECT_ENVIRONMENT',
         ]:
             env.pop(key, None)
-        env["GLMOCR_OCR_API_HOST"] = self.ollama_host
-        env["GLMOCR_OCR_API_PORT"] = str(self.ollama_port)
-        env["GLMOCR_MODE"] = "selfhosted"
-        env["GLMOCR_ENABLE_LAYOUT"] = "true"
-        env["GLMOCR_LAYOUT_DEVICE"] = self.layout_device
+        env['GLMOCR_OCR_API_HOST'] = self.ollama_host
+        env['GLMOCR_OCR_API_PORT'] = str(self.ollama_port)
+        env['GLMOCR_MODE'] = 'selfhosted'
+        env['GLMOCR_ENABLE_LAYOUT'] = 'true'
+        env['GLMOCR_LAYOUT_DEVICE'] = self.layout_device
 
         cmd = [
-            "uv",
-            "run",
-            "--extra",
-            "layout",
-            "--extra",
-            "selfhosted",
-            "glmocr",
-            "parse",
+            'uv',
+            'run',
+            '--extra',
+            'layout',
+            '--extra',
+            'selfhosted',
+            'glmocr',
+            'parse',
             input_path,
-            "--output",
+            '--output',
             output_dir,
-            "--mode",
-            "selfhosted",
-            "--no-layout-vis",
-            "--log-level",
-            "WARNING",
+            '--mode',
+            'selfhosted',
+            '--no-layout-vis',
+            '--log-level',
+            'WARNING',
         ]
 
         effective_timeout = timeout or self.timeout
@@ -469,24 +532,22 @@ class KG1Loader:
         page_count = self._get_pdf_page_count(input_path)
 
         if self.status_callback and page_count:
-            self.status_callback(f"processing:extracting (OCR {page_count} pages)")
+            self.status_callback(f'processing:extracting (OCR {page_count} pages)')
 
         def _drain(stream, label, collect=None):
-            for raw in iter(stream.readline, b""):
-                line = raw.decode("utf-8", errors="replace").rstrip()
+            while True:
+                line = _read_bounded_line(stream, identity=f'glm-ocr:{label}')
+                if line is None:
+                    break  # EOF
                 if line:
-                    log.info(f"[glm-ocr:{label}] {line[:5000]}")
+                    log.info('[glm-ocr:%s] %s', label, line[:5000])
                     # Update progress from glm-ocr stderr hints
-                    if self.status_callback and label == "stderr":
+                    if self.status_callback and label == 'stderr':
                         low = line.lower()
-                        if "pipeline started" in low:
-                            self.status_callback(
-                                f"processing:extracting (OCR running, {page_count or '?'} pages)"
-                            )
-                        elif "loading weights" in low and "100%" in line:
-                            self.status_callback(
-                                "processing:extracting (model loaded, starting OCR)"
-                            )
+                        if 'pipeline started' in low:
+                            self.status_callback(f'processing:extracting (OCR running, {page_count or "?"} pages)')
+                        elif 'loading weights' in low and '100%' in line:
+                            self.status_callback('processing:extracting (model loaded, starting OCR)')
                 if collect is not None:
                     collect.append(line)
             stream.close()
@@ -502,18 +563,11 @@ class KG1Loader:
         except FileNotFoundError:
             raise HTTPException(
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=(
-                    "uv command not found. Install uv (https://docs.astral.sh/uv/) "
-                    "to use the KG1 engine."
-                ),
+                detail=('uv command not found. Install uv (https://docs.astral.sh/uv/) to use the KG1 engine.'),
             )
 
-        t_out = threading.Thread(
-            target=_drain, args=(proc.stdout, "stdout"), daemon=True
-        )
-        t_err = threading.Thread(
-            target=_drain, args=(proc.stderr, "stderr", stderr_lines), daemon=True
-        )
+        t_out = threading.Thread(target=_drain, args=(proc.stdout, 'stdout'), daemon=True)
+        t_err = threading.Thread(target=_drain, args=(proc.stderr, 'stderr', stderr_lines), daemon=True)
         t_out.start()
         t_err.start()
 
@@ -531,8 +585,8 @@ class KG1Loader:
         t_err.join(timeout=10)
 
         if proc.returncode != 0:
-            stderr = "\n".join(stderr_lines) or "No error output"
-            log.error(f"KG1: glm-ocr failed: {stderr}")
+            stderr = '\n'.join(stderr_lines) or 'No error output'
+            log.error(f'KG1: glm-ocr failed: {stderr}')
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,
                 detail=f"KG1: glm-ocr processing failed for '{filename}': {stderr[:500]}",
@@ -546,7 +600,7 @@ class KG1Loader:
         md_files = []
         for root, dirs, files in os.walk(output_dir):
             for f in files:
-                if f.endswith(".md"):
+                if f.endswith('.md'):
                     md_files.append(os.path.join(root, f))
 
         if not md_files:
@@ -555,24 +609,24 @@ class KG1Loader:
             for root, dirs, files in os.walk(output_dir):
                 for f in files:
                     all_files.append(os.path.join(root, f))
-            log.error(f"KG1: No .md files found. Available files: {all_files}")
+            log.error(f'KG1: No .md files found. Available files: {all_files}')
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,
-                detail=f"KG1: glm-ocr produced no markdown output. Files found: {all_files}",
+                detail=f'KG1: glm-ocr produced no markdown output. Files found: {all_files}',
             )
 
         # Use the first .md file found
         md_path = md_files[0]
-        log.info(f"KG1: Reading markdown from {md_path}")
+        log.info(f'KG1: Reading markdown from {md_path}')
 
-        with open(md_path, "r", encoding="utf-8") as f:
+        with open(md_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
         return content
 
     def _count_images(self, output_dir: str) -> int:
         """Count extracted images in the output directory."""
-        image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
         count = 0
         for root, dirs, files in os.walk(output_dir):
             for f in files:
