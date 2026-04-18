@@ -21,9 +21,10 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_app_with_loop(loop: asyncio.AbstractEventLoop):
     """Build a minimal app-like object with state.main_loop set."""
-    state = SimpleNamespace(main_loop=loop, MODELS={"test-model": {"id": "test-model"}})
+    state = SimpleNamespace(main_loop=loop, MODELS={'test-model': {'id': 'test-model'}})
     app = SimpleNamespace(state=state)
     return app
 
@@ -37,20 +38,16 @@ def _make_app_no_loop():
 
 def _make_openai_dict_response(content: str) -> dict:
     """Standard OpenAI-format dict response."""
-    return {
-        "choices": [
-            {"message": {"role": "assistant", "content": content}, "index": 0}
-        ]
-    }
+    return {'choices': [{'message': {'role': 'assistant', 'content': content}, 'index': 0}]}
 
 
 def _make_admin_user():
     """Minimal user-like object with admin role."""
     return SimpleNamespace(
-        id="admin-test",
-        email="admin@test.local",
-        role="admin",
-        name="Test Admin",
+        id='admin-test',
+        email='admin@test.local',
+        role='admin',
+        name='Test Admin',
     )
 
 
@@ -58,23 +55,25 @@ def _make_admin_user():
 # Test: call_llm_completion rejects when main_loop is absent
 # ---------------------------------------------------------------------------
 
+
 def test_call_llm_completion_no_loop():
     """When app.state.main_loop is not set, raise RuntimeError immediately."""
     from open_webui.utils.knowledge_export import call_llm_completion
 
     app = _make_app_no_loop()
-    with pytest.raises(RuntimeError, match="Main event loop not available"):
+    with pytest.raises(RuntimeError, match='Main event loop not available'):
         call_llm_completion(
             app=app,
-            system_prompt="sys",
-            user_prompt="usr",
-            model_id="test-model",
+            system_prompt='sys',
+            user_prompt='usr',
+            model_id='test-model',
         )
 
 
 # ---------------------------------------------------------------------------
 # Test: call_llm_completion rejects when main_loop is closed
 # ---------------------------------------------------------------------------
+
 
 def test_call_llm_completion_closed_loop():
     """When the event loop is closed, raise RuntimeError."""
@@ -83,18 +82,19 @@ def test_call_llm_completion_closed_loop():
     loop = asyncio.new_event_loop()
     loop.close()  # close it immediately
     app = _make_app_with_loop(loop)
-    with pytest.raises(RuntimeError, match="Main event loop not available"):
+    with pytest.raises(RuntimeError, match='Main event loop not available'):
         call_llm_completion(
             app=app,
-            system_prompt="sys",
-            user_prompt="usr",
-            model_id="test-model",
+            system_prompt='sys',
+            user_prompt='usr',
+            model_id='test-model',
         )
 
 
 # ---------------------------------------------------------------------------
 # Test: _async_llm_completion extracts content from dict response
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_async_llm_completion_dict_response():
@@ -104,28 +104,21 @@ async def test_async_llm_completion_dict_response():
     expected_content = '{"moves": [{"doc_id": "doc-0001", "destination": "test/dir", "reason": "test"}]}'
     mock_response = _make_openai_dict_response(expected_content)
 
-    app = SimpleNamespace(
-        state=SimpleNamespace(MODELS={"test-model": {"id": "test-model"}})
-    )
+    app = SimpleNamespace(state=SimpleNamespace(MODELS={'test-model': {'id': 'test-model'}}))
 
-    with (
-        patch(
-            "open_webui.utils.chat.generate_chat_completion",
-            new_callable=AsyncMock,
-            return_value=mock_response,
-        ),
-        patch(
-            "open_webui.models.users.Users.get_super_admin_user",
-            return_value=_make_admin_user(),
-        ),
+    with patch(
+        'open_webui.utils.chat.generate_chat_completion',
+        new_callable=AsyncMock,
+        return_value=mock_response,
     ):
         result = await _async_llm_completion(
             app=app,
             messages=[
-                {"role": "system", "content": "sys"},
-                {"role": "user", "content": "usr"},
+                {'role': 'system', 'content': 'sys'},
+                {'role': 'user', 'content': 'usr'},
             ],
-            model_id="test-model",
+            model_id='test-model',
+            acting_user=_make_admin_user(),
         )
         assert result == expected_content
 
@@ -134,70 +127,67 @@ async def test_async_llm_completion_dict_response():
 # Test: _async_llm_completion raises on empty content
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_async_llm_completion_empty_content_raises():
     """When LLM returns empty content, raise RuntimeError."""
     from open_webui.utils.knowledge_export import _async_llm_completion
 
-    mock_response = _make_openai_dict_response("")
+    mock_response = _make_openai_dict_response('')
 
-    app = SimpleNamespace(
-        state=SimpleNamespace(MODELS={"test-model": {"id": "test-model"}})
-    )
+    app = SimpleNamespace(state=SimpleNamespace(MODELS={'test-model': {'id': 'test-model'}}))
 
-    with (
-        patch(
-            "open_webui.utils.chat.generate_chat_completion",
-            new_callable=AsyncMock,
-            return_value=mock_response,
-        ),
-        patch(
-            "open_webui.models.users.Users.get_super_admin_user",
-            return_value=_make_admin_user(),
-        ),
+    with patch(
+        'open_webui.utils.chat.generate_chat_completion',
+        new_callable=AsyncMock,
+        return_value=mock_response,
     ):
-        with pytest.raises(RuntimeError, match="LLM returned empty content"):
+        with pytest.raises(RuntimeError, match='LLM returned empty content'):
             await _async_llm_completion(
                 app=app,
-                messages=[{"role": "user", "content": "test"}],
-                model_id="test-model",
+                messages=[{'role': 'user', 'content': 'test'}],
+                model_id='test-model',
+                acting_user=_make_admin_user(),
             )
 
 
 # ---------------------------------------------------------------------------
-# Test: _async_llm_completion raises when no admin user exists
+# Test: _async_llm_completion accepts acting_user=None (system-level caller)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
-async def test_async_llm_completion_no_admin_user():
-    """When no admin user exists, raise RuntimeError."""
+async def test_async_llm_completion_none_acting_user_passes_through():
+    """acting_user=None is a valid system-level call; the function passes it
+    to generate_chat_completion without raising on None itself."""
     from open_webui.utils.knowledge_export import _async_llm_completion
 
-    app = SimpleNamespace(
-        state=SimpleNamespace(MODELS={"test-model": {"id": "test-model"}})
-    )
+    expected_content = 'system-level response'
+    mock_response = _make_openai_dict_response(expected_content)
 
-    with (
-        patch(
-            "open_webui.models.users.Users.get_super_admin_user",
-            return_value=None,
-        ),
-        patch(
-            "open_webui.models.users.Users.get_first_user",
-            return_value=None,
-        ),
-    ):
-        with pytest.raises(RuntimeError, match="No admin user available"):
-            await _async_llm_completion(
-                app=app,
-                messages=[{"role": "user", "content": "test"}],
-                model_id="test-model",
-            )
+    app = SimpleNamespace(state=SimpleNamespace(MODELS={'test-model': {'id': 'test-model'}}))
+
+    with patch(
+        'open_webui.utils.chat.generate_chat_completion',
+        new_callable=AsyncMock,
+        return_value=mock_response,
+    ) as mock_gcc:
+        result = await _async_llm_completion(
+            app=app,
+            messages=[{'role': 'user', 'content': 'test'}],
+            model_id='test-model',
+            acting_user=None,
+        )
+        assert result == expected_content
+        # Verify user=None was forwarded to generate_chat_completion
+        _, kwargs = mock_gcc.call_args
+        assert kwargs.get('user') is None
 
 
 # ---------------------------------------------------------------------------
 # Test: full sync→async round-trip with a real event loop in another thread
 # ---------------------------------------------------------------------------
+
 
 def test_call_llm_completion_full_roundtrip():
     """
@@ -216,22 +206,16 @@ def test_call_llm_completion_full_roundtrip():
     app = _make_app_with_loop(loop)
 
     try:
-        with (
-            patch(
-                "open_webui.utils.chat.generate_chat_completion",
-                new_callable=AsyncMock,
-                return_value=mock_response,
-            ),
-            patch(
-                "open_webui.models.users.Users.get_super_admin_user",
-                return_value=_make_admin_user(),
-            ),
+        with patch(
+            'open_webui.utils.chat.generate_chat_completion',
+            new_callable=AsyncMock,
+            return_value=mock_response,
         ):
             result = call_llm_completion(
                 app=app,
-                system_prompt="You are a filing planner.",
-                user_prompt="Organize these docs.",
-                model_id="test-model",
+                system_prompt='You are a filing planner.',
+                user_prompt='Organize these docs.',
+                model_id='test-model',
                 timeout=10.0,
             )
             assert result == expected
@@ -245,13 +229,14 @@ def test_call_llm_completion_full_roundtrip():
 # Test: call_llm_completion timeout behavior
 # ---------------------------------------------------------------------------
 
+
 def test_call_llm_completion_timeout():
     """When the LLM call takes too long, TimeoutError is raised."""
     from open_webui.utils.knowledge_export import call_llm_completion
 
     async def _slow_completion(*args, **kwargs):
         await asyncio.sleep(60)  # way longer than timeout
-        return _make_openai_dict_response("too late")
+        return _make_openai_dict_response('too late')
 
     loop = asyncio.new_event_loop()
     loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
@@ -260,22 +245,16 @@ def test_call_llm_completion_timeout():
     app = _make_app_with_loop(loop)
 
     try:
-        with (
-            patch(
-                "open_webui.utils.chat.generate_chat_completion",
-                side_effect=_slow_completion,
-            ),
-            patch(
-                "open_webui.models.users.Users.get_super_admin_user",
-                return_value=_make_admin_user(),
-            ),
+        with patch(
+            'open_webui.utils.chat.generate_chat_completion',
+            side_effect=_slow_completion,
         ):
-            with pytest.raises(TimeoutError, match="timed out"):
+            with pytest.raises(TimeoutError, match='timed out'):
                 call_llm_completion(
                     app=app,
-                    system_prompt="sys",
-                    user_prompt="usr",
-                    model_id="test-model",
+                    system_prompt='sys',
+                    user_prompt='usr',
+                    model_id='test-model',
                     timeout=0.5,  # very short timeout
                 )
     finally:
@@ -288,42 +267,36 @@ def test_call_llm_completion_timeout():
 # Test: _async_llm_completion extracts content from JSONResponse-like body
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_async_llm_completion_json_response_body():
     """When response has .body attribute (JSONResponse), extract content."""
     from open_webui.utils.knowledge_export import _async_llm_completion
 
-    expected = "planned response"
+    expected = 'planned response'
     response_data = _make_openai_dict_response(expected)
 
     # Simulate a JSONResponse (has .body, no .body_iterator, no 'choices' key directly)
     mock_json_response = SimpleNamespace(
-        body=json.dumps(response_data).encode("utf-8"),
+        body=json.dumps(response_data).encode('utf-8'),
     )
     # Make sure it doesn't match as dict or body_iterator
     assert not isinstance(mock_json_response, dict)
-    assert not hasattr(mock_json_response, "body_iterator")
-    assert hasattr(mock_json_response, "body")
+    assert not hasattr(mock_json_response, 'body_iterator')
+    assert hasattr(mock_json_response, 'body')
 
-    app = SimpleNamespace(
-        state=SimpleNamespace(MODELS={"test-model": {"id": "test-model"}})
-    )
+    app = SimpleNamespace(state=SimpleNamespace(MODELS={'test-model': {'id': 'test-model'}}))
 
-    with (
-        patch(
-            "open_webui.utils.chat.generate_chat_completion",
-            new_callable=AsyncMock,
-            return_value=mock_json_response,
-        ),
-        patch(
-            "open_webui.models.users.Users.get_super_admin_user",
-            return_value=_make_admin_user(),
-        ),
+    with patch(
+        'open_webui.utils.chat.generate_chat_completion',
+        new_callable=AsyncMock,
+        return_value=mock_json_response,
     ):
         result = await _async_llm_completion(
             app=app,
-            messages=[{"role": "user", "content": "test"}],
-            model_id="test-model",
+            messages=[{'role': 'user', 'content': 'test'}],
+            model_id='test-model',
+            acting_user=_make_admin_user(),
         )
         assert result == expected
 
@@ -332,12 +305,13 @@ async def test_async_llm_completion_json_response_body():
 # Test: call_llm_completion propagates LLM errors from async side
 # ---------------------------------------------------------------------------
 
+
 def test_call_llm_completion_propagates_llm_error():
     """If generate_chat_completion raises, the error propagates to the caller."""
     from open_webui.utils.knowledge_export import call_llm_completion
 
     async def _failing_completion(*args, **kwargs):
-        raise ConnectionError("LLM backend unreachable")
+        raise ConnectionError('LLM backend unreachable')
 
     loop = asyncio.new_event_loop()
     loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
@@ -346,22 +320,16 @@ def test_call_llm_completion_propagates_llm_error():
     app = _make_app_with_loop(loop)
 
     try:
-        with (
-            patch(
-                "open_webui.utils.chat.generate_chat_completion",
-                side_effect=_failing_completion,
-            ),
-            patch(
-                "open_webui.models.users.Users.get_super_admin_user",
-                return_value=_make_admin_user(),
-            ),
+        with patch(
+            'open_webui.utils.chat.generate_chat_completion',
+            side_effect=_failing_completion,
         ):
-            with pytest.raises(ConnectionError, match="LLM backend unreachable"):
+            with pytest.raises(ConnectionError, match='LLM backend unreachable'):
                 call_llm_completion(
                     app=app,
-                    system_prompt="sys",
-                    user_prompt="usr",
-                    model_id="test-model",
+                    system_prompt='sys',
+                    user_prompt='usr',
+                    model_id='test-model',
                     timeout=10.0,
                 )
     finally:
@@ -373,6 +341,7 @@ def test_call_llm_completion_propagates_llm_error():
 # ---------------------------------------------------------------------------
 # Test: _async_llm_completion extracts content from StreamingResponse body_iterator
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_async_llm_completion_streaming_response_body_iterator():
@@ -389,21 +358,19 @@ async def test_async_llm_completion_streaming_response_body_iterator():
 
     # Simulate a multi-chunk streaming response where only the last chunk has content.
     # This exercises the "overwrite content on each valid chunk" behavior.
-    chunk_1 = json.dumps(
-        {"choices": [{"message": {"role": "assistant", "content": ""}, "index": 0}]}
-    ).encode("utf-8")
-    chunk_2 = json.dumps(
-        {"choices": [{"message": {"role": "assistant", "content": expected}, "index": 0}]}
-    ).encode("utf-8")
+    chunk_1 = json.dumps({'choices': [{'message': {'role': 'assistant', 'content': ''}, 'index': 0}]}).encode('utf-8')
+    chunk_2 = json.dumps({'choices': [{'message': {'role': 'assistant', 'content': expected}, 'index': 0}]}).encode(
+        'utf-8'
+    )
 
     async def _fake_body_iterator():
         yield chunk_1
         yield chunk_2
 
-    background_called = {"value": False}
+    background_called = {'value': False}
 
     async def _fake_background():
-        background_called["value"] = True
+        background_called['value'] = True
 
     mock_streaming_response = SimpleNamespace(
         body_iterator=_fake_body_iterator(),
@@ -411,45 +378,39 @@ async def test_async_llm_completion_streaming_response_body_iterator():
     )
     # Verify it matches the body_iterator branch (not dict, not .body)
     assert not isinstance(mock_streaming_response, dict)
-    assert hasattr(mock_streaming_response, "body_iterator")
+    assert hasattr(mock_streaming_response, 'body_iterator')
 
-    app = SimpleNamespace(
-        state=SimpleNamespace(MODELS={"test-model": {"id": "test-model"}})
-    )
+    app = SimpleNamespace(state=SimpleNamespace(MODELS={'test-model': {'id': 'test-model'}}))
 
-    with (
-        patch(
-            "open_webui.utils.chat.generate_chat_completion",
-            new_callable=AsyncMock,
-            return_value=mock_streaming_response,
-        ),
-        patch(
-            "open_webui.models.users.Users.get_super_admin_user",
-            return_value=_make_admin_user(),
-        ),
+    with patch(
+        'open_webui.utils.chat.generate_chat_completion',
+        new_callable=AsyncMock,
+        return_value=mock_streaming_response,
     ):
         result = await _async_llm_completion(
             app=app,
-            messages=[{"role": "user", "content": "test streaming"}],
-            model_id="test-model",
+            messages=[{'role': 'user', 'content': 'test streaming'}],
+            model_id='test-model',
+            acting_user=_make_admin_user(),
         )
         assert result == expected
-        assert background_called["value"] is True, "background() was not called"
+        assert background_called['value'] is True, 'background() was not called'
 
 
 # ---------------------------------------------------------------------------
 # Test: _async_llm_completion StreamingResponse with no background task
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_async_llm_completion_streaming_response_no_background():
     """StreamingResponse without .background attribute still works."""
     from open_webui.utils.knowledge_export import _async_llm_completion
 
-    expected = "streaming-no-bg"
-    chunk = json.dumps(
-        {"choices": [{"message": {"role": "assistant", "content": expected}, "index": 0}]}
-    ).encode("utf-8")
+    expected = 'streaming-no-bg'
+    chunk = json.dumps({'choices': [{'message': {'role': 'assistant', 'content': expected}, 'index': 0}]}).encode(
+        'utf-8'
+    )
 
     async def _fake_body_iterator():
         yield chunk
@@ -459,25 +420,18 @@ async def test_async_llm_completion_streaming_response_no_background():
         background=None,  # background is None => should not call it
     )
 
-    app = SimpleNamespace(
-        state=SimpleNamespace(MODELS={"test-model": {"id": "test-model"}})
-    )
+    app = SimpleNamespace(state=SimpleNamespace(MODELS={'test-model': {'id': 'test-model'}}))
 
-    with (
-        patch(
-            "open_webui.utils.chat.generate_chat_completion",
-            new_callable=AsyncMock,
-            return_value=mock_streaming_response,
-        ),
-        patch(
-            "open_webui.models.users.Users.get_super_admin_user",
-            return_value=_make_admin_user(),
-        ),
+    with patch(
+        'open_webui.utils.chat.generate_chat_completion',
+        new_callable=AsyncMock,
+        return_value=mock_streaming_response,
     ):
         result = await _async_llm_completion(
             app=app,
-            messages=[{"role": "user", "content": "test streaming no bg"}],
-            model_id="test-model",
+            messages=[{'role': 'user', 'content': 'test streaming no bg'}],
+            model_id='test-model',
+            acting_user=_make_admin_user(),
         )
         assert result == expected
 
@@ -486,11 +440,12 @@ async def test_async_llm_completion_streaming_response_no_background():
 # Helpers for enqueue_organization / _organize_inbox config-reading tests
 # ---------------------------------------------------------------------------
 
+
 def _make_app_with_config(**config_overrides):
     """Build an app-like object with state.config carrying RAG_KNOWLEDGE_* settings."""
     config = SimpleNamespace(
-        RAG_KNOWLEDGE_EXPORT_DIR=config_overrides.get("export_dir", "/tmp/test-kb"),
-        RAG_KNOWLEDGE_ORGANIZER_MODEL=config_overrides.get("model", "test-model"),
+        RAG_KNOWLEDGE_EXPORT_DIR=config_overrides.get('export_dir', '/tmp/test-kb'),
+        RAG_KNOWLEDGE_ORGANIZER_MODEL=config_overrides.get('model', 'test-model'),
     )
     state = SimpleNamespace(config=config)
     return SimpleNamespace(state=state)
@@ -500,12 +455,13 @@ def _make_app_with_config(**config_overrides):
 # Test: _organize_inbox raises when app.state.config is absent
 # ---------------------------------------------------------------------------
 
+
 def test_organize_inbox_no_config():
     """When app.state.config is missing, raise RuntimeError."""
     from open_webui.utils.knowledge_export import _organize_inbox
 
     app = SimpleNamespace(state=SimpleNamespace())  # no config attr
-    with pytest.raises(RuntimeError, match="app.state.config is not available"):
+    with pytest.raises(RuntimeError, match='app.state.config is not available'):
         _organize_inbox(app=app)
 
 
@@ -513,35 +469,40 @@ def test_organize_inbox_no_config():
 # Test: _organize_inbox skips when RAG_KNOWLEDGE_EXPORT_DIR is empty
 # ---------------------------------------------------------------------------
 
+
 def test_organize_inbox_empty_export_dir(caplog):
     """When RAG_KNOWLEDGE_EXPORT_DIR is empty, log warning and return (no error)."""
     from open_webui.utils.knowledge_export import _organize_inbox
 
-    app = _make_app_with_config(export_dir="")
+    app = _make_app_with_config(export_dir='')
     import logging
+
     with caplog.at_level(logging.WARNING):
         _organize_inbox(app=app)
-    assert "RAG_KNOWLEDGE_EXPORT_DIR is not configured" in caplog.text
+    assert 'RAG_KNOWLEDGE_EXPORT_DIR is not configured' in caplog.text
 
 
 # ---------------------------------------------------------------------------
 # Test: _organize_inbox skips when RAG_KNOWLEDGE_ORGANIZER_MODEL is empty
 # ---------------------------------------------------------------------------
 
+
 def test_organize_inbox_empty_model(caplog):
     """When RAG_KNOWLEDGE_ORGANIZER_MODEL is empty, log warning and return (no error)."""
     from open_webui.utils.knowledge_export import _organize_inbox
 
-    app = _make_app_with_config(export_dir="/tmp/test-kb", model="")
+    app = _make_app_with_config(export_dir='/tmp/test-kb', model='')
     import logging
+
     with caplog.at_level(logging.WARNING):
         _organize_inbox(app=app)
-    assert "RAG_KNOWLEDGE_ORGANIZER_MODEL is not configured" in caplog.text
+    assert 'RAG_KNOWLEDGE_ORGANIZER_MODEL is not configured' in caplog.text
 
 
 # ---------------------------------------------------------------------------
 # Test: _organize_inbox skips when RAG_KNOWLEDGE_EXPORT_DIR is None
 # ---------------------------------------------------------------------------
+
 
 def test_organize_inbox_none_export_dir(caplog):
     """When RAG_KNOWLEDGE_EXPORT_DIR is None (falsy), log warning and return."""
@@ -549,21 +510,23 @@ def test_organize_inbox_none_export_dir(caplog):
 
     app = _make_app_with_config(export_dir=None)
     import logging
+
     with caplog.at_level(logging.WARNING):
         _organize_inbox(app=app)
-    assert "RAG_KNOWLEDGE_EXPORT_DIR is not configured" in caplog.text
+    assert 'RAG_KNOWLEDGE_EXPORT_DIR is not configured' in caplog.text
 
 
 # ---------------------------------------------------------------------------
 # Test: _organize_inbox returns early when inbox dir doesn't exist
 # ---------------------------------------------------------------------------
 
+
 def test_organize_inbox_no_inbox_dir(tmp_path):
     """When the inbox subdirectory doesn't exist, return silently (no error)."""
     from open_webui.utils.knowledge_export import _organize_inbox
 
     # export_dir exists but has no "inbox" subdirectory
-    app = _make_app_with_config(export_dir=str(tmp_path), model="test-model")
+    app = _make_app_with_config(export_dir=str(tmp_path), model='test-model')
     # Should return without error
     _organize_inbox(app=app)
 
@@ -572,22 +535,25 @@ def test_organize_inbox_no_inbox_dir(tmp_path):
 # Test: _organize_inbox returns early when inbox is empty
 # ---------------------------------------------------------------------------
 
+
 def test_organize_inbox_empty_inbox(tmp_path, caplog):
     """When inbox exists but has no .md files, log and return."""
     from open_webui.utils.knowledge_export import _organize_inbox
 
-    inbox = tmp_path / "inbox"
+    inbox = tmp_path / 'inbox'
     inbox.mkdir()
-    app = _make_app_with_config(export_dir=str(tmp_path), model="test-model")
+    app = _make_app_with_config(export_dir=str(tmp_path), model='test-model')
     import logging
+
     with caplog.at_level(logging.INFO):
         _organize_inbox(app=app)
-    assert "inbox is empty" in caplog.text
+    assert 'inbox is empty' in caplog.text
 
 
 # ---------------------------------------------------------------------------
 # Test: enqueue_organization takes only app (interface test)
 # ---------------------------------------------------------------------------
+
 
 def test_enqueue_organization_interface():
     """enqueue_organization(app) accepts a single argument and enqueues a job."""
@@ -607,22 +573,23 @@ def test_enqueue_organization_interface():
     app = _make_app_with_config()
 
     # Patch _ensure_worker_running to prevent actually starting a thread
-    with patch("open_webui.utils.knowledge_export._ensure_worker_running"):
+    with patch('open_webui.utils.knowledge_export._ensure_worker_running'):
         enqueue_organization(app=app)
 
     assert not _org_queue.empty()
     job = _org_queue.get_nowait()
     _org_queue.task_done()
-    assert job["app"] is app
-    assert "enqueued_at" in job
+    assert job['app'] is app
+    assert 'enqueued_at' in job
     # Old params should NOT be in the job
-    assert "export_dir" not in job
-    assert "model" not in job
+    assert 'export_dir' not in job
+    assert 'model' not in job
 
 
 # ---------------------------------------------------------------------------
 # Test: enqueue_organization deduplication still works
 # ---------------------------------------------------------------------------
+
 
 def test_enqueue_organization_dedup():
     """When a job is already queued, a second call is skipped."""
@@ -641,7 +608,7 @@ def test_enqueue_organization_dedup():
 
     app = _make_app_with_config()
 
-    with patch("open_webui.utils.knowledge_export._ensure_worker_running"):
+    with patch('open_webui.utils.knowledge_export._ensure_worker_running'):
         enqueue_organization(app=app)
         enqueue_organization(app=app)  # should be skipped
 
@@ -651,4 +618,4 @@ def test_enqueue_organization_dedup():
         _org_queue.get_nowait()
         _org_queue.task_done()
         count += 1
-    assert count == 1, f"Expected 1 job in queue, got {count}"
+    assert count == 1, f'Expected 1 job in queue, got {count}'

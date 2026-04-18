@@ -37,8 +37,8 @@ _org_worker_lock = threading.Lock()
 # Filesystem artifacts that may appear in the export directory from other
 # subsystems (e.g., research utils, agent tooling).  Exclude them from the
 # knowledge-base catalog so they don't pollute the directory tree listing.
-CATALOG_EXCLUDED_DIRS = {".opencode", "_reports"}
-CATALOG_EXCLUDED_FILES = {"opencode.json", ".webui_secret_key"}
+CATALOG_EXCLUDED_DIRS = {'.opencode', '_reports'}
+CATALOG_EXCLUDED_FILES = {'opencode.json', '.webui_secret_key'}
 ORGANIZER_BATCH_SIZE = 12
 
 ORGANIZE_PLANNER_PROMPT = """You are a knowledge-base filing planner.
@@ -66,88 +66,89 @@ async def _async_llm_completion(
     app: Any,
     messages: list[dict],
     model_id: str,
+    acting_user,  # UserModel | None — REQUIRED, no default.
+    bypass_filter: bool = False,
 ) -> str:
     """
-    Async inner function: build a synthetic Request, fetch an admin user,
-    call generate_chat_completion (non-streaming), and return the response text.
+    Async inner function: build a synthetic Request and call
+    generate_chat_completion (non-streaming), returning the response text.
 
     Runs on the main event loop — never call this directly from a sync thread.
+
+    Args:
+        app:          FastAPI application instance (carries state.MODELS, etc.)
+        messages:     OpenAI-format message list.
+        model_id:     OpenWebUI model ID.
+        acting_user:  The user whose credentials the LLM call runs under.
+                      Pass the authenticated request user for user-triggered calls.
+                      Pass None ONLY for system-level callers (e.g. inbox organizer)
+                      that have no associated HTTP user — the caller MUST log an
+                      INFO message explaining the reason before invoking this function.
+        bypass_filter: When True, the call skips filter middleware (e.g. content
+                      moderation, rate-limit pipelines) for internal system tasks.
+                      This is NOT an admin or authentication bypass — it controls
+                      only filter middleware, not user authorisation.
+
+    Raises:
+        RuntimeError: If acting_user is None and the LLM response is empty, or on
+                      unexpected response shape.
     """
     from starlette.datastructures import Headers
     from starlette.requests import Request
 
-    from open_webui.models.users import Users
     from open_webui.utils.chat import generate_chat_completion
-
-    # Get an admin user for authorization.
-    # The organizer is a system-level task, not user-initiated.
-    admin_user = Users.get_super_admin_user()
-    if admin_user is None:
-        admin_user = Users.get_first_user()
-    if admin_user is None:
-        raise RuntimeError("No admin user available for LLM completion")
 
     # Synthetic Request — same pattern as main.py startup (mock_request).
     # generate_chat_completion reads request.app.state.MODELS and request.state.
     request = Request(
         {
-            "type": "http",
-            "asgi.version": "3.0",
-            "asgi.spec_version": "2.0",
-            "method": "POST",
-            "path": "/internal/knowledge-organizer",
-            "query_string": b"",
-            "headers": Headers({}).raw,
-            "client": ("127.0.0.1", 0),
-            "server": ("127.0.0.1", 80),
-            "scheme": "http",
-            "app": app,
+            'type': 'http',
+            'asgi.version': '3.0',
+            'asgi.spec_version': '2.0',
+            'method': 'POST',
+            'path': '/internal/knowledge-organizer',
+            'query_string': b'',
+            'headers': Headers({}).raw,
+            'client': ('127.0.0.1', 0),
+            'server': ('127.0.0.1', 80),
+            'scheme': 'http',
+            'app': app,
         }
     )
 
     payload = {
-        "model": model_id,
-        "messages": messages,
-        "stream": False,
-        "metadata": {"task": "knowledge_organizer"},
+        'model': model_id,
+        'messages': messages,
+        'stream': False,
+        'metadata': {'task': 'knowledge_organizer'},
     }
 
-    response = await generate_chat_completion(
-        request, form_data=payload, user=admin_user, bypass_filter=True
-    )
+    response = await generate_chat_completion(request, form_data=payload, user=acting_user, bypass_filter=bypass_filter)
 
     # Response is either a dict (most common for stream=False) or a
     # StreamingResponse/JSONResponse. Handle both following the pattern
     # from middleware.py extract_relevant_content_from_document.
-    if isinstance(response, dict) and "choices" in response:
-        content = (
-            response["choices"][0].get("message", {}).get("content", "")
-            if response["choices"]
-            else ""
-        )
-    elif hasattr(response, "body_iterator"):
+    if isinstance(response, dict) and 'choices' in response:
+        content = response['choices'][0].get('message', {}).get('content', '') if response['choices'] else ''
+    elif hasattr(response, 'body_iterator'):
         # StreamingResponse — drain it and extract content
         content = None
         async for chunk in response.body_iterator:
-            data = json.loads(chunk.decode("utf-8", "replace"))
-            if "choices" in data and data["choices"]:
-                content = data["choices"][0].get("message", {}).get("content")
-        if hasattr(response, "background") and response.background is not None:
+            data = json.loads(chunk.decode('utf-8', 'replace'))
+            if 'choices' in data and data['choices']:
+                content = data['choices'][0].get('message', {}).get('content')
+        if hasattr(response, 'background') and response.background is not None:
             await response.background()
-        content = content or ""
-    elif hasattr(response, "body"):
+        content = content or ''
+    elif hasattr(response, 'body'):
         # JSONResponse — parse the body
-        data = json.loads(response.body.decode("utf-8", "replace"))
-        content = (
-            data["choices"][0].get("message", {}).get("content", "")
-            if data.get("choices")
-            else ""
-        )
+        data = json.loads(response.body.decode('utf-8', 'replace'))
+        content = data['choices'][0].get('message', {}).get('content', '') if data.get('choices') else ''
     else:
-        raise RuntimeError(f"Unexpected response type from LLM: {type(response)}")
+        raise RuntimeError(f'Unexpected response type from LLM: {type(response)}')
 
     if not content:
-        raise RuntimeError("LLM returned empty content")
+        raise RuntimeError('LLM returned empty content')
 
     return content
 
@@ -180,20 +181,20 @@ def call_llm_completion(
         RuntimeError: If the event loop is unavailable, the LLM fails, or timeout.
         TimeoutError: If the LLM call exceeds the timeout.
     """
-    loop = getattr(getattr(app, "state", None), "main_loop", None)
+    loop = getattr(getattr(app, 'state', None), 'main_loop', None)
     if loop is None or loop.is_closed():
-        raise RuntimeError(
-            "Main event loop not available (app.state.main_loop). "
-            "Server may still be starting up."
-        )
+        raise RuntimeError('Main event loop not available (app.state.main_loop). Server may still be starting up.')
 
     messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': user_prompt},
     ]
 
+    # System-level call: inbox organizer has no associated HTTP user.
+    # Passing acting_user=None is the only legitimate None case in this module.
+    log.info('LLM call under super-admin credential: reason=inbox_organizer')
     future = asyncio.run_coroutine_threadsafe(
-        _async_llm_completion(app, messages, model_id),
+        _async_llm_completion(app, messages, model_id, acting_user=None, bypass_filter=True),
         loop,
     )
 
@@ -201,9 +202,7 @@ def call_llm_completion(
         return future.result(timeout=timeout)
     except TimeoutError:
         future.cancel()
-        raise TimeoutError(
-            f"LLM completion timed out after {timeout}s (model={model_id})"
-        )
+        raise TimeoutError(f'LLM completion timed out after {timeout}s (model={model_id})')
     except Exception:
         # Re-raise the original exception from the async side
         raise
@@ -216,28 +215,28 @@ def _sanitize_filename(name: str) -> str:
     (path traversal, control chars, hostile chars, CJK romanization), then
     strips the extension since callers append their own (e.g. ".md").
     """
-    return os.path.splitext(sanitize_filename(name))[0] or "unnamed"
+    return os.path.splitext(sanitize_filename(name))[0] or 'unnamed'
 
 
 def _strip_yaml_frontmatter(text: str) -> str:
-    return re.sub(r"\A---\n.*?\n---\n?", "", text, count=1, flags=re.DOTALL)
+    return re.sub(r'\A---\n.*?\n---\n?', '', text, count=1, flags=re.DOTALL)
 
 
 def _read_path_text(path: Optional[Path]) -> str:
     if not path:
-        return ""
+        return ''
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        return path.read_text(encoding='utf-8', errors='replace')
     except OSError:
-        return ""
+        return ''
 
 
 def _read_frontmatter_value(path: Optional[Path], key: str) -> str:
     text = _read_path_text(path)
     if not text:
-        return ""
-    match = re.search(rf"^{re.escape(key)}:\s*(.+)$", text, re.MULTILINE)
-    return match.group(1).strip() if match else ""
+        return ''
+    match = re.search(rf'^{re.escape(key)}:\s*(.+)$', text, re.MULTILINE)
+    return match.group(1).strip() if match else ''
 
 
 def _read_preview(
@@ -248,14 +247,14 @@ def _read_preview(
 ) -> str:
     text = _strip_yaml_frontmatter(_read_path_text(path)).strip()
     if not text:
-        return ""
+        return ''
 
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
-    preview = "\n".join(lines[:max_lines]).strip()
+    preview = '\n'.join(lines[:max_lines]).strip()
     if len(preview) > max_chars:
         preview = preview[:max_chars].rstrip()
     if len(preview) < len(text):
-        preview = preview.rstrip() + "..."
+        preview = preview.rstrip() + '...'
     return preview
 
 
@@ -263,44 +262,38 @@ def _collect_inbox_documents(inbox_dir: str) -> list[dict]:
     grouped: dict[str, dict] = {}
 
     for path in sorted(Path(inbox_dir).iterdir(), key=lambda item: item.name):
-        if not path.is_file() or not path.name.endswith(".md"):
+        if not path.is_file() or not path.name.endswith('.md'):
             continue
 
-        if path.name.endswith(".index.md"):
+        if path.name.endswith('.index.md'):
             base_name = path.name[:-9]
             entry = grouped.setdefault(
                 base_name,
-                {"base_name": base_name, "md_path": None, "index_path": None},
+                {'base_name': base_name, 'md_path': None, 'index_path': None},
             )
-            entry["index_path"] = path
+            entry['index_path'] = path
         else:
             base_name = path.name[:-3]
             entry = grouped.setdefault(
                 base_name,
-                {"base_name": base_name, "md_path": None, "index_path": None},
+                {'base_name': base_name, 'md_path': None, 'index_path': None},
             )
-            entry["md_path"] = path
+            entry['md_path'] = path
 
     documents = []
     for index, base_name in enumerate(sorted(grouped), start=1):
         entry = grouped[base_name]
-        primary_path = entry["md_path"] or entry["index_path"]
-        original_filename = (
-            _read_frontmatter_value(primary_path, "original_filename") or base_name
-        )
+        primary_path = entry['md_path'] or entry['index_path']
+        original_filename = _read_frontmatter_value(primary_path, 'original_filename') or base_name
         documents.append(
             {
-                "doc_id": f"doc-{index:04d}",
-                "base_name": base_name,
-                "md_path": entry["md_path"],
-                "index_path": entry["index_path"],
-                "original_filename": original_filename,
-                "content_preview": _read_preview(
-                    entry["md_path"], max_lines=12, max_chars=1400
-                ),
-                "index_preview": _read_preview(
-                    entry["index_path"], max_lines=16, max_chars=2200
-                ),
+                'doc_id': f'doc-{index:04d}',
+                'base_name': base_name,
+                'md_path': entry['md_path'],
+                'index_path': entry['index_path'],
+                'original_filename': original_filename,
+                'content_preview': _read_preview(entry['md_path'], max_lines=12, max_chars=1400),
+                'index_preview': _read_preview(entry['index_path'], max_lines=16, max_chars=2200),
             }
         )
 
@@ -318,24 +311,20 @@ def _summarize_existing_directories(export_dir: str) -> list[dict]:
         dirnames[:] = sorted(
             name
             for name in dirnames
-            if name not in CATALOG_EXCLUDED_DIRS
-            and name != "inbox"
-            and not name.startswith(".")
+            if name not in CATALOG_EXCLUDED_DIRS and name != 'inbox' and not name.startswith('.')
         )
 
-        if rel_path == ".":
+        if rel_path == '.':
             continue
 
-        markdown_files = sorted(
-            name for name in filenames if name.endswith(".md") and name != "_catalog.md"
-        )
+        markdown_files = sorted(name for name in filenames if name.endswith('.md') and name != '_catalog.md')
         if markdown_files or dirnames:
             summary.append(
                 {
-                    "path": rel_path,
-                    "direct_markdown_files": len(markdown_files),
-                    "sample_files": markdown_files[:3],
-                    "subdirectories": dirnames[:5],
+                    'path': rel_path,
+                    'direct_markdown_files': len(markdown_files),
+                    'sample_files': markdown_files[:3],
+                    'subdirectories': dirnames[:5],
                 }
             )
 
@@ -344,16 +333,16 @@ def _summarize_existing_directories(export_dir: str) -> list[dict]:
 
 def _build_organizer_context(export_dir: str, documents: list[dict]) -> dict:
     return {
-        "existing_directories": _summarize_existing_directories(export_dir),
-        "documents": [
+        'existing_directories': _summarize_existing_directories(export_dir),
+        'documents': [
             {
-                "doc_id": document["doc_id"],
-                "safe_base_name": document["base_name"],
-                "original_filename": document["original_filename"],
-                "has_content_file": bool(document["md_path"]),
-                "has_index_file": bool(document["index_path"]),
-                "index_preview": document["index_preview"],
-                "content_preview": document["content_preview"],
+                'doc_id': document['doc_id'],
+                'safe_base_name': document['base_name'],
+                'original_filename': document['original_filename'],
+                'has_content_file': bool(document['md_path']),
+                'has_index_file': bool(document['index_path']),
+                'index_preview': document['index_preview'],
+                'content_preview': document['content_preview'],
             }
             for document in documents
         ],
@@ -371,7 +360,7 @@ def _build_organizer_prompt(export_dir: str, documents: list[dict]) -> tuple[str
         ensure_ascii=False,
         indent=2,
     )
-    return ORGANIZE_PLANNER_PROMPT, f"Context JSON:\n{context_json}"
+    return ORGANIZE_PLANNER_PROMPT, f'Context JSON:\n{context_json}'
 
 
 def _extract_json_payload(text: str):
@@ -382,7 +371,7 @@ def _extract_json_payload(text: str):
     candidates = []
 
     fenced_blocks = re.findall(
-        r"```(?:json)?\s*(.*?)```",
+        r'```(?:json)?\s*(.*?)```',
         stripped,
         flags=re.DOTALL | re.IGNORECASE,
     )
@@ -391,13 +380,13 @@ def _extract_json_payload(text: str):
     if stripped:
         candidates.append(stripped)
 
-        object_start = stripped.find("{")
-        object_end = stripped.rfind("}")
+        object_start = stripped.find('{')
+        object_end = stripped.rfind('}')
         if object_start != -1 and object_end != -1 and object_end > object_start:
             candidates.append(stripped[object_start : object_end + 1].strip())
 
-        array_start = stripped.find("[")
-        array_end = stripped.rfind("]")
+        array_start = stripped.find('[')
+        array_end = stripped.rfind(']')
         if array_start != -1 and array_end != -1 and array_end > array_start:
             candidates.append(stripped[array_start : array_end + 1].strip())
 
@@ -416,70 +405,66 @@ def _extract_json_payload(text: str):
 
 def _sanitize_destination_path(destination: str) -> str:
     if not destination:
-        return ""
+        return ''
 
     parts = []
-    for raw_part in destination.replace("\\", "/").split("/"):
+    for raw_part in destination.replace('\\', '/').split('/'):
         raw_part = raw_part.strip()
         if not raw_part:
             continue
 
         lowered = raw_part.lower()
-        if lowered in {".", "..", "inbox", "_reports"}:
-            return ""
+        if lowered in {'.', '..', 'inbox', '_reports'}:
+            return ''
 
-        normalized = lowered.replace("_", "-")
-        normalized = re.sub(r"[^a-z0-9-]+", "-", normalized)
-        normalized = re.sub(r"-+", "-", normalized).strip("-")
+        normalized = lowered.replace('_', '-')
+        normalized = re.sub(r'[^a-z0-9-]+', '-', normalized)
+        normalized = re.sub(r'-+', '-', normalized).strip('-')
         if not normalized:
-            return ""
+            return ''
 
         parts.append(normalized)
 
     if not parts:
-        return ""
+        return ''
 
-    return "/".join(parts[:4])
+    return '/'.join(parts[:4])
 
 
 def _parse_organizer_plan(output: str, documents: list[dict]) -> dict:
     payload = _extract_json_payload(output)
     if isinstance(payload, dict):
-        moves = payload.get("moves", [])
+        moves = payload.get('moves', [])
     elif isinstance(payload, list):
         moves = payload
     else:
-        raise ValueError("Organizer planner did not return JSON")
+        raise ValueError('Organizer planner did not return JSON')
 
-    valid_ids = {document["doc_id"] for document in documents}
+    valid_ids = {document['doc_id'] for document in documents}
     plan = {}
 
     for move in moves:
         if not isinstance(move, dict):
             continue
 
-        doc_id = str(move.get("doc_id", "")).strip()
+        doc_id = str(move.get('doc_id', '')).strip()
         if not doc_id or doc_id not in valid_ids:
             continue
         if doc_id in plan:
-            raise ValueError(f"Duplicate planner entry for {doc_id}")
+            raise ValueError(f'Duplicate planner entry for {doc_id}')
 
-        destination = _sanitize_destination_path(
-            str(move.get("destination", "")).strip()
-        )
+        destination = _sanitize_destination_path(str(move.get('destination', '')).strip())
         if not destination:
-            raise ValueError(
-                f"Invalid destination for {doc_id}: {move.get('destination')!r}"
-            )
+            raise ValueError(f'Invalid destination for {doc_id}: {move.get("destination")!r}')
 
         plan[doc_id] = {
-            "destination": destination,
-            "reason": str(move.get("reason", "")).strip(),
+            'destination': destination,
+            'reason': str(move.get('reason', '')).strip(),
         }
 
     missing = sorted(valid_ids - set(plan))
     if missing:
-        raise ValueError(f"Organizer planner missed document ids: {', '.join(missing)}")
+        raise ValueError(f'Organizer planner missed document ids: {", ".join(missing)}')
 
     return plan
 
@@ -498,19 +483,16 @@ def _choose_available_base_name(
     while True:
         targets = []
         if has_md:
-            targets.append(dest_dir / f"{candidate}.md")
+            targets.append(dest_dir / f'{candidate}.md')
         if has_index:
-            targets.append(dest_dir / f"{candidate}.index.md")
+            targets.append(dest_dir / f'{candidate}.index.md')
 
-        if all(
-            str(target) not in reserved_paths and not target.exists()
-            for target in targets
-        ):
+        if all(str(target) not in reserved_paths and not target.exists() for target in targets):
             for target in targets:
                 reserved_paths.add(str(target))
             return candidate
 
-        candidate = f"{base_name}-{counter}"
+        candidate = f'{base_name}-{counter}'
         counter += 1
 
 
@@ -520,31 +502,27 @@ def _build_move_plan(export_dir: str, documents: list[dict], plan: dict) -> list
     move_plan = []
 
     for document in documents:
-        destination = plan[document["doc_id"]]["destination"]
+        destination = plan[document['doc_id']]['destination']
         dest_dir = root / destination
         final_base_name = _choose_available_base_name(
             dest_dir,
-            document["base_name"],
-            has_md=bool(document["md_path"]),
-            has_index=bool(document["index_path"]),
+            document['base_name'],
+            has_md=bool(document['md_path']),
+            has_index=bool(document['index_path']),
             reserved_paths=reserved_paths,
         )
 
         move_plan.append(
             {
-                "doc_id": document["doc_id"],
-                "original_filename": document["original_filename"],
-                "reason": plan[document["doc_id"]]["reason"],
-                "destination": destination,
-                "final_base_name": final_base_name,
-                "md_source": document["md_path"],
-                "index_source": document["index_path"],
-                "md_target": dest_dir / f"{final_base_name}.md"
-                if document["md_path"]
-                else None,
-                "index_target": dest_dir / f"{final_base_name}.index.md"
-                if document["index_path"]
-                else None,
+                'doc_id': document['doc_id'],
+                'original_filename': document['original_filename'],
+                'reason': plan[document['doc_id']]['reason'],
+                'destination': destination,
+                'final_base_name': final_base_name,
+                'md_source': document['md_path'],
+                'index_source': document['index_path'],
+                'md_target': dest_dir / f'{final_base_name}.md' if document['md_path'] else None,
+                'index_target': dest_dir / f'{final_base_name}.index.md' if document['index_path'] else None,
             }
         )
 
@@ -554,16 +532,13 @@ def _build_move_plan(export_dir: str, documents: list[dict], plan: dict) -> list
 def _should_include_in_catalog(path: Path, root: Path) -> bool:
     rel_path = path.relative_to(root).as_posix()
 
-    if path.name.startswith("."):
+    if path.name.startswith('.'):
         return False
     if path.name in CATALOG_EXCLUDED_FILES:
         return False
-    if any(
-        rel_path == prefix or rel_path.startswith(f"{prefix}/")
-        for prefix in CATALOG_EXCLUDED_DIRS
-    ):
+    if any(rel_path == prefix or rel_path.startswith(f'{prefix}/') for prefix in CATALOG_EXCLUDED_DIRS):
         return False
-    if path.is_file() and not path.name.endswith(".md"):
+    if path.is_file() and not path.name.endswith('.md'):
         return False
 
     return True
@@ -575,7 +550,7 @@ def _visible_catalog_children(path: Path, root: Path) -> list[Path]:
         for child in sorted(
             path.iterdir(),
             key=lambda item: (
-                item.name != "_catalog.md",
+                item.name != '_catalog.md',
                 not item.is_dir(),
                 item.name.lower(),
             ),
@@ -584,16 +559,16 @@ def _visible_catalog_children(path: Path, root: Path) -> list[Path]:
     ]
 
 
-def _build_catalog_tree(root: Path, path: Path, prefix: str = "") -> list[str]:
+def _build_catalog_tree(root: Path, path: Path, prefix: str = '') -> list[str]:
     lines = []
     children = _visible_catalog_children(path, root)
 
     for index, child in enumerate(children):
-        connector = "└── " if index == len(children) - 1 else "├── "
-        label = f"{child.name}/" if child.is_dir() else child.name
-        lines.append(f"{prefix}{connector}{label}")
+        connector = '└── ' if index == len(children) - 1 else '├── '
+        label = f'{child.name}/' if child.is_dir() else child.name
+        lines.append(f'{prefix}{connector}{label}')
         if child.is_dir():
-            extension = "    " if index == len(children) - 1 else "│   "
+            extension = '    ' if index == len(children) - 1 else '│   '
             lines.extend(_build_catalog_tree(root, child, prefix + extension))
 
     return lines
@@ -604,15 +579,15 @@ def _catalog_file_count(root: Path, dir_path: Path) -> int:
         1
         for child in dir_path.iterdir()
         if child.is_file()
-        and child.name.endswith(".md")
+        and child.name.endswith('.md')
         and _should_include_in_catalog(child, root)
-        and child.name != "_catalog.md"
+        and child.name != '_catalog.md'
     )
 
 
 def _write_catalog(export_dir: str, move_plan: list[dict]) -> None:
     root = Path(export_dir)
-    catalog_path = root / "_catalog.md"
+    catalog_path = root / '_catalog.md'
     catalog_path.touch(exist_ok=True)
 
     tree_lines = _build_catalog_tree(root, root)
@@ -622,44 +597,38 @@ def _write_catalog(export_dir: str, move_plan: list[dict]) -> None:
         current_path = Path(current_root)
         rel_path = current_path.relative_to(root).as_posix()
 
-        dirnames[:] = sorted(
-            name
-            for name in dirnames
-            if _should_include_in_catalog(current_path / name, root)
-        )
+        dirnames[:] = sorted(name for name in dirnames if _should_include_in_catalog(current_path / name, root))
 
-        if rel_path == "." or not _should_include_in_catalog(current_path, root):
+        if rel_path == '.' or not _should_include_in_catalog(current_path, root):
             continue
 
         file_count = _catalog_file_count(root, current_path)
-        if file_count or rel_path == "inbox":
-            count_lines.append(f"- `{rel_path}`: {file_count} files")
+        if file_count or rel_path == 'inbox':
+            count_lines.append(f'- `{rel_path}`: {file_count} files')
 
     lines = [
-        "# Knowledge Base Catalog",
-        "",
-        f"**Last Updated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        "",
-        "## Directory Structure",
-        "",
-        "```",
-        *(tree_lines or ["(empty)"]),
-        "```",
-        "",
-        "## File Counts by Directory",
-        "",
-        *(count_lines or ["- `inbox`: 0 files"]),
+        '# Knowledge Base Catalog',
+        '',
+        f'**Last Updated:** {time.strftime("%Y-%m-%d %H:%M:%S")}',
+        '',
+        '## Directory Structure',
+        '',
+        '```',
+        *(tree_lines or ['(empty)']),
+        '```',
+        '',
+        '## File Counts by Directory',
+        '',
+        *(count_lines or ['- `inbox`: 0 files']),
     ]
 
     if move_plan:
-        change_timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        lines.extend(["", "## Recent Changes", ""])
+        change_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        lines.extend(['', '## Recent Changes', ''])
         for item in move_plan:
-            lines.append(
-                f"- **{change_timestamp}**: `{item['original_filename']}` -> `{item['destination']}/`"
-            )
+            lines.append(f'- **{change_timestamp}**: `{item["original_filename"]}` -> `{item["destination"]}/`')
 
-    catalog_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    catalog_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 
 def export_document_files(
@@ -678,47 +647,45 @@ def export_document_files(
     if not export_dir or not content:
         return {}
 
-    inbox_dir = os.path.join(export_dir, "inbox")
+    inbox_dir = os.path.join(export_dir, 'inbox')
     os.makedirs(inbox_dir, exist_ok=True)
 
     safe_name = _sanitize_filename(filename)
     result = {}
 
-    md_path = os.path.join(inbox_dir, f"{safe_name}.md")
+    md_path = os.path.join(inbox_dir, f'{safe_name}.md')
     try:
         frontmatter = (
-            f"---\n"
-            f"source_file_id: {file_id}\n"
-            f"original_filename: {filename}\n"
-            f"exported_at: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n"
-            f"---\n\n"
+            f'---\n'
+            f'source_file_id: {file_id}\n'
+            f'original_filename: {filename}\n'
+            f'exported_at: {time.strftime("%Y-%m-%dT%H:%M:%S")}\n'
+            f'---\n\n'
         )
-        with open(md_path, "w", encoding="utf-8") as f:
+        with open(md_path, 'w', encoding='utf-8') as f:
             f.write(frontmatter + content)
-        result["md_path"] = md_path
-        log.info(f"Knowledge export: wrote {md_path} ({len(content)} chars)")
+        result['md_path'] = md_path
+        log.info(f'Knowledge export: wrote {md_path} ({len(content)} chars)')
     except Exception as e:
-        log.error(f"Knowledge export: failed to write {md_path}: {e}")
+        log.error(f'Knowledge export: failed to write {md_path}: {e}')
 
     if index_content:
-        index_path = os.path.join(inbox_dir, f"{safe_name}.index.md")
+        index_path = os.path.join(inbox_dir, f'{safe_name}.index.md')
         try:
             frontmatter = (
-                f"---\n"
-                f"source_file_id: {file_id}\n"
-                f"original_filename: {filename}\n"
-                f"type: index\n"
-                f"exported_at: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n"
-                f"---\n\n"
+                f'---\n'
+                f'source_file_id: {file_id}\n'
+                f'original_filename: {filename}\n'
+                f'type: index\n'
+                f'exported_at: {time.strftime("%Y-%m-%dT%H:%M:%S")}\n'
+                f'---\n\n'
             )
-            with open(index_path, "w", encoding="utf-8") as f:
+            with open(index_path, 'w', encoding='utf-8') as f:
                 f.write(frontmatter + index_content)
-            result["index_path"] = index_path
-            log.info(
-                f"Knowledge export: wrote {index_path} ({len(index_content)} chars)"
-            )
+            result['index_path'] = index_path
+            log.info(f'Knowledge export: wrote {index_path} ({len(index_content)} chars)')
         except Exception as e:
-            log.error(f"Knowledge export: failed to write {index_path}: {e}")
+            log.error(f'Knowledge export: failed to write {index_path}: {e}')
 
     return result
 
@@ -736,13 +703,13 @@ def enqueue_organization(app: Any):
     to avoid redundant LLM calls.
     """
     if not _org_queue.empty():
-        log.info("Knowledge organizer: job already queued, skipping")
+        log.info('Knowledge organizer: job already queued, skipping')
         return
 
     _org_queue.put(
         {
-            "app": app,
-            "enqueued_at": time.time(),
+            'app': app,
+            'enqueued_at': time.time(),
         }
     )
     _ensure_worker_running()
@@ -756,10 +723,10 @@ def _ensure_worker_running():
             _org_worker = threading.Thread(
                 target=_organization_worker,
                 daemon=True,
-                name="knowledge-organizer",
+                name='knowledge-organizer',
             )
             _org_worker.start()
-            log.info("Knowledge organizer worker started")
+            log.info('Knowledge organizer worker started')
 
 
 def _organization_worker():
@@ -767,18 +734,18 @@ def _organization_worker():
     Background worker that processes organization jobs from the queue.
     Runs as a daemon thread - won't block server shutdown.
     """
-    log.info("Knowledge organizer worker running")
+    log.info('Knowledge organizer worker running')
     while True:
         try:
             job = _org_queue.get(timeout=60)
         except queue.Empty:
-            log.info("Knowledge organizer worker idle, exiting")
+            log.info('Knowledge organizer worker idle, exiting')
             return
 
         try:
-            _organize_inbox(app=job["app"])
+            _organize_inbox(app=job['app'])
         except Exception as e:
-            log.error(f"Knowledge organizer job failed: {e}")
+            log.error(f'Knowledge organizer job failed: {e}')
         finally:
             _org_queue.task_done()
 
@@ -827,34 +794,31 @@ def _organize_inbox(
       - RAG_KNOWLEDGE_EXPORT_DIR
       - RAG_KNOWLEDGE_ORGANIZER_MODEL
     """
-    config = getattr(getattr(app, "state", None), "config", None)
+    config = getattr(getattr(app, 'state', None), 'config', None)
     if config is None:
-        raise RuntimeError("app.state.config is not available")
+        raise RuntimeError('app.state.config is not available')
 
-    export_dir = getattr(config, "RAG_KNOWLEDGE_EXPORT_DIR", "") or ""
+    export_dir = getattr(config, 'RAG_KNOWLEDGE_EXPORT_DIR', '') or ''
     if not export_dir:
-        log.warning("Knowledge organizer: RAG_KNOWLEDGE_EXPORT_DIR is not configured, skipping")
+        log.warning('Knowledge organizer: RAG_KNOWLEDGE_EXPORT_DIR is not configured, skipping')
         return
 
-    model = getattr(config, "RAG_KNOWLEDGE_ORGANIZER_MODEL", "") or ""
+    model = getattr(config, 'RAG_KNOWLEDGE_ORGANIZER_MODEL', '') or ''
     if not model:
-        log.warning("Knowledge organizer: RAG_KNOWLEDGE_ORGANIZER_MODEL is not configured, skipping")
+        log.warning('Knowledge organizer: RAG_KNOWLEDGE_ORGANIZER_MODEL is not configured, skipping')
         return
 
-    inbox_dir = os.path.join(export_dir, "inbox")
+    inbox_dir = os.path.join(export_dir, 'inbox')
     if not os.path.isdir(inbox_dir):
         return
 
     documents = _collect_inbox_documents(inbox_dir)
     if not documents:
-        log.info("Knowledge organizer: inbox is empty, nothing to organize")
+        log.info('Knowledge organizer: inbox is empty, nothing to organize')
         return
 
-    file_list = ", ".join(document["base_name"] for document in documents)
-    log.info(
-        "Knowledge organizer: requesting destination plan for "
-        f"{len(documents)} document(s): {file_list}"
-    )
+    file_list = ', '.join(document['base_name'] for document in documents)
+    log.info(f'Knowledge organizer: requesting destination plan for {len(documents)} document(s): {file_list}')
 
     try:
         while documents:
@@ -872,28 +836,22 @@ def _organize_inbox(
 
             moved_items = []
             for item in move_plan:
-                targets = [
-                    target
-                    for target in (item["md_target"], item["index_target"])
-                    if target
-                ]
+                targets = [target for target in (item['md_target'], item['index_target']) if target]
                 if not targets:
                     continue
 
                 targets[0].parent.mkdir(parents=True, exist_ok=True)
-                if item["md_source"] and item["md_target"]:
-                    item["md_source"].rename(item["md_target"])
-                if item["index_source"] and item["index_target"]:
-                    item["index_source"].rename(item["index_target"])
+                if item['md_source'] and item['md_target']:
+                    item['md_source'].rename(item['md_target'])
+                if item['index_source'] and item['index_target']:
+                    item['index_source'].rename(item['index_target'])
 
                 moved_items.append(item)
-                log.info(
-                    f"Knowledge organizer: moved {item['doc_id']} to {item['destination']}"
-                )
+                log.info(f'Knowledge organizer: moved {item["doc_id"]} to {item["destination"]}')
 
             _write_catalog(export_dir, moved_items)
             documents = _collect_inbox_documents(inbox_dir)
 
-        log.info("Knowledge organizer: organization plan applied successfully")
+        log.info('Knowledge organizer: organization plan applied successfully')
     except Exception as e:
-        log.error(f"Knowledge organizer: unexpected error: {e}")
+        log.error(f'Knowledge organizer: unexpected error: {e}')

@@ -131,6 +131,7 @@ def process_uploaded_file(
                         file_id=file_item.id,
                         file_path=file_path,
                         content_type=content_type,
+                        user=user,
                     )
                 elif (not content_type.startswith(('image/', 'video/'))) or (
                     request.app.state.config.CONTENT_EXTRACTION_ENGINE == 'external'
