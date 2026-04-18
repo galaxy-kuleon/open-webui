@@ -1,128 +1,117 @@
-import json
+import asyncio
 import logging
-import mimetypes
 import os
 import shutil
-import asyncio
-
-import re
 import uuid
-from datetime import datetime
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence, Union
 
+import tiktoken
 from fastapi import (
+    APIRouter,
     Depends,
-    FastAPI,
-    Query,
-    File,
-    Form,
     HTTPException,
-    UploadFile,
+    Query,
     Request,
     status,
-    APIRouter,
 )
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
-import tiktoken
-
-
+from langchain_core.documents import Document
 from langchain_text_splitters import (
+    MarkdownHeaderTextSplitter,
     RecursiveCharacterTextSplitter,
     TokenTextSplitter,
-    MarkdownHeaderTextSplitter,
 )
-from langchain_core.documents import Document
-
-from open_webui.models.files import FileModel, FileUpdateForm, Files
-from open_webui.utils.access_control.files import has_access_to_file
-from open_webui.models.knowledge import Knowledges
-from open_webui.storage.provider import Storage
-from open_webui.internal.db import get_session, get_db
-from sqlalchemy.orm import Session
-
-
-from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
-
-# Document loaders
-from open_webui.retrieval.loaders.main import Loader
-from open_webui.retrieval.loaders.youtube import YoutubeLoader
-
-# Web search engines
-from open_webui.retrieval.web.main import SearchResult
-from open_webui.retrieval.web.utils import get_web_loader
-from open_webui.retrieval.web.ollama import search_ollama_cloud
-from open_webui.retrieval.web.perplexity_search import search_perplexity_search
-from open_webui.retrieval.web.brave import search_brave
-from open_webui.retrieval.web.kagi import search_kagi
-from open_webui.retrieval.web.mojeek import search_mojeek
-from open_webui.retrieval.web.bocha import search_bocha
-from open_webui.retrieval.web.duckduckgo import search_duckduckgo
-from open_webui.retrieval.web.google_pse import search_google_pse
-from open_webui.retrieval.web.jina_search import search_jina
-from open_webui.retrieval.web.searchapi import search_searchapi
-from open_webui.retrieval.web.serpapi import search_serpapi
-from open_webui.retrieval.web.searxng import search_searxng
-from open_webui.retrieval.web.yacy import search_yacy
-from open_webui.retrieval.web.serper import search_serper
-from open_webui.retrieval.web.serply import search_serply
-from open_webui.retrieval.web.serpstack import search_serpstack
-from open_webui.retrieval.web.tavily import search_tavily
-from open_webui.retrieval.web.bing import search_bing
-from open_webui.retrieval.web.azure import search_azure
-from open_webui.retrieval.web.exa import search_exa
-from open_webui.retrieval.web.perplexity import search_perplexity
-from open_webui.retrieval.web.sougou import search_sougou
-from open_webui.retrieval.web.firecrawl import search_firecrawl
-from open_webui.retrieval.web.external import search_external
-from open_webui.retrieval.web.yandex import search_yandex
-from open_webui.retrieval.web.ydc import search_youcom
-
-from open_webui.retrieval.utils import (
-    get_content_from_url,
-    get_embedding_function,
-    get_reranking_function,
-    get_model_path,
-    query_collection,
-    query_collection_with_hybrid_search,
-    query_doc,
-    query_doc_with_hybrid_search,
-)
-from open_webui.retrieval.vector.utils import filter_metadata
-from open_webui.utils.misc import (
-    calculate_sha256_string,
-    sanitize_text_for_db,
-)
-from open_webui.utils.auth import get_admin_user, get_verified_user
-from open_webui.utils.access_control import has_permission
-
 from open_webui.config import (
+    DEFAULT_LOCALE,
     ENV,
+    RAG_EMBEDDING_CONTENT_PREFIX,
     RAG_EMBEDDING_MODEL_AUTO_UPDATE,
     RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
+    RAG_EMBEDDING_QUERY_PREFIX,
     RAG_RERANKING_MODEL_AUTO_UPDATE,
     RAG_RERANKING_MODEL_TRUST_REMOTE_CODE,
     UPLOAD_DIR,
-    DEFAULT_LOCALE,
-    RAG_EMBEDDING_CONTENT_PREFIX,
-    RAG_EMBEDDING_QUERY_PREFIX,
 )
+from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import (
     DEVICE_TYPE,
     DOCKER,
     RAG_EMBEDDING_TIMEOUT,
     SENTENCE_TRANSFORMERS_BACKEND,
-    SENTENCE_TRANSFORMERS_MODEL_KWARGS,
     SENTENCE_TRANSFORMERS_CROSS_ENCODER_BACKEND,
     SENTENCE_TRANSFORMERS_CROSS_ENCODER_MODEL_KWARGS,
     SENTENCE_TRANSFORMERS_CROSS_ENCODER_SIGMOID_ACTIVATION_FUNCTION,
+    SENTENCE_TRANSFORMERS_MODEL_KWARGS,
 )
+from open_webui.internal.db import get_db, get_session
+from open_webui.models.files import FileModel, Files, FileUpdateForm
+from open_webui.models.knowledge import Knowledges
 
-from open_webui.constants import ERROR_MESSAGES
+# Document loaders
+from open_webui.retrieval.loaders.main import Loader
+from open_webui.retrieval.utils import (
+    get_content_from_url,
+    get_embedding_function,
+    get_model_path,
+    get_reranking_function,
+    query_collection,
+    query_collection_with_hybrid_search,
+    query_doc,
+    query_doc_with_hybrid_search,
+)
+from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
+from open_webui.retrieval.vector.utils import filter_metadata
+from open_webui.retrieval.web.azure import search_azure
+from open_webui.retrieval.web.bing import search_bing
+from open_webui.retrieval.web.bocha import search_bocha
+from open_webui.retrieval.web.brave import search_brave
+from open_webui.retrieval.web.duckduckgo import search_duckduckgo
+from open_webui.retrieval.web.exa import search_exa
+from open_webui.retrieval.web.external import search_external
+from open_webui.retrieval.web.firecrawl import search_firecrawl
+from open_webui.retrieval.web.google_pse import search_google_pse
+from open_webui.retrieval.web.jina_search import search_jina
+from open_webui.retrieval.web.kagi import search_kagi
+
+# Web search engines
+from open_webui.retrieval.web.main import SearchResult
+from open_webui.retrieval.web.mojeek import search_mojeek
+from open_webui.retrieval.web.ollama import search_ollama_cloud
+from open_webui.retrieval.web.perplexity import search_perplexity
+from open_webui.retrieval.web.perplexity_search import search_perplexity_search
+from open_webui.retrieval.web.searchapi import search_searchapi
+from open_webui.retrieval.web.searxng import search_searxng
+from open_webui.retrieval.web.serpapi import search_serpapi
+from open_webui.retrieval.web.serper import search_serper
+from open_webui.retrieval.web.serply import search_serply
+from open_webui.retrieval.web.serpstack import search_serpstack
+from open_webui.retrieval.web.sougou import search_sougou
+from open_webui.retrieval.web.tavily import search_tavily
+from open_webui.retrieval.web.utils import get_web_loader
+from open_webui.retrieval.web.yacy import search_yacy
+from open_webui.retrieval.web.yandex import search_yandex
+from open_webui.retrieval.web.ydc import search_youcom
+from open_webui.storage.provider import Storage
+from open_webui.utils.access_control import has_permission
+from open_webui.utils.access_control.files import has_access_to_file
+from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.misc import (
+    calculate_sha256_string,
+    sanitize_text_for_db,
+)
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Document index dispatch timeout constants (F-11)
+# PER_CHUNK_TIMEOUT_SECONDS: wall-clock budget for one LLM round-trip per chunk.
+# MAX_TOTAL_TIMEOUT_SECONDS: hard ceiling for the entire multi-chunk index job.
+# total_timeout = min(chunk_count * PER_CHUNK_TIMEOUT_SECONDS, MAX_TOTAL_TIMEOUT_SECONDS)
+# ---------------------------------------------------------------------------
+PER_CHUNK_TIMEOUT_SECONDS = 120
+MAX_TOTAL_TIMEOUT_SECONDS = 1800
 
 ##########################################
 #
@@ -158,7 +147,7 @@ def get_ef(
 
 def get_rf(
     engine: str = '',
-    reranking_model: Optional[str] = None,
+    reranking_model: str | None = None,
     external_reranker_url: str = '',
     external_reranker_api_key: str = '',
     external_reranker_timeout: str = '',
@@ -245,7 +234,7 @@ router = APIRouter()
 
 
 class CollectionNameForm(BaseModel):
-    collection_name: Optional[str] = None
+    collection_name: str | None = None
 
 
 class ProcessUrlForm(CollectionNameForm):
@@ -253,7 +242,7 @@ class ProcessUrlForm(CollectionNameForm):
 
 
 class SearchForm(BaseModel):
-    queries: List[str]
+    queries: list[str]
 
 
 @router.get('/')
@@ -317,17 +306,17 @@ class AzureOpenAIConfigForm(BaseModel):
 
 
 class EmbeddingModelUpdateForm(BaseModel):
-    openai_config: Optional[OpenAIConfigForm] = None
-    ollama_config: Optional[OllamaConfigForm] = None
-    azure_openai_config: Optional[AzureOpenAIConfigForm] = None
+    openai_config: OpenAIConfigForm | None = None
+    ollama_config: OllamaConfigForm | None = None
+    azure_openai_config: AzureOpenAIConfigForm | None = None
     RAG_EMBEDDING_ENGINE: str
     RAG_EMBEDDING_MODEL: str
-    RAG_EMBEDDING_BATCH_SIZE: Optional[int] = 1
-    ENABLE_ASYNC_EMBEDDING: Optional[bool] = True
-    RAG_EMBEDDING_CONCURRENT_REQUESTS: Optional[int] = 0
-    RAG_EMBEDDING_QUERY_PREFIX: Optional[str] = None
-    RAG_EMBEDDING_CONTENT_PREFIX: Optional[str] = None
-    RAG_EMBEDDING_PREFIX_FIELD_NAME: Optional[str] = None
+    RAG_EMBEDDING_BATCH_SIZE: int | None = 1
+    ENABLE_ASYNC_EMBEDDING: bool | None = True
+    RAG_EMBEDDING_CONCURRENT_REQUESTS: int | None = 0
+    RAG_EMBEDDING_QUERY_PREFIX: str | None = None
+    RAG_EMBEDDING_CONTENT_PREFIX: str | None = None
+    RAG_EMBEDDING_PREFIX_FIELD_NAME: str | None = None
 
 
 def unload_embedding_model(request: Request):
@@ -367,9 +356,13 @@ async def update_embedding_config(request: Request, form_data: EmbeddingModelUpd
 
         # Sync PersistentConfig values for utils.py access
         from open_webui.config import (
-            RAG_EMBEDDING_QUERY_PREFIX as _QUERY_PREFIX_CONFIG,
             RAG_EMBEDDING_CONTENT_PREFIX as _CONTENT_PREFIX_CONFIG,
+        )
+        from open_webui.config import (
             RAG_EMBEDDING_PREFIX_FIELD_NAME as _PREFIX_FIELD_CONFIG,
+        )
+        from open_webui.config import (
+            RAG_EMBEDDING_QUERY_PREFIX as _QUERY_PREFIX_CONFIG,
         )
 
         if form_data.RAG_EMBEDDING_QUERY_PREFIX is not None:
@@ -627,174 +620,174 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
 
 
 class WebConfig(BaseModel):
-    ENABLE_WEB_SEARCH: Optional[bool] = None
-    WEB_SEARCH_ENGINE: Optional[str] = None
-    WEB_SEARCH_TRUST_ENV: Optional[bool] = None
-    WEB_SEARCH_RESULT_COUNT: Optional[int] = None
-    WEB_SEARCH_CONCURRENT_REQUESTS: Optional[int] = None
-    WEB_FETCH_MAX_CONTENT_LENGTH: Optional[int] = None
-    WEB_LOADER_CONCURRENT_REQUESTS: Optional[int] = None
-    WEB_SEARCH_DOMAIN_FILTER_LIST: Optional[List[str]] = []
-    BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
-    BYPASS_WEB_SEARCH_WEB_LOADER: Optional[bool] = None
-    OLLAMA_CLOUD_WEB_SEARCH_API_KEY: Optional[str] = None
-    SEARXNG_QUERY_URL: Optional[str] = None
-    SEARXNG_LANGUAGE: Optional[str] = None
-    YACY_QUERY_URL: Optional[str] = None
-    YACY_USERNAME: Optional[str] = None
-    YACY_PASSWORD: Optional[str] = None
-    GOOGLE_PSE_API_KEY: Optional[str] = None
-    GOOGLE_PSE_ENGINE_ID: Optional[str] = None
-    BRAVE_SEARCH_API_KEY: Optional[str] = None
-    KAGI_SEARCH_API_KEY: Optional[str] = None
-    MOJEEK_SEARCH_API_KEY: Optional[str] = None
-    BOCHA_SEARCH_API_KEY: Optional[str] = None
-    SERPSTACK_API_KEY: Optional[str] = None
-    SERPSTACK_HTTPS: Optional[bool] = None
-    SERPER_API_KEY: Optional[str] = None
-    SERPLY_API_KEY: Optional[str] = None
-    DDGS_BACKEND: Optional[str] = None
-    TAVILY_API_KEY: Optional[str] = None
-    SEARCHAPI_API_KEY: Optional[str] = None
-    SEARCHAPI_ENGINE: Optional[str] = None
-    SERPAPI_API_KEY: Optional[str] = None
-    SERPAPI_ENGINE: Optional[str] = None
-    JINA_API_KEY: Optional[str] = None
-    JINA_API_BASE_URL: Optional[str] = None
-    BING_SEARCH_V7_ENDPOINT: Optional[str] = None
-    BING_SEARCH_V7_SUBSCRIPTION_KEY: Optional[str] = None
-    EXA_API_KEY: Optional[str] = None
-    PERPLEXITY_API_KEY: Optional[str] = None
-    PERPLEXITY_MODEL: Optional[str] = None
-    PERPLEXITY_SEARCH_CONTEXT_USAGE: Optional[str] = None
-    PERPLEXITY_SEARCH_API_URL: Optional[str] = None
-    SOUGOU_API_SID: Optional[str] = None
-    SOUGOU_API_SK: Optional[str] = None
-    WEB_LOADER_ENGINE: Optional[str] = None
-    WEB_LOADER_TIMEOUT: Optional[str] = None
-    ENABLE_WEB_LOADER_SSL_VERIFICATION: Optional[bool] = None
-    PLAYWRIGHT_WS_URL: Optional[str] = None
-    PLAYWRIGHT_TIMEOUT: Optional[int] = None
-    FIRECRAWL_API_KEY: Optional[str] = None
-    FIRECRAWL_API_BASE_URL: Optional[str] = None
-    FIRECRAWL_TIMEOUT: Optional[str] = None
-    TAVILY_EXTRACT_DEPTH: Optional[str] = None
-    EXTERNAL_WEB_SEARCH_URL: Optional[str] = None
-    EXTERNAL_WEB_SEARCH_API_KEY: Optional[str] = None
-    EXTERNAL_WEB_LOADER_URL: Optional[str] = None
-    EXTERNAL_WEB_LOADER_API_KEY: Optional[str] = None
-    YOUTUBE_LOADER_LANGUAGE: Optional[List[str]] = None
-    YOUTUBE_LOADER_PROXY_URL: Optional[str] = None
-    YOUTUBE_LOADER_TRANSLATION: Optional[str] = None
-    YANDEX_WEB_SEARCH_URL: Optional[str] = None
-    YANDEX_WEB_SEARCH_API_KEY: Optional[str] = None
-    YANDEX_WEB_SEARCH_CONFIG: Optional[str] = None
-    YOUCOM_API_KEY: Optional[str] = None
+    ENABLE_WEB_SEARCH: bool | None = None
+    WEB_SEARCH_ENGINE: str | None = None
+    WEB_SEARCH_TRUST_ENV: bool | None = None
+    WEB_SEARCH_RESULT_COUNT: int | None = None
+    WEB_SEARCH_CONCURRENT_REQUESTS: int | None = None
+    WEB_FETCH_MAX_CONTENT_LENGTH: int | None = None
+    WEB_LOADER_CONCURRENT_REQUESTS: int | None = None
+    WEB_SEARCH_DOMAIN_FILTER_LIST: list[str] | None = []
+    BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL: bool | None = None
+    BYPASS_WEB_SEARCH_WEB_LOADER: bool | None = None
+    OLLAMA_CLOUD_WEB_SEARCH_API_KEY: str | None = None
+    SEARXNG_QUERY_URL: str | None = None
+    SEARXNG_LANGUAGE: str | None = None
+    YACY_QUERY_URL: str | None = None
+    YACY_USERNAME: str | None = None
+    YACY_PASSWORD: str | None = None
+    GOOGLE_PSE_API_KEY: str | None = None
+    GOOGLE_PSE_ENGINE_ID: str | None = None
+    BRAVE_SEARCH_API_KEY: str | None = None
+    KAGI_SEARCH_API_KEY: str | None = None
+    MOJEEK_SEARCH_API_KEY: str | None = None
+    BOCHA_SEARCH_API_KEY: str | None = None
+    SERPSTACK_API_KEY: str | None = None
+    SERPSTACK_HTTPS: bool | None = None
+    SERPER_API_KEY: str | None = None
+    SERPLY_API_KEY: str | None = None
+    DDGS_BACKEND: str | None = None
+    TAVILY_API_KEY: str | None = None
+    SEARCHAPI_API_KEY: str | None = None
+    SEARCHAPI_ENGINE: str | None = None
+    SERPAPI_API_KEY: str | None = None
+    SERPAPI_ENGINE: str | None = None
+    JINA_API_KEY: str | None = None
+    JINA_API_BASE_URL: str | None = None
+    BING_SEARCH_V7_ENDPOINT: str | None = None
+    BING_SEARCH_V7_SUBSCRIPTION_KEY: str | None = None
+    EXA_API_KEY: str | None = None
+    PERPLEXITY_API_KEY: str | None = None
+    PERPLEXITY_MODEL: str | None = None
+    PERPLEXITY_SEARCH_CONTEXT_USAGE: str | None = None
+    PERPLEXITY_SEARCH_API_URL: str | None = None
+    SOUGOU_API_SID: str | None = None
+    SOUGOU_API_SK: str | None = None
+    WEB_LOADER_ENGINE: str | None = None
+    WEB_LOADER_TIMEOUT: str | None = None
+    ENABLE_WEB_LOADER_SSL_VERIFICATION: bool | None = None
+    PLAYWRIGHT_WS_URL: str | None = None
+    PLAYWRIGHT_TIMEOUT: int | None = None
+    FIRECRAWL_API_KEY: str | None = None
+    FIRECRAWL_API_BASE_URL: str | None = None
+    FIRECRAWL_TIMEOUT: str | None = None
+    TAVILY_EXTRACT_DEPTH: str | None = None
+    EXTERNAL_WEB_SEARCH_URL: str | None = None
+    EXTERNAL_WEB_SEARCH_API_KEY: str | None = None
+    EXTERNAL_WEB_LOADER_URL: str | None = None
+    EXTERNAL_WEB_LOADER_API_KEY: str | None = None
+    YOUTUBE_LOADER_LANGUAGE: list[str] | None = None
+    YOUTUBE_LOADER_PROXY_URL: str | None = None
+    YOUTUBE_LOADER_TRANSLATION: str | None = None
+    YANDEX_WEB_SEARCH_URL: str | None = None
+    YANDEX_WEB_SEARCH_API_KEY: str | None = None
+    YANDEX_WEB_SEARCH_CONFIG: str | None = None
+    YOUCOM_API_KEY: str | None = None
 
 
 class ConfigForm(BaseModel):
     # RAG settings
-    RAG_TEMPLATE: Optional[str] = None
-    TOP_K: Optional[int] = None
-    BYPASS_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
-    RAG_FULL_CONTEXT: Optional[bool] = None
-    RAG_FULL_DOCUMENT_CONTEXT: Optional[bool] = None
-    RAG_FULL_DOCUMENT_MAX_TOKENS: Optional[int] = None
-    RAG_SUBCHAT_CONCURRENCY: Optional[int] = None
-    RAG_DOCUMENT_INDEX_GENERATION: Optional[bool] = None
-    RAG_DOCUMENT_INDEX_MODEL: Optional[str] = None
-    RAG_DOCUMENT_INDEX_TIMEOUT: Optional[int] = None
-    RAG_KNOWLEDGE_EXPORT_ENABLED: Optional[bool] = None
-    RAG_KNOWLEDGE_EXPORT_DIR: Optional[str] = None
-    RAG_RESEARCH_MODEL: Optional[str] = None
-    RAG_KNOWLEDGE_ORGANIZER_MODEL: Optional[str] = None
-    RAG_USER_COLLECTION_ENABLED: Optional[bool] = None
+    RAG_TEMPLATE: str | None = None
+    TOP_K: int | None = None
+    BYPASS_EMBEDDING_AND_RETRIEVAL: bool | None = None
+    RAG_FULL_CONTEXT: bool | None = None
+    RAG_FULL_DOCUMENT_CONTEXT: bool | None = None
+    RAG_FULL_DOCUMENT_MAX_TOKENS: int | None = None
+    RAG_SUBCHAT_CONCURRENCY: int | None = None
+    RAG_DOCUMENT_INDEX_GENERATION: bool | None = None
+    RAG_DOCUMENT_INDEX_MODEL: str | None = None
+    RAG_DOCUMENT_INDEX_TIMEOUT: int | None = None
+    RAG_KNOWLEDGE_EXPORT_ENABLED: bool | None = None
+    RAG_KNOWLEDGE_EXPORT_DIR: str | None = None
+    RAG_RESEARCH_MODEL: str | None = None
+    RAG_KNOWLEDGE_ORGANIZER_MODEL: str | None = None
+    RAG_USER_COLLECTION_ENABLED: bool | None = None
 
     # Hybrid search settings
-    ENABLE_RAG_HYBRID_SEARCH: Optional[bool] = None
-    ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS: Optional[bool] = None
-    TOP_K_RERANKER: Optional[int] = None
-    RELEVANCE_THRESHOLD: Optional[float] = None
-    HYBRID_BM25_WEIGHT: Optional[float] = None
+    ENABLE_RAG_HYBRID_SEARCH: bool | None = None
+    ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS: bool | None = None
+    TOP_K_RERANKER: int | None = None
+    RELEVANCE_THRESHOLD: float | None = None
+    HYBRID_BM25_WEIGHT: float | None = None
 
     # Content extraction settings
-    CONTENT_EXTRACTION_ENGINE: Optional[str] = None
-    PDF_EXTRACT_IMAGES: Optional[bool] = None
-    PDF_LOADER_MODE: Optional[str] = None
+    CONTENT_EXTRACTION_ENGINE: str | None = None
+    PDF_EXTRACT_IMAGES: bool | None = None
+    PDF_LOADER_MODE: str | None = None
 
-    DATALAB_MARKER_API_KEY: Optional[str] = None
-    DATALAB_MARKER_API_BASE_URL: Optional[str] = None
-    DATALAB_MARKER_ADDITIONAL_CONFIG: Optional[str] = None
-    DATALAB_MARKER_SKIP_CACHE: Optional[bool] = None
-    DATALAB_MARKER_FORCE_OCR: Optional[bool] = None
-    DATALAB_MARKER_PAGINATE: Optional[bool] = None
-    DATALAB_MARKER_STRIP_EXISTING_OCR: Optional[bool] = None
-    DATALAB_MARKER_DISABLE_IMAGE_EXTRACTION: Optional[bool] = None
-    DATALAB_MARKER_FORMAT_LINES: Optional[bool] = None
-    DATALAB_MARKER_USE_LLM: Optional[bool] = None
-    DATALAB_MARKER_OUTPUT_FORMAT: Optional[str] = None
+    DATALAB_MARKER_API_KEY: str | None = None
+    DATALAB_MARKER_API_BASE_URL: str | None = None
+    DATALAB_MARKER_ADDITIONAL_CONFIG: str | None = None
+    DATALAB_MARKER_SKIP_CACHE: bool | None = None
+    DATALAB_MARKER_FORCE_OCR: bool | None = None
+    DATALAB_MARKER_PAGINATE: bool | None = None
+    DATALAB_MARKER_STRIP_EXISTING_OCR: bool | None = None
+    DATALAB_MARKER_DISABLE_IMAGE_EXTRACTION: bool | None = None
+    DATALAB_MARKER_FORMAT_LINES: bool | None = None
+    DATALAB_MARKER_USE_LLM: bool | None = None
+    DATALAB_MARKER_OUTPUT_FORMAT: str | None = None
 
-    EXTERNAL_DOCUMENT_LOADER_URL: Optional[str] = None
-    EXTERNAL_DOCUMENT_LOADER_API_KEY: Optional[str] = None
+    EXTERNAL_DOCUMENT_LOADER_URL: str | None = None
+    EXTERNAL_DOCUMENT_LOADER_API_KEY: str | None = None
 
-    TIKA_SERVER_URL: Optional[str] = None
-    DOCLING_SERVER_URL: Optional[str] = None
-    DOCLING_API_KEY: Optional[str] = None
-    DOCLING_PARAMS: Optional[dict] = None
-    DOCUMENT_INTELLIGENCE_ENDPOINT: Optional[str] = None
-    DOCUMENT_INTELLIGENCE_KEY: Optional[str] = None
-    DOCUMENT_INTELLIGENCE_MODEL: Optional[str] = None
-    MISTRAL_OCR_API_BASE_URL: Optional[str] = None
-    MISTRAL_OCR_API_KEY: Optional[str] = None
+    TIKA_SERVER_URL: str | None = None
+    DOCLING_SERVER_URL: str | None = None
+    DOCLING_API_KEY: str | None = None
+    DOCLING_PARAMS: dict | None = None
+    DOCUMENT_INTELLIGENCE_ENDPOINT: str | None = None
+    DOCUMENT_INTELLIGENCE_KEY: str | None = None
+    DOCUMENT_INTELLIGENCE_MODEL: str | None = None
+    MISTRAL_OCR_API_BASE_URL: str | None = None
+    MISTRAL_OCR_API_KEY: str | None = None
 
     # MinerU settings
-    MINERU_API_MODE: Optional[str] = None
-    MINERU_API_URL: Optional[str] = None
-    MINERU_API_KEY: Optional[str] = None
-    MINERU_API_TIMEOUT: Optional[str] = None
-    MINERU_PARAMS: Optional[dict] = None
+    MINERU_API_MODE: str | None = None
+    MINERU_API_URL: str | None = None
+    MINERU_API_KEY: str | None = None
+    MINERU_API_TIMEOUT: str | None = None
+    MINERU_PARAMS: dict | None = None
 
     # KG1 (GLM-OCR) settings
-    KG1_GLMOCR_PROJECT_DIR: Optional[str] = None
-    KG1_OLLAMA_HOST: Optional[str] = None
-    KG1_OLLAMA_PORT: Optional[str] = None
-    KG1_LAYOUT_DEVICE: Optional[str] = None
-    KG1_SOFFICE_PATH: Optional[str] = None
-    KG1_TIMEOUT: Optional[str] = None
-    KG1_GLM_OCR_CONCURRENCY: Optional[str] = None
+    KG1_GLMOCR_PROJECT_DIR: str | None = None
+    KG1_OLLAMA_HOST: str | None = None
+    KG1_OLLAMA_PORT: str | None = None
+    KG1_LAYOUT_DEVICE: str | None = None
+    KG1_SOFFICE_PATH: str | None = None
+    KG1_TIMEOUT: str | None = None
+    KG1_GLM_OCR_CONCURRENCY: str | None = None
 
     # Image Analysis Pipeline
-    IMAGE_ANALYSIS_ENABLED: Optional[bool] = None
-    IMAGE_ANALYSIS_CLASSIFIER_MODEL: Optional[str] = None
-    IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH: Optional[int] = None
+    IMAGE_ANALYSIS_ENABLED: bool | None = None
+    IMAGE_ANALYSIS_CLASSIFIER_MODEL: str | None = None
+    IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH: int | None = None
 
     # Reranking settings
-    RAG_RERANKING_MODEL: Optional[str] = None
-    RAG_RERANKING_ENGINE: Optional[str] = None
-    RAG_EXTERNAL_RERANKER_URL: Optional[str] = None
-    RAG_EXTERNAL_RERANKER_API_KEY: Optional[str] = None
-    RAG_EXTERNAL_RERANKER_TIMEOUT: Optional[str] = None
+    RAG_RERANKING_MODEL: str | None = None
+    RAG_RERANKING_ENGINE: str | None = None
+    RAG_EXTERNAL_RERANKER_URL: str | None = None
+    RAG_EXTERNAL_RERANKER_API_KEY: str | None = None
+    RAG_EXTERNAL_RERANKER_TIMEOUT: str | None = None
 
     # Chunking settings
-    TEXT_SPLITTER: Optional[str] = None
-    ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER: Optional[bool] = None
-    CHUNK_SIZE: Optional[int] = None
-    CHUNK_MIN_SIZE_TARGET: Optional[int] = None
-    CHUNK_OVERLAP: Optional[int] = None
+    TEXT_SPLITTER: str | None = None
+    ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER: bool | None = None
+    CHUNK_SIZE: int | None = None
+    CHUNK_MIN_SIZE_TARGET: int | None = None
+    CHUNK_OVERLAP: int | None = None
 
     # File upload settings
-    FILE_MAX_SIZE: Optional[Union[int, str]] = None
-    FILE_MAX_COUNT: Optional[Union[int, str]] = None
-    FILE_IMAGE_COMPRESSION_WIDTH: Optional[Union[int, str]] = None
-    FILE_IMAGE_COMPRESSION_HEIGHT: Optional[Union[int, str]] = None
-    ALLOWED_FILE_EXTENSIONS: Optional[List[str]] = None
+    FILE_MAX_SIZE: int | str | None = None
+    FILE_MAX_COUNT: int | str | None = None
+    FILE_IMAGE_COMPRESSION_WIDTH: int | str | None = None
+    FILE_IMAGE_COMPRESSION_HEIGHT: int | str | None = None
+    ALLOWED_FILE_EXTENSIONS: list[str] | None = None
 
     # Integration settings
-    ENABLE_GOOGLE_DRIVE_INTEGRATION: Optional[bool] = None
-    ENABLE_ONEDRIVE_INTEGRATION: Optional[bool] = None
+    ENABLE_GOOGLE_DRIVE_INTEGRATION: bool | None = None
+    ENABLE_ONEDRIVE_INTEGRATION: bool | None = None
 
     # Web search settings
-    web: Optional[WebConfig] = None
+    web: WebConfig | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -857,7 +850,6 @@ def _validate_admin_dir(value: str, *, allowed_roots: list[str], setting_name: s
     5. Resolved path must exist.
     6. Resolved path must be a directory.
     """
-    import stat as _stat
 
     # 1. Empty / whitespace
     if not value or not value.strip():
@@ -1641,7 +1633,7 @@ def save_docs_to_vector_db(
     request: Request,
     docs,
     collection_name,
-    metadata: Optional[dict] = None,
+    metadata: dict | None = None,
     overwrite: bool = False,
     split: bool = True,
     add: bool = False,
@@ -1850,8 +1842,8 @@ def save_docs_to_vector_db(
 
 class ProcessFileForm(BaseModel):
     file_id: str
-    content: Optional[str] = None
-    collection_name: Optional[str] = None
+    content: str | None = None
+    collection_name: str | None = None
 
 
 INDEX_CHUNK_SIZE = 128_000  # tokens per chunk for large document indexing
@@ -1884,9 +1876,22 @@ def _split_text_by_tokens(text: str, chunk_size: int, overlap: int) -> list[str]
 
 
 def _call_index_llm(
-    request, model_id: str, system_prompt: str, user_content: str, user, timeout: int = 600
-) -> Optional[str]:
-    """Call the LLM for index generation. Returns content string or None."""
+    request,
+    model_id: str,
+    system_prompt: str,
+    user_content: str,
+    user,
+    timeout: int = PER_CHUNK_TIMEOUT_SECONDS,
+) -> tuple[str | None, float]:
+    """
+    Call the LLM for index generation via run_coroutine_threadsafe.
+
+    Returns (content_string_or_None, wall_clock_seconds).
+    Cancels the future unconditionally in finally; logs DEBUG if cancel returns False
+    (benign — means the future already completed before cancel was called).
+    """
+    import time as _time
+
     from open_webui.utils.chat import generate_chat_completion
 
     payload = {
@@ -1903,18 +1908,25 @@ def _call_index_llm(
         generate_chat_completion(request, form_data=payload, user=user, bypass_filter=True),
         request.app.state.main_loop,
     )
-    response = future.result(timeout=timeout)  # 600s default to handle large docs
+    t0 = _time.monotonic()
+    try:
+        response = future.result(timeout=timeout)
+        elapsed = _time.monotonic() - t0
 
-    if hasattr(response, 'body'):
-        import json as _json
+        if hasattr(response, 'body'):
+            import json as _json
 
-        body = _json.loads(response.body.decode('utf-8'))
-        return body['choices'][0]['message']['content']
-    elif isinstance(response, dict) and 'choices' in response:
-        return response['choices'][0]['message']['content']
-    else:
-        log.warning('Document index generation: unexpected response format')
-        return None
+            body = _json.loads(response.body.decode('utf-8'))
+            return body['choices'][0]['message']['content'], elapsed
+        elif isinstance(response, dict) and 'choices' in response:
+            return response['choices'][0]['message']['content'], elapsed
+        else:
+            log.warning('Document index generation: unexpected response format')
+            return None, elapsed
+    finally:
+        cancelled = future.cancel()
+        if not cancelled:
+            log.debug('Document index LLM future: cancel() returned False (future already completed — benign)')
 
 
 def generate_document_index(
@@ -1922,18 +1934,39 @@ def generate_document_index(
     text_content: str,
     filename: str,
     user,
-) -> Optional[str]:
+    db=None,
+    event_emitter=None,
+) -> str | None:
     """
     Generate a structured index/summary of a document using AI.
     Called during document processing to create an additional embedding anchor.
 
+    DB session contract (F-11): if a ``db`` session is passed in, it is closed
+    BEFORE any ``run_coroutine_threadsafe`` dispatch to prevent connection-pool
+    exhaustion during long LLM calls.  If file metadata is needed after the
+    call, the caller must refetch by ID in a fresh session.
+
     For large documents (>128k tokens), splits into chunks with 32k overlap,
     generates index for each chunk sequentially, then merges all part indexes.
 
-    Returns the index text, or None on failure.
+    Timeout policy (F-11):
+        per_chunk = PER_CHUNK_TIMEOUT_SECONDS (120 s)
+        total     = min(chunk_count * PER_CHUNK_TIMEOUT_SECONDS, MAX_TOTAL_TIMEOUT_SECONDS)
+
+    Returns the index text (str), or None (sentinel) on failure.
+    Callers MUST handle None by skipping index storage.
+
+    On failure emits events via ``event_emitter`` (an async callable dispatched
+    via the main loop):
+        - ``document_index_dispatch_timeout``  on concurrent.futures.TimeoutError
+        - ``document_index_dispatch_failed``   on any other exception
     """
+    import time as _time
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
     from open_webui.config import DEFAULT_RAG_DOCUMENT_INDEX_PROMPT
 
+    # ── 0. Guard: early exits before any DB interaction ─────────────
     model_id = request.app.state.config.RAG_DOCUMENT_INDEX_MODEL
     if not model_id:
         models = request.app.state.MODELS or {}
@@ -1946,51 +1979,168 @@ def generate_document_index(
     if not text_content or not text_content.strip():
         return None
 
-    timeout = getattr(request.app.state.config, 'RAG_DOCUMENT_INDEX_TIMEOUT', 600) or 600
-
-    chunks = _split_text_by_tokens(text_content, INDEX_CHUNK_SIZE, INDEX_CHUNK_OVERLAP)
-
+    # ── 1. Compute chunks BEFORE releasing the DB session ───────────
+    db_closed = False  # Fix 3: guard against double-close across happy-path and finally
     try:
-        if len(chunks) == 1:
-            # Small document: single pass
-            return _call_index_llm(
-                request,
-                model_id,
-                DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
-                f'Document: {filename}\n\n{text_content}',
-                user,
-                timeout=timeout,
-            )
+        chunks = _split_text_by_tokens(text_content, INDEX_CHUNK_SIZE, INDEX_CHUNK_OVERLAP)
+        chunk_count = len(chunks)
+        per_chunk_timeout = PER_CHUNK_TIMEOUT_SECONDS
+        total_timeout = min(chunk_count * per_chunk_timeout, MAX_TOTAL_TIMEOUT_SECONDS)
 
-        # Large document: index each chunk sequentially, then merge
-        part_indexes = []
-        for i, chunk in enumerate(chunks):
-            part_label = f'Part {i + 1}/{len(chunks)}'
-            log.info(f'Document index: generating index for {filename} [{part_label}]')
-            part_index = _call_index_llm(
-                request,
-                model_id,
-                DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
-                f'Document: {filename} [{part_label}]\n\n{chunk}',
-                user,
-                timeout=timeout,
-            )
-            if part_index:
-                part_indexes.append(f'## {part_label}\n\n{part_index}')
-            else:
-                log.warning(f'Document index: {filename} [{part_label}] returned empty')
+        # ── 2. Release DB session BEFORE any executor dispatch ──────────
+        # This prevents connection-pool exhaustion during long LLM round-trips.
+        # Any file metadata needed post-call must be fetched in a fresh session.
+        if db is not None:
+            db.close()  # mutable state boundary: release before threading
+            db_closed = True
+            db = None
 
-        if not part_indexes:
-            log.error(f'Document index: all {len(chunks)} parts failed for {filename}')
+        # ── 3. WARN log dispatch configuration on entry ─────────────────
+        pool_type = type(request.app.state.main_loop).__name__
+        log.warning(
+            'Document index dispatch config: '
+            f'file={filename!r} pool={pool_type} chunk_count={chunk_count} '
+            f'per_chunk_timeout={per_chunk_timeout}s '
+            f'total_timeout={total_timeout}s'
+        )
+
+        t_job_start = _time.monotonic()
+        chunk_wall_times: list[float] = []
+
+        def _emit_event(event_dict: dict) -> None:
+            """Dispatch an async event via the main loop (fire-and-forget)."""
+            if event_emitter is None:
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    event_emitter(event_dict),
+                    request.app.state.main_loop,
+                )
+            except Exception as emit_err:
+                log.debug(f'Document index: event emit failed (non-fatal): {emit_err}')
+
+        try:
+            if chunk_count == 1:
+                # Small document: single pass
+                content, elapsed = _call_index_llm(
+                    request,
+                    model_id,
+                    DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
+                    f'Document: {filename}\n\n{text_content}',
+                    user,
+                    timeout=per_chunk_timeout,
+                )
+                chunk_wall_times.append(elapsed)
+                log.warning(f'Document index exit: file={filename!r} chunk_wall_times={chunk_wall_times}')
+                return content
+
+            # Large document: index each chunk sequentially, then merge
+            deadline = _time.monotonic() + total_timeout  # Fix 1: real deadline before loop
+            part_indexes = []
+            chunks_completed = 0
+            for i, chunk in enumerate(chunks):
+                # Fix 1: enforce total_timeout as hard deadline
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    elapsed = _time.monotonic() - (deadline - total_timeout)
+                    log.warning(
+                        f'Document index TOTAL_TIMEOUT exceeded: '
+                        f'{chunks_completed}/{chunk_count} chunks completed in {elapsed:.1f}s'
+                    )
+                    _emit_event(
+                        {
+                            'type': 'status',
+                            'data': {
+                                'action': 'document_index_dispatch_timeout',
+                                'description': 'Total timeout exceeded before all chunks processed',
+                                'done': True,
+                                'total_timeout': total_timeout,
+                                'elapsed': elapsed,
+                                'chunks_completed': chunks_completed,
+                                'chunks_total': chunk_count,
+                            },
+                        }
+                    )
+                    return None
+                effective_timeout = min(per_chunk_timeout, remaining)
+                part_label = f'Part {i + 1}/{chunk_count}'
+                log.info(f'Document index: generating index for {filename} [{part_label}]')
+                part_content, elapsed = _call_index_llm(
+                    request,
+                    model_id,
+                    DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
+                    f'Document: {filename} [{part_label}]\n\n{chunk}',
+                    user,
+                    timeout=effective_timeout,
+                )
+                chunk_wall_times.append(elapsed)
+                chunks_completed += 1
+                if part_content:
+                    part_indexes.append(f'## {part_label}\n\n{part_content}')
+                else:
+                    log.warning(f'Document index: {filename} [{part_label}] returned empty')
+
+            if not part_indexes:
+                log.error(f'Document index: all {chunk_count} parts failed for {filename}')
+                return None
+
+            merged = '\n\n---\n\n'.join(part_indexes)
+            log.warning(
+                f'Document index exit: file={filename!r} '
+                f'parts={len(part_indexes)}/{chunk_count} '
+                f'merged_chars={len(merged)} '
+                f'chunk_wall_times={chunk_wall_times}'
+            )
+            return merged
+
+        except FuturesTimeoutError:
+            elapsed = _time.monotonic() - t_job_start
+            log.error(
+                f'Document index dispatch timeout for {filename!r}: '
+                f'elapsed={elapsed:.1f}s chunk_count={chunk_count} '
+                f'total_timeout={total_timeout}s'
+            )
+            _emit_event(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'document_index_dispatch_timeout',
+                        'description': 'Document index LLM dispatch timed out',
+                        'done': True,
+                        'chunk_count': chunk_count,
+                        'elapsed': elapsed,
+                        'total_timeout': total_timeout,
+                    },
+                }
+            )
             return None
 
-        merged = '\n\n---\n\n'.join(part_indexes)
-        log.info(f'Document index: merged {len(part_indexes)}/{len(chunks)} parts ({len(merged)} chars) for {filename}')
-        return merged
+        except Exception as e:
+            elapsed = _time.monotonic() - t_job_start
+            log.error(
+                f'Document index generation failed for {filename!r}: '
+                f'{type(e).__name__}: {e or "(no message)"} '
+                f'elapsed={elapsed:.1f}s chunk_count={chunk_count}'
+            )
+            _emit_event(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'document_index_dispatch_failed',
+                        'description': 'Document index LLM dispatch failed',
+                        'done': True,
+                        'chunk_count': chunk_count,
+                        'elapsed': elapsed,
+                        'error': type(e).__name__,
+                    },
+                }
+            )
+            return None
 
-    except Exception as e:
-        log.error(f'Document index generation failed for {filename}: {type(e).__name__}: {e or "(no message)"}')
-        return None
+    finally:
+        # Fix 3: ensure db.close() fires on exception path if not yet closed
+        if db is not None and not db_closed:
+            db.close()
 
 
 @router.post('/process/file')
@@ -2330,8 +2480,8 @@ def process_file(
                         if request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED and export_dir:
                             try:
                                 from open_webui.utils.knowledge_export import (
-                                    export_document_files,
                                     enqueue_organization,
+                                    export_document_files,
                                 )
 
                                 export_document_files(
@@ -2386,7 +2536,7 @@ def process_file(
 class ProcessTextForm(BaseModel):
     name: str
     content: str
-    collection_name: Optional[str] = None
+    collection_name: str | None = None
 
 
 @router.post('/process/text')
@@ -2973,10 +3123,10 @@ def _validate_collection_access(collection_names: list[str], user) -> None:
 class QueryDocForm(BaseModel):
     collection_name: str
     query: str
-    k: Optional[int] = None
-    k_reranker: Optional[int] = None
-    r: Optional[float] = None
-    hybrid: Optional[bool] = None
+    k: int | None = None
+    k_reranker: int | None = None
+    r: float | None = None
+    hybrid: bool | None = None
 
 
 @router.post('/query/doc')
@@ -3038,12 +3188,12 @@ async def query_doc_handler(
 class QueryCollectionsForm(BaseModel):
     collection_names: list[str]
     query: str
-    k: Optional[int] = None
-    k_reranker: Optional[int] = None
-    r: Optional[float] = None
-    hybrid: Optional[bool] = None
-    hybrid_bm25_weight: Optional[float] = None
-    enable_enriched_texts: Optional[bool] = None
+    k: int | None = None
+    k_reranker: int | None = None
+    r: float | None = None
+    hybrid: bool | None = None
+    hybrid_bm25_weight: float | None = None
+    enable_enriched_texts: bool | None = None
 
 
 @router.post('/query/collection')
@@ -3172,7 +3322,7 @@ def reset_upload_dir(user=Depends(get_admin_user)) -> bool:
 if ENV == 'dev':
 
     @router.get('/ef/{text}')
-    async def get_embeddings(request: Request, text: Optional[str] = 'Hello World!'):
+    async def get_embeddings(request: Request, text: str | None = 'Hello World!'):
         return {
             'result': await request.app.state.EMBEDDING_FUNCTION(
                 text,
@@ -3182,19 +3332,19 @@ if ENV == 'dev':
 
 
 class BatchProcessFilesForm(BaseModel):
-    files: List[FileModel]
+    files: list[FileModel]
     collection_name: str
 
 
 class BatchProcessFilesResult(BaseModel):
     file_id: str
     status: str
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class BatchProcessFilesResponse(BaseModel):
-    results: List[BatchProcessFilesResult]
-    errors: List[BatchProcessFilesResult]
+    results: list[BatchProcessFilesResult]
+    errors: list[BatchProcessFilesResult]
 
 
 @router.post('/process/files/batch')
@@ -3214,12 +3364,12 @@ async def process_files_batch(
 
     collection_name = form_data.collection_name
 
-    file_results: List[BatchProcessFilesResult] = []
-    file_errors: List[BatchProcessFilesResult] = []
-    file_updates: List[FileUpdateForm] = []
+    file_results: list[BatchProcessFilesResult] = []
+    file_errors: list[BatchProcessFilesResult] = []
+    file_updates: list[FileUpdateForm] = []
 
     # Prepare all documents first
-    all_docs: List[Document] = []
+    all_docs: list[Document] = []
 
     for file in form_data.files:
         try:
@@ -3245,7 +3395,7 @@ async def process_files_batch(
                 continue
 
             text_content = file.data.get('content', '')
-            docs: List[Document] = [
+            docs: list[Document] = [
                 Document(
                     page_content=text_content.replace('<br/>', '\n'),
                     metadata={
