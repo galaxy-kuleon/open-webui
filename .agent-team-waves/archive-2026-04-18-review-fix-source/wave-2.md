@@ -186,6 +186,7 @@ None.
 None — wave closed clean.
 
 **Out-of-wave observations (not blockers, for user discretion):**
+
 - `src/lib/apis/retrieval/index.ts:194-200`: `EmbeddingModelUpdateForm` TS type missing 3 embedding prefix fields — pre-existing drift, no runtime impact (backend accepts partial payloads; `admin.ts` uses `Record<string, unknown>`). Candidate for a future `src/` cleanup wave.
 
 ---

@@ -1,53 +1,70 @@
-# Wave Decomposition — Hermes Port Follow-up
+# Wave Decomposition
 
-Total waves: 2
+Total waves: 5
 Mode: auto
 Max waves flag: none
-Source spec: `/Users/noelbao/.claude-kg/plans/dynamic-snacking-sprout.md`
-Base branch: `feat/v0.8.12-hermes-port`
-Prior /atw run archived at `./archive-2026-04-17-hermes-port-main/`
+Spec: `.agent-team-waves/fix-review-findings-spec.md`
+Decomposition heuristic: data-flow cut × blast-radius ascending
+Decomposed: 2026-04-18
 
-## Wave 1: Pipe cleanup + Connection-vs-pipe docstring clarification
+## Wave 1: dead code removal + admin UI gap
 
-- Data-flow segment: error-path (dead code + docs + regression test)
-- Blast radius: smallest-isolated (single pipe file + its tests)
-- Spec sections this wave receives:
-  - "Wave 1 — Pipe cleanup + docstring clarification" block (spec lines 19-33)
-  - Context gap #1 and #2 (spec lines 9-11)
-  - Forbidden list, Wave-1-specific constraints (spec lines 62-69)
-  - Verification gate for Wave 1 (spec line 86)
+- Data-flow segment: output (UI gap) + isolated-removal (dead code)
+- Blast radius: smallest-isolated
+- Spec sections this wave receives: F-1 (H-4), F-2 (H-6)
 - Planned status: pending
 - Deferred items assigned here: None
 
-### Wave 1 Turns
+Rationale: deleting `utils/research.py` before any later wave removes a phantom caller list that would otherwise complicate F-8's user-threading refactor. The single-Switch UI gap is the cheapest blocker in the run and opens the Playwright path used by later waves.
 
-| Turn | Primary Scope | Revisit | Lens |
-|------|---------------|---------|------|
-| T1 | Delete `reasoning_content` branch at `backend/open_webui/pipes/hermes_agent.py:212-220` + add regression test to `backend/open_webui/test/utils/test_hermes_pipe.py` asserting a chunk containing `reasoning_content` is yielded as `content` without triggering `thinking` status | — | — |
-| T2 | Add Connection-vs-pipe clarification to `pipe()` docstring at line 100: enumerate the 4 load-bearing pipe features (tool progress SSE translation, file-path injection, manifold prefix stripping, session header gate) | T1 | contract-alignment |
-| T3 | Full cross-validation: 18 tests pass, docstring coherent, no orphaned imports, no other call sites of deleted branch | T1, T2 | global-consistency |
+## Wave 2: entry-boundary hardening
 
-## Wave 2: Playwright smoke tests for Wave 1-3 UI features
-
-- Data-flow segment: output (end-to-end behavioural verification)
-- Blast radius: moderate (3 new spec files + helper + fixture)
-- Spec sections this wave receives:
-  - "Wave 2 — Playwright smoke tests" block (spec lines 35-50)
-  - Critical reuse points (spec lines 53-59)
-  - Forbidden list, Wave-2-specific constraints (spec lines 62-70)
-  - Risks #1-#4 (spec lines 73-80)
-  - Verification gate for Wave 2 (spec line 88)
+- Data-flow segment: entry / upload
+- Blast radius: small-bounded (one router + one config endpoint + one loader)
+- Spec sections this wave receives: F-3 (C-1), F-4 (C-4), F-5 (H-3)
 - Planned status: pending
 - Deferred items assigned here: None
 
-### Wave 2 Turns
+Rationale: all three fixes sit at the "user/admin → server" boundary and do not cross into middleware or LLM orchestration. Hardening entry before transform means the later waves operate on already-validated inputs.
 
-| Turn | Primary Scope | Revisit | Lens |
-|------|---------------|---------|------|
-| T1 | `e2e/tests/image-upload.spec.ts` four quadrants: (vision × enabled/disabled) × (non-vision × enabled/disabled). Plus helper `e2e/helpers/admin.ts` (admin login + RAG config toggle, env-var overrides for ADMIN_EMAIL / ADMIN_PASSWORD). Uses existing `auth.ts` + `chat.ts` helpers. | — | — |
-| T2 | `e2e/tests/skill-zip-import.spec.ts` with fixture `e2e/fixtures/test-skill.zip` (valid `SKILL.md`) + negative test (invalid ZIP missing `SKILL.md`). ZIP fixture must conform to `routers/skills.py:289-295` validator. | T1 | contract-alignment |
-| T3 | `e2e/tests/admin-rag-settings.spec.ts`: set all 10 new RAG controls to non-default values via UI, save, reload, assert preserved. Final gate: `bunx playwright test --config=e2e/playwright.config.ts --list` shows 3 new specs collected without parse errors. | T1, T2 | global-consistency |
+## Wave 3: skill execution wiring + prompt-injection hardening
+
+- Data-flow segment: transform (LLM-facing context assembly)
+- Blast radius: medium
+- Spec sections this wave receives: F-6 (C-2), F-7 (C-3)
+- Planned status: pending
+- Deferred items assigned here: None
+
+Rationale: both findings modify how user-controlled data reaches the LLM (tool registration + system-prompt injection). Grouped to keep the "what flows into the model" mental model coherent for the cross-validation turn.
+
+## Wave 4: identity threading + testable refactor
+
+- Data-flow segment: transform (credential propagation) + test-infrastructure
+- Blast radius: medium-cross-module
+- Spec sections this wave receives: F-8 (H-1), F-9 (H-5)
+- Planned status: pending
+- Deferred items assigned here: None
+
+Rationale: F-8 (user threading through `_async_llm_completion`) and F-9 (extract skip_rag block for testability) both touch `middleware.py` + adjacent utils, and F-9's extraction makes F-8's test easier to write. After W1 deletes `utils/research.py`, F-8 and F-9 have a strictly smaller surface. Grouped.
+
+## Wave 5: resource boundaries + silent-failure
+
+- Data-flow segment: error-path / resource-management
+- Blast radius: largest in this run (DB session lifecycle + cascade fallback)
+- Spec sections this wave receives: F-10 (H-2), F-11 (H-7)
+- Planned status: pending
+- Deferred items assigned here: None
+
+Rationale: both findings are about failure-handling correctness in already-shipped code paths and require independent behavioural verification. Placed last so all prior waves' entry/transform invariants are in place before adjusting how the system _degrades_ under stress.
 
 ## Deferred Queue
 
-- None
+- None (this is the initial decomposition; re-plan will record any carry items at wave close)
+
+## Global constraints carried into every wave
+
+- Scope contract: Critical + High from the 2026-04-18 forensic review ONLY. Medium/Low/Nit/Architecture findings from that review are NOT to be fixed in this run.
+- Private fork: never propose upstream PRs.
+- No destructive migrations.
+- Every behavioural claim must be exercised by at least one new or updated test.
+- Wave commits use HEREDOC format per `/atw` section 4.4 step 5. No amends. No force pushes.

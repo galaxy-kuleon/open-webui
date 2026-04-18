@@ -1,5 +1,5 @@
-import { type Page } from "@playwright/test";
-import { login } from "./auth";
+import { type Page } from '@playwright/test';
+import { login } from './auth';
 
 /**
  * Admin helpers for Open WebUI E2E tests.
@@ -16,8 +16,8 @@ import { login } from "./auth";
 
 /** Immutable admin credentials — read from process.env with documented fallbacks */
 export const ADMIN_CREDENTIALS = {
-  email: process.env.ADMIN_EMAIL ?? "admin@localhost",
-  password: process.env.ADMIN_PASSWORD ?? "admin",
+	email: process.env.ADMIN_EMAIL ?? 'admin@localhost',
+	password: process.env.ADMIN_PASSWORD ?? 'admin'
 } as const;
 
 /**
@@ -28,7 +28,7 @@ export const ADMIN_CREDENTIALS = {
  * @param page - Playwright Page instance
  */
 export async function loginAsAdmin(page: Page): Promise<void> {
-  await login(page, ADMIN_CREDENTIALS.email, ADMIN_CREDENTIALS.password);
+	await login(page, ADMIN_CREDENTIALS.email, ADMIN_CREDENTIALS.password);
 }
 
 /**
@@ -41,11 +41,11 @@ export async function loginAsAdmin(page: Page): Promise<void> {
  * @returns The full RAG config object from the server
  */
 export async function getRAGConfigViaAPI(page: Page): Promise<Record<string, unknown>> {
-  const token = await page.evaluate(() => localStorage.getItem("token"));
-  const response = await page.request.get("/api/v1/retrieval/config", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  return response.json();
+	const token = await page.evaluate(() => localStorage.getItem('token'));
+	const response = await page.request.get('/api/v1/retrieval/config', {
+		headers: { Authorization: `Bearer ${token}` }
+	});
+	return response.json();
 }
 
 /**
@@ -67,23 +67,21 @@ export async function getRAGConfigViaAPI(page: Page): Promise<Record<string, unk
  * @param payload - Partial config payload. Only provided fields are updated.
  */
 export async function updateRAGConfigViaAPI(
-  page: Page,
-  payload: Record<string, unknown>,
+	page: Page,
+	payload: Record<string, unknown>
 ): Promise<void> {
-  const token = await page.evaluate(() => localStorage.getItem("token"));
-  const response = await page.request.post("/api/v1/retrieval/config/update", {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    data: payload,
-  });
-  if (!response.ok()) {
-    const body = await response.text();
-    throw new Error(
-      `updateRAGConfigViaAPI failed: ${response.status()} — ${body.slice(0, 200)}`,
-    );
-  }
+	const token = await page.evaluate(() => localStorage.getItem('token'));
+	const response = await page.request.post('/api/v1/retrieval/config/update', {
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json'
+		},
+		data: payload
+	});
+	if (!response.ok()) {
+		const body = await response.text();
+		throw new Error(`updateRAGConfigViaAPI failed: ${response.status()} — ${body.slice(0, 200)}`);
+	}
 }
 
 /**
@@ -101,11 +99,11 @@ export async function updateRAGConfigViaAPI(
  * @returns The full embedding config object from the server
  */
 export async function getEmbeddingConfigViaAPI(page: Page): Promise<Record<string, unknown>> {
-  const token = await page.evaluate(() => localStorage.getItem("token"));
-  const response = await page.request.get("/api/v1/retrieval/embedding", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  return response.json();
+	const token = await page.evaluate(() => localStorage.getItem('token'));
+	const response = await page.request.get('/api/v1/retrieval/embedding', {
+		headers: { Authorization: `Bearer ${token}` }
+	});
+	return response.json();
 }
 
 /**
@@ -128,21 +126,21 @@ export async function getEmbeddingConfigViaAPI(page: Page): Promise<Record<strin
  * @param payload - Partial embedding config payload. Only provided fields are updated.
  */
 export async function updateEmbeddingConfigViaAPI(
-  page: Page,
-  payload: Record<string, unknown>,
+	page: Page,
+	payload: Record<string, unknown>
 ): Promise<void> {
-  const token = await page.evaluate(() => localStorage.getItem("token"));
-  const response = await page.request.post("/api/v1/retrieval/embedding/update", {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    data: payload,
-  });
-  if (!response.ok()) {
-    const body = await response.text();
-    throw new Error(
-      `updateEmbeddingConfigViaAPI failed: ${response.status()} — ${body.slice(0, 200)}`,
-    );
-  }
+	const token = await page.evaluate(() => localStorage.getItem('token'));
+	const response = await page.request.post('/api/v1/retrieval/embedding/update', {
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json'
+		},
+		data: payload
+	});
+	if (!response.ok()) {
+		const body = await response.text();
+		throw new Error(
+			`updateEmbeddingConfigViaAPI failed: ${response.status()} — ${body.slice(0, 200)}`
+		);
+	}
 }

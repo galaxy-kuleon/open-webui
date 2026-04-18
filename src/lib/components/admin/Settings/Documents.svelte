@@ -850,9 +850,7 @@
 									? $i18n.t(
 											'Uploaded images are automatically classified and analyzed (OCR or description) for use by all models including non-vision ones.'
 										)
-									: $i18n.t(
-											'Images are only usable by vision-capable models.'
-										)}
+									: $i18n.t('Images are only usable by vision-capable models.')}
 							>
 								<Switch bind:state={RAGConfig.IMAGE_ANALYSIS_ENABLED} />
 							</Tooltip>
@@ -1375,7 +1373,10 @@
 									{$i18n.t('User Collection Retrieval')}
 								</Tooltip>
 							</div>
-							<div class="flex items-center relative">
+							<div
+								class="flex items-center relative"
+								data-testid="rag-user-collection-enabled-switch"
+							>
 								<Switch bind:state={RAGConfig.RAG_USER_COLLECTION_ENABLED} />
 							</div>
 						</div>
@@ -1706,9 +1707,7 @@
 							<div class="  mb-2.5 flex w-full justify-between">
 								<div class="self-center text-xs font-medium">
 									<Tooltip
-										content={$i18n.t(
-											'Timeout for document index generation requests (seconds).'
-										)}
+										content={$i18n.t('Timeout for document index generation requests (seconds).')}
 										placement="top-start"
 									>
 										{$i18n.t('Document Index Timeout')}

@@ -18,13 +18,14 @@ From `/Users/noelbao/.claude-kg/plans/dynamic-snacking-sprout.md`:
 > **Blast radius:** moderate (3 new spec files, fixture assets)
 > **Data-flow segment:** output (end-to-end behavioral verification)
 >
-> | Turn | Primary Scope | Revisit | Lens | Notes |
-> |------|---------------|---------|------|-------|
-> | T1 | Create `e2e/tests/image-upload.spec.ts` covering four quadrants: (vision × enabled/disabled) × (non-vision × enabled/disabled). Admin toggle via API call before each test (`updateRAGConfig`). Use existing `auth.ts` + `chat.ts` helpers. Login with `admin@localhost` / `admin`. | — | — | Hardest test — requires admin config manipulation + model selection |
-> | T2 | Create `e2e/tests/skill-zip-import.spec.ts`: upload a fixture ZIP containing `SKILL.md`, assert list refresh + success toast. Fixture lives at `e2e/fixtures/test-skill.zip`. Negative test: invalid ZIP missing `SKILL.md` shows error toast. | T1 | contract-alignment | Revisit verifies test patterns are consistent between specs |
-> | T3 | Create `e2e/tests/admin-rag-settings.spec.ts`: set all 10 new controls to non-default values via UI, save, reload page, assert values preserved. Full cross-validation + running all 3 new specs via `bun run test:e2e`. | T1, T2 | global-consistency | |
+> | Turn | Primary Scope                                                                                                                                                                                                                                                                       | Revisit | Lens               | Notes                                                               |
+> | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------ | ------------------------------------------------------------------- |
+> | T1   | Create `e2e/tests/image-upload.spec.ts` covering four quadrants: (vision × enabled/disabled) × (non-vision × enabled/disabled). Admin toggle via API call before each test (`updateRAGConfig`). Use existing `auth.ts` + `chat.ts` helpers. Login with `admin@localhost` / `admin`. | —       | —                  | Hardest test — requires admin config manipulation + model selection |
+> | T2   | Create `e2e/tests/skill-zip-import.spec.ts`: upload a fixture ZIP containing `SKILL.md`, assert list refresh + success toast. Fixture lives at `e2e/fixtures/test-skill.zip`. Negative test: invalid ZIP missing `SKILL.md` shows error toast.                                      | T1      | contract-alignment | Revisit verifies test patterns are consistent between specs         |
+> | T3   | Create `e2e/tests/admin-rag-settings.spec.ts`: set all 10 new controls to non-default values via UI, save, reload page, assert values preserved. Full cross-validation + running all 3 new specs via `bun run test:e2e`.                                                            | T1, T2  | global-consistency |                                                                     |
 >
 > **Files modified:**
+>
 > - `e2e/tests/image-upload.spec.ts` (new, ~150 lines)
 > - `e2e/tests/skill-zip-import.spec.ts` (new, ~80 lines)
 > - `e2e/tests/admin-rag-settings.spec.ts` (new, ~120 lines)

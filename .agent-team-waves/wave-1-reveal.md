@@ -1,108 +1,134 @@
-# Wave 1 — Reveal Packet
+# Wave 1 - Reveal Packet
 
-**Wave Objective**: Remove dead `reasoning_content` branch from `hermes_agent.py`, add a regression test proving the chunk now passes through as plain content without emitting `thinking` status, and document the Connection-vs-pipe tradeoff in the `pipe()` docstring.
-**Data-flow segment**: error-path (dead-code removal + docs + regression test)
+**Wave Objective**: delete dead `utils/research.py` + its test replicas, and add the missing `RAG_USER_COLLECTION_ENABLED` Switch to the admin RAG settings UI.
+**Data-flow segment**: output (UI gap) + isolated-removal (dead code)
 **Blast radius**: smallest-isolated
-**Total waves**: 1 of 2
+**Total waves**: 1 of 5
 
-## Spec Slice (from qa-planner memo)
+## Spec Slice (from fix-review-findings-spec.md)
 
-Verbatim from `/Users/noelbao/.claude-kg/plans/dynamic-snacking-sprout.md`:
+---
 
-> **The gaps (relevant to Wave 1):**
->
-> 1. **Dead code** in `backend/open_webui/pipes/hermes_agent.py:212-220` — `reasoning_content` / `reasoning` extraction fires never against real Hermes (Hermes `/v1/chat/completions` does not emit these fields; confirmed in `../hermes-agent/gateway/platforms/api_server.py:840-970`). Leaving it invites confusion about what the pipe does.
->
-> 2. **Ambiguous docstring** — no guidance on Connection-vs-pipe tradeoff. Users with no tool-progress / file-injection / manifold / session-header needs could use Hermes as a plain OpenAI Connection and skip the pipe entirely. The pipe docstring should say this.
+### F-1 (H-4) — Dead code: `utils/research.py` has zero production callers
 
-> ### Wave 1 — Pipe cleanup + docstring clarification
->
-> **Blast radius:** smallest-isolated (single file, ~15 lines)
-> **Data-flow segment:** error-path (test coverage + docs)
->
-> | Turn | Primary Scope | Revisit | Lens | Notes |
-> |------|---------------|---------|------|-------|
-> | T1 | Delete lines 212-220 in `hermes_agent.py` (reasoning branch). Add regression test to `test_hermes_pipe.py` asserting a chunk with `reasoning_content` is yielded as-is without triggering a `thinking` status event. | — | — | Safe deletion — `_emit_status` has 6 other call sites (start, complete, error ×4), not orphaned |
-> | T2 | Add Connection-vs-pipe clarification to `pipe()` docstring at line 100 (after the stateless-fallback line). Note the 4 pipe-only features (tool progress translation, file-path injection, manifold discovery, session header gate). | T1 | contract-alignment | Revisit ensures the deleted branch really isn't referenced anywhere |
-> | T3 | Full cross-validation: all 18 tests pass, docstring reads coherently, no orphaned imports. | T1, T2 | global-consistency | |
->
-> **Files modified:**
-> - `backend/open_webui/pipes/hermes_agent.py` (delete ~10 lines, docstring ~5 lines)
-> - `backend/open_webui/test/utils/test_hermes_pipe.py` (add 1 test, ~25 lines)
+**Severity**: High
+**Blast radius**: smallest-isolated (pure deletion)
+**Files in scope**:
+
+- `backend/open_webui/utils/research.py` (DELETE)
+- `backend/open_webui/test/utils/test_middleware_research.py` (DELETE)
+- `backend/open_webui/test/utils/test_research_command.py` (DELETE if exists)
+- `backend/open_webui/test/utils/test_research_*` (grep-find all, DELETE)
+- Any caller that imports from `utils.research` (search + remove)
+- `.agent-team-waves/archive-2026-04-17-hermes-port-main/` references: do NOT touch (historical record)
+
+**Observation from review**: `run_research` is imported only from test files that duplicate the intended dispatcher inline — no `middleware.py`, `main.py`, or router references it. 536 LOC of production code plus ~1300 LOC of replica-based tests with zero real coverage.
+
+**Why delete vs wire**: wiring it requires building a `/research` command dispatcher the review identified as missing. That is new feature work, not a review fix. Deletion is the correctness-preserving move.
+
+**Behavioural requirement**: after this finding is closed, `rg 'from open_webui.utils.research|from open_webui\.utils\.research|import .*research' backend/ src/` returns no matches in non-archive paths.
+
+**Acceptance criteria**:
+
+- `rg -l 'utils\.research|utils/research' backend/ src/` returns no files (archive excluded).
+- `uv run python -c "import open_webui.utils"` succeeds.
+- `uv run pytest backend/open_webui/test/` exit code 0 (deleted tests must not reappear as collection errors).
+- The deletion is a single logical commit-unit inside the wave (not spread across waves).
+
+**Non-deferrable**: yes. Leaving shipped-but-dead code in the tree is a future-maintenance trap and will confuse downstream findings (F-5 test refactors reference tests that must not exist by then).
+
+---
+
+### F-2 (H-6) — UI gap: `RAG_USER_COLLECTION_ENABLED` has no admin control
+
+**Severity**: High
+**Blast radius**: smallest-isolated (single Svelte component)
+**Files in scope**:
+
+- `src/lib/components/admin/Settings/Documents.svelte` (ADD one Switch control near existing RAG toggles)
+
+**Observation from review**: `backend/open_webui/routers/retrieval.py` exposes 11 user-facing fields in `get_rag_config`/`update_rag_config`, one of which — `RAG_USER_COLLECTION_ENABLED` — has no UI control despite being default-on and affecting per-user vector-collection behaviour.
+
+**Behavioural requirement**: admin can toggle per-user collection storage on/off from the Documents settings page, and the round-trip persists through `GET/POST /api/retrieval/config`.
+
+**Acceptance criteria**:
+
+- A labelled Switch exists in `Documents.svelte` with a stable test selector (e.g. `data-testid="rag-user-collection-enabled-switch"` or matching the existing convention for other switches in that file).
+- Toggling the Switch and saving issues the same `PUT /api/retrieval/config` shape with `RAG_USER_COLLECTION_ENABLED: <bool>` in the body.
+- The value is restored on page reload from `GET /api/retrieval/config`.
+- Either the existing `e2e/tests/admin-rag-settings.spec.ts` is extended to cover this control, or a new spec file exercises it end-to-end.
+
+**Non-deferrable**: yes (backend already exposes it; silent-default is a surprise vector for operators).
+
+---
 
 ## Deferred Items Assigned To This Wave
 
-None — first wave of this run.
+None.
 
 ## Constraints for This Wave
 
 - **Allowed files to modify**:
-  - `backend/open_webui/pipes/hermes_agent.py` (delete lines 212-220, edit docstring at line 94-101)
-  - `backend/open_webui/test/utils/test_hermes_pipe.py` (add one regression test)
-- **Forbidden files**: any `src/*` frontend file, any other backend file (routers, config, other pipes), `package.json`, `package-lock.json`
-- **Wave-specific forbidden changes**: do not touch valve definitions; do not refactor `_emit_status` or its call sites; do not change the mixed-SSE parser loop structure at lines 171-225
-- **Out-of-scope items (deferred to future waves)**: none — Wave 2 is Playwright smoke tests, unrelated to this wave's scope
+  - `backend/open_webui/utils/research.py` (DELETE ONLY)
+  - `backend/open_webui/test/utils/test_*research*.py` (DELETE ONLY — grep to find all; there should be 4)
+  - Any backend caller importing from `utils.research` (imports removal only)
+  - `src/lib/components/admin/Settings/Documents.svelte` (ADD Switch + binding + i18n key)
+  - Related i18n string files for the new label (only keys for the new Switch)
+  - `e2e/tests/admin-rag-settings.spec.ts` (EXTEND to cover the new Switch) — OR a new spec file if kind 1 judges it cleaner
+- **Forbidden files**:
+  - Everything under `.agent-team-waves/archive-*/` (historical, untouchable)
+  - Any file touched by F-3 through F-11 (see spec for list) — those are other waves' scope
+  - `backend/open_webui/utils/middleware.py` (touched by W3/W4; no edits here)
+  - `backend/open_webui/routers/skills.py` (touched by W2)
+  - `backend/open_webui/retrieval/loaders/kg1.py` (touched by W2)
+  - `backend/open_webui/routers/retrieval.py` (touched by W2 for F-5; if W1 needs to inspect it for F-2 UI contract, read-only)
+- **Out-of-scope items (deferred to future waves)**:
+  - F-3, F-4, F-5 → Wave 2
+  - F-6, F-7 → Wave 3
+  - F-8, F-9 → Wave 4
+  - F-10, F-11 → Wave 5
+  - Every Medium/Low/Nit/Test-gap/Architecture observation in the review (out of scope for this run entirely)
 
-## Handoff from Wave N-1
+## Handoff from Wave 0
 
-This is the first wave of the follow-up /atw run. The prior /atw run on the same branch closed COMPLETE on 2026-04-17 with 4 commits (`93fcc24` → `9d803e8`). That run's artefacts are archived at `./.agent-team-waves/archive-2026-04-17-hermes-port-main/`.
+This is the first wave. No prior wave context.
 
-Concrete code anchors relevant to this wave:
+Relevant baseline (from scoping review, not from a prior executed wave):
 
-- **Target dead code** — `backend/open_webui/pipes/hermes_agent.py:209-225`:
-  ```python
-  # Standard OpenAI chunk — yield as dict for process_line
-  try:
-      chunk = json.loads(data_str)
-      # Check for reasoning content and emit as thinking
-      delta = (chunk.get('choices') or [{}])[0].get('delta', {})
-      reasoning = delta.pop('reasoning_content', None) or delta.pop('reasoning', None)
-      if reasoning:
-          await self._emit_status(
-              __event_emitter__,
-              'thinking',
-              reasoning[:500],
-          )
-      yield chunk
-  except json.JSONDecodeError:
-      log.warning(f'Bad SSE JSON: {data_str}')
-  ```
-  After deletion, the `try` body should collapse to:
-  ```python
-  try:
-      chunk = json.loads(data_str)
-      yield chunk
-  except json.JSONDecodeError:
-      log.warning(f'Bad SSE JSON: {data_str}')
-  ```
-
-- **`pipe()` docstring** — `hermes_agent.py:94-101` currently reads:
-  ```
-  Forward chat to hermes and stream the response.
-
-  Yields OpenAI-format chunk dicts for content streaming.
-  Emits status events via __event_emitter__ for tool progress.
-  Falls back to stateless request-body history when no API key is
-  configured, because Hermes only accepts session continuation on
-  authenticated requests.
-  ```
-  T2 must extend this with a `Connection vs. pipe:` section explaining:
-  1. Hermes is OpenAI-compatible on `/v1/chat/completions` and `/v1/models`; users who don't need the 4 pipe-only features can configure Hermes as a plain OpenAI Connection and skip this pipe entirely.
-  2. The 4 pipe-only features: (a) `hermes.tool.progress` SSE event translation (Open WebUI's parser can't handle custom `event:` types), (b) uploaded file-path injection into system prompt (`_resolve_file_paths` + `_inject_file_context`), (c) manifold sub-model prefix stripping (`hermes_agent.profile` → `profile`), (d) auth-gated `X-Hermes-Session-Id` header (Hermes 403s if `API_SERVER_KEY` is missing and the header is sent).
-
-- **Existing test file** — `backend/open_webui/test/utils/test_hermes_pipe.py` (153 lines, 4 tests using `_FakeResponse`/`_FakeClient`/`_client_factory` fixtures at lines 9-62). The new regression test should follow the same pattern: feed a `_FakeResponse` with an SSE `data:` line containing a chunk whose `delta` has `reasoning_content`, collect both yielded chunks AND emitter events, assert the chunk is yielded as-is AND no `thinking` status is emitted.
-
-- **Cross-reference**: `_emit_status` at `hermes_agent.py:320+` is called from 6 other sites (start line 134, complete line 228, three error-path sites at lines 167, 233, 239, 245). Deletion of the `thinking` call does not orphan the method.
+- Branch `feat/v0.8.12-hermes-port` at commit `64574ab25` is the starting point.
+- Forensic review of 11 commits `9bd84258d..HEAD` produced the findings this run fixes.
+- Prior-run wave artefacts archived at `.agent-team-waves/archive-2026-04-18-review-fix-source/`.
 
 ## Success Criteria
 
-Every item below must be independently verifiable by kind 2:
+Each criterion must be independently testable by kind 2.
 
-1. Lines 213-220 of `hermes_agent.py` (the `delta = ... reasoning = ... if reasoning:` block plus the `_emit_status('thinking', ...)` call) are removed. The `try: chunk = json.loads(data_str); yield chunk` body remains functional.
-2. No other code path in `hermes_agent.py` references `reasoning_content`, `reasoning`, or emits a `thinking` status.
-3. A new regression test in `test_hermes_pipe.py` feeds a `data:` line containing `{"choices":[{"delta":{"reasoning_content":"thinking out loud","content":"hi"}}]}`, collects yielded chunks and emitter events, and asserts:
-   - the chunk is yielded intact (or at least without `reasoning_content` being interpreted as `thinking`)
-   - no emitter event has `data.sub_action == 'thinking'`
-4. The `pipe()` docstring at lines 94-101 is extended (T2) with concrete guidance on when a plain OpenAI Connection suffices vs. when the 4 pipe-only features require using the pipe. The 4 features must be named.
-5. After T3, running `env PYTHONPATH=backend uv run pytest backend/open_webui/test/utils/test_hermes_pipe.py backend/open_webui/test/utils/test_file_upload_image_analysis.py backend/open_webui/test/utils/test_builtin_pipes.py backend/open_webui/test/utils/test_hermes_pipes_manifold.py backend/open_webui/test/utils/test_hermes_tool_progress.py -v` shows **18 passed** (up from 17). No existing test regresses.
-6. No unused imports introduced; `log` still imported because `log.warning(...)` in the `except` block keeps using it.
+1. `rg -l 'utils\.research|utils/research' backend/ src/` returns zero paths outside `.agent-team-waves/archive-*/` and outside docs.
+2. `uv run python -c "import open_webui.utils"` exits 0.
+3. `uv run pytest backend/open_webui/test/` exits 0. No "module not found" collection errors related to the deleted research tests.
+4. Grep confirms `test_middleware_research.py` and the other `test_*research*.py` files are removed (count: 4, per memory and review; kind 1 MUST grep-find and confirm the actual count before deleting).
+5. `Documents.svelte` contains one new Switch control for `RAG_USER_COLLECTION_ENABLED` with:
+   - a human-readable label,
+   - a stable test selector,
+   - two-way binding to the settings model,
+   - placement consistent with other RAG toggles in the same component.
+6. `bun run check` exits 0.
+7. `bun run format` produces no diff (Prettier-clean).
+8. One of:
+   - `e2e/tests/admin-rag-settings.spec.ts` is extended with a test that toggles the new Switch, saves, reloads, and asserts persistence — and the extension passes locally via `bun run test:e2e` (or equivalent) OR
+   - a new spec file `e2e/tests/admin-rag-user-collection-switch.spec.ts` does the same.
+9. No file listed under "Forbidden files" is modified in this wave.
+10. No finding outside F-1 and F-2 is touched in this wave (enforced by the scope contract).
+
+## Notes for principal-engineer (kind 1)
+
+- F-1 is a pure deletion. Do NOT try to "preserve optionality" by commenting out imports or leaving behind skeleton files. Delete cleanly.
+- F-2: follow the existing Switch patterns in `Documents.svelte` (there are ~10 nearby). Match the existing i18n + binding convention, do not invent a new one.
+- Revisit is T1-only here, so the revisit scope does NOT apply to this turn. T2 and T3 will carry the revisit + cross-validation scopes per the T0 plan that kind 3 will issue.
+
+## Notes for evaluator (kind 2)
+
+- Independently grep for any `research` import — do not trust kind 1's claim.
+- Run the full backend test suite, not just the deleted area.
+- For F-2: use `playwright-cli` to visually confirm the Switch is rendered, clickable, and the saved value survives a page reload.
+- Do NOT open scope into Medium/Low findings from the review — this wave has a narrow contract.
