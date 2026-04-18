@@ -2,10 +2,11 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 
 from open_webui.models.groups import Groups
@@ -229,6 +230,71 @@ def _parse_skill_md_frontmatter(content: str) -> dict:
         return {}
 
 
+# ---------------------------------------------------------------------------
+# Zip-safety helpers
+# These are pure functions (no filesystem I/O) and can be unit-tested
+# in isolation without a running database or HTTP server.
+# ---------------------------------------------------------------------------
+
+# Unix file-type bits (S_IFMT nibble)
+_S_IFMT = 0o170000
+_S_IFLNK = 0o120000  # symbolic link
+
+
+def _is_unsafe_zip_member(info: zipfile.ZipInfo) -> tuple[bool, str]:
+    """Return (True, detail-string) if the zip entry must be rejected.
+
+    Checks performed (in order):
+    1. Symlink — entry is a Unix symlink (external_attr mode bits).
+    2. Hardlink — entry uses a non-standard mode sometimes set by archiving
+       tools to mark hardlinks (mode 0o010000 = FIFO on Unix, abused here).
+    3. Absolute path — POSIX-style (/etc/passwd) or Windows-style (C:/...).
+    4. Path traversal — any '..' component in the name.
+
+    The 'detail' string is safe to return to the client: it does NOT
+    include paths, temp directories, or internal state.
+    """
+    name = info.filename
+
+    # 1. Symlink detection via Unix mode bits in external_attr (high 16 bits)
+    unix_mode = (info.external_attr >> 16) & _S_IFMT
+    if unix_mode == _S_IFLNK:
+        return True, 'Symlinks not permitted'
+
+    # 2. Hardlink: mode 0o010000 (sometimes used by zip-creating tools for hardlinks)
+    if (info.external_attr >> 16) & _S_IFMT == 0o010000:
+        return True, 'Hardlinks not permitted'
+
+    # 3. Absolute path — check both POSIX and Windows interpretations
+    posix = PurePosixPath(name)
+    win = PureWindowsPath(name)
+    if posix.is_absolute() or win.is_absolute():
+        return True, 'Unsafe path in zip'
+
+    # 4. Path traversal — any '..' in any path component
+    if '..' in posix.parts or '..' in win.parts:
+        return True, 'Unsafe path in zip'
+
+    return False, ''
+
+
+def _assert_no_symlinks_in_tree(root: Path) -> None:
+    """Post-extraction defense: walk the extracted tree and raise if any
+    symlink survived extraction.  followlinks=False ensures we never follow
+    a symlink during the walk itself.
+
+    Raises HTTPException(400) — never leaks the filesystem path.
+    """
+    for dirpath, dirnames, filenames in os.walk(str(root), followlinks=False):
+        for name in filenames + dirnames:
+            full = Path(dirpath) / name
+            if full.is_symlink():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail='Symlinks not permitted',
+                )
+
+
 @router.post('/upload-zip', response_model=Optional[SkillResponse])
 async def upload_skill_zip(
     request: Request,
@@ -271,16 +337,38 @@ async def upload_skill_zip(
             )
 
         with zipfile.ZipFile(tmp_zip.name, 'r') as zf:
-            total_size = sum(info.file_size for info in zf.infolist())
+            members = zf.infolist()
+
+            # ── Pre-extract walk: validate every member BEFORE touching disk ──
+            # This is the primary defense against zip-slip, symlink escape,
+            # absolute-path traversal, and hardlink abuse.
+            for info in members:
+                unsafe, detail = _is_unsafe_zip_member(info)
+                if unsafe:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=detail,
+                    )
+
+            # Uncompressed-size cap (pre-existing guard — preserved unchanged)
+            total_size = sum(info.file_size for info in members)
             if total_size > MAX_ZIP_SIZE:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f'Uncompressed size too large ({total_size // (1024 * 1024)}MB). Maximum is {MAX_ZIP_SIZE // (1024 * 1024)}MB',
                 )
 
-        tmp_extract = tempfile.mkdtemp(prefix='skill-zip-')
-        with zipfile.ZipFile(tmp_zip.name, 'r') as zf:
-            zf.extractall(tmp_extract)
+            # Extract per-member (not extractall) so we control exactly which
+            # entries land on disk.  No extractall() call means no need for
+            # the filter='data' kwarg (which is unavailable in this build).
+            tmp_extract = tempfile.mkdtemp(prefix='skill-zip-')
+            for info in members:
+                zf.extract(info, tmp_extract)
+
+        # ── Post-extract walk: defense-in-depth symlink check ──────────────
+        # Catches any symlinks that survive extraction despite the pre-walk.
+        # followlinks=False in os.walk prevents following symlinks during traversal.
+        _assert_no_symlinks_in_tree(Path(tmp_extract))
 
         skill_md_path = None
         skill_root = None
@@ -324,7 +412,11 @@ async def upload_skill_zip(
 
         persistent_dir = Path.home() / '.claude' / 'skills' / skill_id
         persistent_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(str(skill_root), str(persistent_dir), dirs_exist_ok=True)
+        # symlinks=False: never copy symlinks as symlinks — dereference them.
+        # This is defense in depth: even if a symlink somehow survived the
+        # pre-walk and post-extract checks, it will not be copied to the
+        # persistent skill directory as a symlink.
+        shutil.copytree(str(skill_root), str(persistent_dir), symlinks=False, dirs_exist_ok=True)
 
         form_data = SkillForm(
             id=skill_id,
