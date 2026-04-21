@@ -593,3 +593,86 @@ def test_preamble_not_duplicated_when_already_present():
     # prevented the duplicate prepend.
     preamble_count = sum(1 for m in msgs if m.get('role') == 'system' and m.get('content') == _EXPECTED_PREAMBLE)
     assert preamble_count == 1, f'Preamble was duplicated: found {preamble_count} copies'
+
+
+# ---------------------------------------------------------------------------
+# Test: skill keyword intercept gates skip_rag injection
+# ---------------------------------------------------------------------------
+
+
+def test_skill_intercept_bypasses_skip_rag_injection():
+    """When an agent_skill name appears in the user message, the skip_rag
+    injection path is bypassed entirely — the LLM is short-circuited by the
+    caller so injecting docling MD would be wasted work.
+
+    Post-conditions:
+      1. No ``<<FILE file-... BEGIN>>`` marker in any message.
+      2. No ``_SKIP_RAG_PREAMBLE`` system message was prepended.
+      3. ``metadata['__agent_skill_result__']`` is populated (intercept fired).
+    """
+    file_db = {
+        'doc1': _file_stub('doc1', 'Secret content that must NOT leak into prompt.'),
+    }
+
+    # Model declares the skill_id so `available_skills` is populated.
+    model = _make_model(skip_rag=True)
+    model['info']['meta']['skillIds'] = ['sk1']
+
+    # Stub skill record (agent_skill type, name the user will mention).
+    skill_stub = SimpleNamespace(
+        id='sk1',
+        name='anything-to-docx-v2',
+        description='convert things to docx',
+        content='# skill body',
+        is_active=True,
+        meta=SimpleNamespace(
+            type='agent_skill',
+            work_dir=None,  # skip file-copy path
+            model_dump=lambda: {'type': 'agent_skill', 'work_dir': None},
+        ),
+    )
+
+    metadata = _make_metadata([])
+    form_data = _make_form_data(
+        messages=[{'role': 'user', 'content': 'please run anything-to-docx-v2 on this'}],
+        files=[{'id': 'doc1', 'name': 'doc.txt'}],
+        metadata=metadata,
+    )
+
+    user = _make_user()
+    request = MagicMock()
+    request.app.state.MODELS = {'test-model': model}
+    request.app.state.config.TOOL_SERVER_CONNECTIONS = []
+    request.state.direct = False
+
+    emitter, _captured = _make_spy_emitter()
+
+    extra = [
+        ('open_webui.models.skills.Skills.get_skills_by_user_id', MagicMock(return_value=[skill_stub])),
+        ('open_webui.models.skills.Skills.get_skill_by_id', MagicMock(return_value=skill_stub)),
+        ('open_webui.tools.builtin.run_agent_skill', AsyncMock(return_value='{"output": "ok"}')),
+        ('open_webui.utils.skill_params.extract_skill_params', AsyncMock(return_value={})),
+        ('open_webui.utils.skill_params.build_enriched_skill_prompt', MagicMock(side_effect=lambda *a, **kw: a[2])),
+    ]
+
+    patches = _all_patches(file_db, emitter, extra)
+    with _apply_patches(patches):
+        form_data_out, metadata_out, _events = asyncio.get_event_loop().run_until_complete(
+            process_chat_payload(request, form_data, user, metadata, model)
+        )
+
+    all_text = '\n'.join(
+        m.get('content', '') if isinstance(m.get('content'), str) else '' for m in form_data_out['messages']
+    )
+    assert '<<FILE file-doc1 BEGIN>>' not in all_text, (
+        'skip_rag delimiter was injected despite skill keyword match — gate failed'
+    )
+    assert 'Secret content that must NOT leak into prompt.' not in all_text, (
+        'skip_rag content was injected despite skill keyword match — gate failed'
+    )
+    assert _EXPECTED_PREAMBLE not in all_text, (
+        'skip_rag preamble was injected despite skill keyword match — gate failed'
+    )
+    assert metadata_out.get('__agent_skill_result__') == '{"output": "ok"}', (
+        'skill intercept did not fire — __agent_skill_result__ missing'
+    )

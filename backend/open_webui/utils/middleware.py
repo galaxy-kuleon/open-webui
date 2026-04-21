@@ -3354,10 +3354,32 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     _pre_rag_last_user_msg = get_last_user_message(form_data['messages'])
     _pre_rag_messages = [{k: v for k, v in m.items()} for m in form_data.get('messages', [])]
 
+    # ── Predict agent-skill keyword intercept ──
+    # The skill intercept below (search for "__agent_skill_result__") short-circuits
+    # the main LLM when the user's message names an active agent_skill.  In that case
+    # RAG / skip_rag injection is wasted work: the LLM never sees the context and the
+    # caller streams the skill output synthetically.
+    # We do the name match ONCE here and reuse the result as a gate for the RAG/skip_rag
+    # branches and as the match for the execution block.  This is prediction-based
+    # short-circuit, not post-hoc cleanup.
+    matched_skill = None
+    if available_skills and _pre_rag_last_user_msg:
+        _msg_lower = _pre_rag_last_user_msg.lower()
+        for _sk in available_skills:
+            _sk_meta_for_match = _sk.meta.model_dump() if hasattr(_sk.meta, 'model_dump') else _sk.meta
+            if (_sk_meta_for_match or {}).get('type') == 'agent_skill' and _sk.name.lower() in _msg_lower:
+                matched_skill = _sk
+                break
+
     # Check if file context extraction is enabled for this model (default True)
     file_context_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('file_context', True)
 
-    if file_context_enabled and not skip_rag:
+    if matched_skill:
+        log.info(
+            f'[skill-intercept] predicted {matched_skill.name!r} will fire — '
+            'bypassing RAG/skip_rag injection to avoid wasted work'
+        )
+    elif file_context_enabled and not skip_rag:
         try:
             form_data, flags = await chat_completion_files_handler(request, form_data, extra_params, user)
             sources.extend(flags.get('sources', []))
@@ -3468,129 +3490,119 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # If the user's raw message (pre-RAG) mentions an active agent skill by name,
     # short-circuit: copy files → extract params → run skill → store result in metadata.
     # The caller (main.py) checks metadata["__agent_skill_result__"] to bypass the LLM.
-    if available_skills and _pre_rag_last_user_msg:
-        _last_msg_lower = _pre_rag_last_user_msg.lower()
-        matched_skill = None
-        for _sk in available_skills:
-            _sk_meta = _sk.meta
+    # ``matched_skill`` was resolved above (pre-RAG gate) and reused here — no re-scan.
+    if matched_skill:
+        log.info(f"Skill keyword intercept: matched '{matched_skill.name}' in user message")
+        try:
+            _sk_meta = matched_skill.meta
             if hasattr(_sk_meta, 'model_dump'):
                 _sk_meta = _sk_meta.model_dump()
-            if (_sk_meta or {}).get('type') == 'agent_skill' and _sk.name.lower() in _last_msg_lower:
-                matched_skill = _sk
-                break
+            _sk_work_dir = (_sk_meta or {}).get('work_dir')
 
-        if matched_skill:
-            log.info(f"Skill keyword intercept: matched '{matched_skill.name}' in user message")
-            try:
-                _sk_meta = matched_skill.meta
-                if hasattr(_sk_meta, 'model_dump'):
-                    _sk_meta = _sk_meta.model_dump()
-                _sk_work_dir = (_sk_meta or {}).get('work_dir')
+            # Copy uploaded files to work_dir/input/ if applicable
+            _copied_files = []
+            if _sk_work_dir:
+                import os as _os
+                import shutil as _shutil
 
-                # Copy uploaded files to work_dir/input/ if applicable
-                _copied_files = []
-                if _sk_work_dir:
-                    import os as _os
-                    import shutil as _shutil
+                from open_webui.models.files import Files as _FilesModel
+                from open_webui.utils.sanitize import sanitize_filename as _skill_sanitize_fn
 
-                    from open_webui.models.files import Files as _FilesModel
-                    from open_webui.utils.sanitize import sanitize_filename as _skill_sanitize_fn
+                _SKILL_EXTS = frozenset(
+                    {
+                        '.pdf',
+                        '.doc',
+                        '.docx',
+                        '.md',
+                        '.txt',
+                        '.jpg',
+                        '.jpeg',
+                        '.png',
+                        '.bmp',
+                        '.gif',
+                        '.webp',
+                        '.tiff',
+                        '.pptx',
+                        '.xlsx',
+                    }
+                )
 
-                    _SKILL_EXTS = frozenset(
-                        {
-                            '.pdf',
-                            '.doc',
-                            '.docx',
-                            '.md',
-                            '.txt',
-                            '.jpg',
-                            '.jpeg',
-                            '.png',
-                            '.bmp',
-                            '.gif',
-                            '.webp',
-                            '.tiff',
-                            '.pptx',
-                            '.xlsx',
-                        }
-                    )
-
-                    _file_ids = set()
-                    for _msg in form_data.get('messages', []):
-                        for _fobj in _msg.get('files', []):
-                            if isinstance(_fobj, dict) and _fobj.get('id'):
-                                _file_ids.add(_fobj['id'])
-                    for _fobj in metadata.get('files', []):
+                _file_ids = set()
+                for _msg in form_data.get('messages', []):
+                    for _fobj in _msg.get('files', []):
                         if isinstance(_fobj, dict) and _fobj.get('id'):
                             _file_ids.add(_fobj['id'])
+                for _fobj in metadata.get('files', []):
+                    if isinstance(_fobj, dict) and _fobj.get('id'):
+                        _file_ids.add(_fobj['id'])
 
-                    if _file_ids:
-                        _input_dir = _os.path.join(_sk_work_dir, 'input')
-                        _os.makedirs(_input_dir, exist_ok=True)
-                        from open_webui.env import UPLOAD_DIR
+                if _file_ids:
+                    _input_dir = _os.path.join(_sk_work_dir, 'input')
+                    _os.makedirs(_input_dir, exist_ok=True)
+                    from open_webui.env import UPLOAD_DIR
 
-                        for _fid in _file_ids:
-                            try:
-                                _frec = _FilesModel.get_file_by_id(_fid)
-                                if not _frec:
-                                    continue
-                                _fname = _frec.filename or _frec.meta.get('name', '') if _frec.meta else ''
-                                _ext = _os.path.splitext(_fname)[1].lower()
-                                if _ext not in _SKILL_EXTS:
-                                    continue
-                                _src = _os.path.join(UPLOAD_DIR, _frec.path)
-                                if not _os.path.isfile(_src):
-                                    continue
-                                _safe_name = _skill_sanitize_fn(_fname)
+                    for _fid in _file_ids:
+                        try:
+                            _frec = _FilesModel.get_file_by_id(_fid)
+                            if not _frec:
+                                continue
+                            _fname = _frec.filename or _frec.meta.get('name', '') if _frec.meta else ''
+                            _ext = _os.path.splitext(_fname)[1].lower()
+                            if _ext not in _SKILL_EXTS:
+                                continue
+                            _src = _os.path.join(UPLOAD_DIR, _frec.path)
+                            if not _os.path.isfile(_src):
+                                continue
+                            _safe_name = _skill_sanitize_fn(_fname)
+                            _dest = _os.path.join(_input_dir, _safe_name)
+                            if _os.path.exists(_dest):
+                                _stem, _sext = _os.path.splitext(_safe_name)
+                                _safe_name = f'{_stem}-{_fid[:8]}{_sext}'
                                 _dest = _os.path.join(_input_dir, _safe_name)
-                                if _os.path.exists(_dest):
-                                    _stem, _sext = _os.path.splitext(_safe_name)
-                                    _safe_name = f'{_stem}-{_fid[:8]}{_sext}'
-                                    _dest = _os.path.join(_input_dir, _safe_name)
-                                _shutil.copy2(_src, _dest)
-                                _copied_files.append(_dest)
-                            except Exception as _e:
-                                log.warning(f'Failed to copy file {_fid} to skill input: {_e}')
+                            _shutil.copy2(_src, _dest)
+                            _copied_files.append(_dest)
+                        except Exception as _e:
+                            log.warning(f'Failed to copy file {_fid} to skill input: {_e}')
 
-                # Parameter extraction (only for translation-class skills)
-                _EXTRACTION_SKILL_PREFIXES = ('anything-to-docx',)
-                _extracted_params = {}
-                if any(matched_skill.name.lower().startswith(p) for p in _EXTRACTION_SKILL_PREFIXES):
-                    try:
-                        from open_webui.utils.skill_params import build_enriched_skill_prompt, extract_skill_params
+            # Parameter extraction (only for translation-class skills)
+            _EXTRACTION_SKILL_PREFIXES = ('anything-to-docx',)
+            _extracted_params = {}
+            if any(matched_skill.name.lower().startswith(p) for p in _EXTRACTION_SKILL_PREFIXES):
+                try:
+                    from open_webui.utils.skill_params import build_enriched_skill_prompt, extract_skill_params
 
-                        _extracted_params = await extract_skill_params(
-                            request.app, _pre_rag_messages, matched_skill.name, task_model_id
-                        )
-                    except Exception as _e:
-                        log.warning(f'Param extraction failed for {matched_skill.name}: {_e}')
+                    _extracted_params = await extract_skill_params(
+                        request.app, _pre_rag_messages, matched_skill.name, task_model_id
+                    )
+                except Exception as _e:
+                    log.warning(f'Param extraction failed for {matched_skill.name}: {_e}')
 
-                # Build enriched prompt
-                _skill_message = _pre_rag_last_user_msg
-                if _extracted_params or _copied_files:
-                    try:
-                        from open_webui.utils.skill_params import build_enriched_skill_prompt
+            # Build enriched prompt
+            _skill_message = _pre_rag_last_user_msg
+            if _extracted_params or _copied_files:
+                try:
+                    from open_webui.utils.skill_params import build_enriched_skill_prompt
 
-                        _skill_message = build_enriched_skill_prompt(
-                            _extracted_params, _copied_files, _pre_rag_last_user_msg, matched_skill.name
-                        )
-                    except Exception:
-                        pass  # Fall back to raw user message
+                    _skill_message = build_enriched_skill_prompt(
+                        _extracted_params, _copied_files, _pre_rag_last_user_msg, matched_skill.name
+                    )
+                except Exception:
+                    pass  # Fall back to raw user message
 
-                # Execute the agent skill
-                from open_webui.tools.builtin import run_agent_skill
+            # Execute the agent skill
+            from open_webui.tools.builtin import run_agent_skill
 
-                _skill_result = await run_agent_skill(
-                    skill_name=matched_skill.name,
-                    message=_skill_message,
-                    __request__=request,
-                    __user__=user.model_dump() if hasattr(user, 'model_dump') else {'id': user.id, 'role': user.role},
-                    __event_emitter__=event_emitter,
-                    __metadata__=metadata,
-                )
-                metadata['__agent_skill_result__'] = _skill_result
-            except Exception as _e:
-                log.exception(f'Agent skill intercept failed: {_e}')
+            _skill_result = await run_agent_skill(
+                skill_name=matched_skill.name,
+                message=_skill_message,
+                __request__=request,
+                __user__=user.model_dump() if hasattr(user, 'model_dump') else {'id': user.id, 'role': user.role},
+                __event_emitter__=event_emitter,
+                __metadata__=metadata,
+            )
+            metadata['__agent_skill_result__'] = _skill_result
+        except Exception as _e:
+            log.exception(f'Agent skill intercept failed: {_e}')
 
     # Strip empty text content blocks from multimodal messages
     # to prevent errors from providers like Gemini and Claude
