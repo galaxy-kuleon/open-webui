@@ -377,3 +377,40 @@ User confirmed on 2026-04-21:
 - Skill-intercept WIP committed as `b626baba4` before this run begins
 
 This memo is authoritative. If execution reality forces divergence, update this memo in-repo as the single source of truth before the next reveal packet.
+
+---
+
+## Amendments
+
+### 2026-04-21 — MVP provider switched from honcho to holographic
+
+**Decision** (Noel Bao, 2026-04-21 post-prereq exploration):
+
+Deferred honcho self-host to a later wave. W1 uses the hermes-bundled `holographic` provider (SQLite-backed, zero external LLM API keys, zero docker footprint) as the initial memory backend.
+
+**Rationale**:
+
+- Honcho requires three external LLM API keys (Gemini + Anthropic + OpenAI for embeddings) as mandatory startup env vars for its own dialectic / representation / embeddings engine.
+- Our constraint: minimise external dependencies during W1, keep the run reproducible on a laptop without account provisioning.
+- W1's core deliverable is identity propagation through the memory pipeline, not memory richness. Any `MemoryProvider` that accepts the `user_id` kwarg in `initialize()` validates that chain.
+
+**Technical consequence** — W1 acceptance criterion #3 (live smoke) is **split into two tiers**:
+
+- **Tier A — mandatory for W1 close**: assertion at the `memory_manager.initialize_all` kwargs layer. Verify that a request with `X-Hermes-User-Id: alice` results in `memory_manager.initialize_all` being called with `user_id="alice"` (or equivalent) in kwargs. Mockable; no live provider peer observation required.
+- **Tier B — deferred (non-blocker for W1, re-raised in the provider-upgrade wave)**: end-to-end isolation smoke (user A's colour does not leak to user B). This requires a provider that scopes per-user — holographic does NOT (single shared SQLite). Tier B is demonstrated when either (a) honcho self-host is stood up in a later wave, or (b) holographic is extended with per-user SQLite scoping in a dedicated wave.
+
+**Provider-upgrade wave** (new W5 candidate, inserted into decomposition if Tier B becomes load-bearing for W2's memory chip):
+
+- Option P1 — stand up honcho self-host with user-provided LLM keys
+- Option P2 — patch holographic to accept `user_id` kwarg in `initialize()` and namespace the SQLite DB per user (e.g. `memory_store_<user_id>.db` or a `user_id` column on the facts table)
+
+Decision between P1/P2 deferred until W2 reveals whether memory-chip UX requires honcho's dialectic reasoning depth (P1) or just basic per-user fact recall (P2).
+
+**State at amendment write time**:
+
+- `hermes memory status` reports: `Provider: holographic`, `Status: available ✓`, active.
+- hermes-agent fork: `https://github.com/galaxy-kuleon/hermes-agent` (origin), upstream = NousResearch/hermes-agent.
+- openwebui fork: unchanged (this repo).
+- Port 8000 freed (solar-pipeline stopped during prereq).
+
+**Invariant 3 (cross-tenant memory isolation) remains non-negotiable in principle but is not enforceable with holographic**. Until Tier B is re-enabled, the correct posture is: W1 documents the limitation openly, kind 2 DOES NOT accept a "live isolation" PASS using holographic, and any production rollout must wait for the provider upgrade. The run is valuable even without Tier B because the plumbing — the load-bearing part of W1 — is validated.
