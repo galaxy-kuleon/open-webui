@@ -237,6 +237,19 @@ class Pipe:
                                 current_event_type = None
                                 continue
 
+                            # [HERMES-HOOK-MEMORY-RECALL-PIPE-BEGIN]
+                            # Hermes memory recall event — emitted once per turn when
+                            # the memory provider returned non-empty prefetch context.
+                            if current_event_type == 'hermes.memory.recalled':
+                                try:
+                                    payload_data = json.loads(data_str)
+                                    await self._emit_memory_recall(__event_emitter__, payload_data)
+                                except json.JSONDecodeError:
+                                    log.warning(f'Bad memory recall JSON: {data_str}')
+                                current_event_type = None
+                                continue
+                            # [HERMES-HOOK-MEMORY-RECALL-PIPE-END]
+
                             # Standard OpenAI chunk — yield as dict for process_line
                             try:
                                 chunk = json.loads(data_str)
@@ -378,3 +391,29 @@ class Pipe:
             )
         except Exception as e:
             log.debug(f'Tool progress emit failed: {e}')
+
+    @staticmethod
+    async def _emit_memory_recall(emitter, payload: dict):
+        """Translate hermes.memory.recalled into Open WebUI status event.
+
+        Called at most once per turn, before any content chunks arrive.
+        UI rendering of this event is deferred — the status event is
+        addressable via action="hermes_memory_recall" for future frontend work.
+        """
+        if not emitter:
+            return
+        try:
+            await emitter(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'hermes_memory_recall',
+                        'provider': payload.get('provider', 'unknown'),
+                        'context_preview': payload.get('context_preview', ''),
+                        'context_token_estimate': payload.get('context_token_estimate', 0),
+                        'done': False,
+                    },
+                }
+            )
+        except Exception as e:
+            log.debug(f'Memory recall emit failed: {e}')
