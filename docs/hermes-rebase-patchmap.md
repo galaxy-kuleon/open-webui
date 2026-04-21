@@ -30,6 +30,7 @@ Upstream: `open-webui/open-webui` (origin: Dev branch)
 |---|---|---|---|---|---|
 | HERMES-HOOK-IDENTITY-PIPE | `backend/open_webui/pipes/hermes_agent.py` | 124-126, 133-137 | 1 | Inject X-Hermes-User-Id + X-Hermes-Tenant-Id headers when resolve_hermes_identity(__user__) returns non-None | load-bearing |
 | HERMES-HOOK-MEMORY-RECALL-PIPE | `backend/open_webui/pipes/hermes_agent.py` | 240-251 | 2 | Translate `event: hermes.memory.recalled` SSE frame into `__event_emitter__` status event with `action="hermes_memory_recall"` for downstream UI | load-bearing |
+| HERMES-HOOK-MEMORY-RECALL-UI | `src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte` | import block + `{:else if status?.action === 'hermes_memory_recall'}` branch | 2b | Mount HermesMemoryRecallStatus component when status action matches the memory-recall dispatch from pipe | cosmetic |
 
 ---
 
