@@ -31,6 +31,7 @@ Upstream: `open-webui/open-webui` (origin: Dev branch)
 | HERMES-HOOK-IDENTITY-PIPE | `backend/open_webui/pipes/hermes_agent.py` | 124-126, 133-137 | 1 | Inject X-Hermes-User-Id + X-Hermes-Tenant-Id headers when resolve_hermes_identity(__user__) returns non-None | load-bearing |
 | HERMES-HOOK-MEMORY-RECALL-PIPE | `backend/open_webui/pipes/hermes_agent.py` | 240-251 | 2 | Translate `event: hermes.memory.recalled` SSE frame into `__event_emitter__` status event with `action="hermes_memory_recall"` for downstream UI | load-bearing |
 | HERMES-HOOK-MEMORY-RECALL-UI | `src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte` | import block + `{:else if status?.action === 'hermes_memory_recall'}` branch | 2b | Mount HermesMemoryRecallStatus component when status action matches the memory-recall dispatch from pipe | cosmetic |
+| HERMES-HOOK-MEMORY-ROUTER-REGISTER | `backend/open_webui/main.py` | import block + app.include_router call | 3 | Register /api/v1/hermes/memory/* router that proxies to hermes POST /v1/memory/tool | load-bearing |
 
 ---
 
@@ -46,6 +47,7 @@ Upstream: `NousResearch/hermes-agent`
 | HERMES-HOOK-IDENTITY-AIAGENT | `run_agent.py` | 1417-1422 | 1 | AIAgent.__init__ accepts tenant_id (user_id existed pre-wave); populate _init_kwargs["tenant_id"] when self._tenant_id is truthy, forwarded into memory_manager.initialize_all(**_init_kwargs) | load-bearing |
 | HERMES-HOOK-MEMORY-RECALL-SSE | `run_agent.py` | 9695-9703 | 2 | After prefetch_all(), invoke self.memory_recall_callback when non-empty; callback param added to AIAgent.__init__ around 599 + assigned around 799 | load-bearing |
 | HERMES-HOOK-MEMORY-RECALL-SSE | `gateway/platforms/api_server.py` | 886-908 | 2 | `_on_memory_recall` closure + `__memory_recall__` tag in `_emit` closure; callback threaded through `_create_agent` and `_run_agent` to AIAgent; emits `event: hermes.memory.recalled\ndata: {...}` SSE frame before content frames | load-bearing |
+| HERMES-HOOK-MEMORY-TOOL-ROUTE | `gateway/platforms/api_server.py` | `_handle_memory_tool` method + `/v1/memory/tool` route registration | 3 | Admin/inspection endpoint dispatching to memory_manager.handle_tool_call with user_id/tenant_id kwarg scoping; loads configured provider on demand | load-bearing |
 
 ---
 

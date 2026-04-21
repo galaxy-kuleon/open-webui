@@ -98,6 +98,9 @@ from open_webui.routers import (
     scim,
     terminals,
 )
+# HERMES-HOOK-MEMORY-ROUTER-REGISTER-BEGIN
+from open_webui.routers import hermes_memory
+# HERMES-HOOK-MEMORY-ROUTER-REGISTER-END
 
 from open_webui.routers.retrieval import (
     get_embedding_function,
@@ -1590,6 +1593,9 @@ app.include_router(notes.router, prefix='/api/v1/notes', tags=['notes'])
 
 app.include_router(models.router, prefix='/api/v1/models', tags=['models'])
 app.include_router(knowledge.router, prefix='/api/v1/knowledge', tags=['knowledge'])
+# HERMES-HOOK-MEMORY-ROUTER-REGISTER-BEGIN
+app.include_router(hermes_memory.router, prefix='/api/v1/hermes/memory', tags=['hermes-memory'])
+# HERMES-HOOK-MEMORY-ROUTER-REGISTER-END
 app.include_router(prompts.router, prefix='/api/v1/prompts', tags=['prompts'])
 app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
 app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
