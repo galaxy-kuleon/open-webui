@@ -13,6 +13,8 @@ from typing import AsyncGenerator
 import httpx
 from pydantic import BaseModel, Field
 
+from open_webui.hermes.identity import resolve_hermes_identity
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -119,11 +121,20 @@ class Pipe:
                when ``hermes_api_key`` is configured; Hermes returns 403 on
                unauthenticated session-continuation requests.
         """
+        # [HERMES-HOOK-IDENTITY-PIPE-BEGIN]
+        identity = resolve_hermes_identity(__user__)
+        # [HERMES-HOOK-IDENTITY-PIPE-END]
+
         url = self.valves.hermes_api_url.rstrip('/')
         headers = {
             'Content-Type': 'application/json',
             **self._auth_headers(),
         }
+        # [HERMES-HOOK-IDENTITY-PIPE-BEGIN]
+        if identity is not None:
+            headers['X-Hermes-User-Id'] = identity['user_id']
+            headers['X-Hermes-Tenant-Id'] = identity['tenant_id']
+        # [HERMES-HOOK-IDENTITY-PIPE-END]
 
         # Hermes only accepts X-Hermes-Session-Id on authenticated requests.
         session_continuity_enabled = self._maybe_add_session_header(headers, __chat_id__)

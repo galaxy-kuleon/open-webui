@@ -1394,9 +1394,9 @@
 												loading={file.status === 'uploading' ||
 													(file.status && file.status.startsWith('processing'))}
 												statusText={file.status?.startsWith('processing:extracting')
-													? (file.status.includes('(')
+													? file.status.includes('(')
 														? file.status.replace('processing:extracting ', '')
-														: $i18n.t('Extracting content...'))
+														: $i18n.t('Extracting content...')
 													: file.status === 'processing:embedding'
 														? $i18n.t('Embedding...')
 														: file.status === 'processing:indexing'

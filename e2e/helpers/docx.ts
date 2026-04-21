@@ -1,4 +1,4 @@
-import JSZip from "jszip";
+import JSZip from 'jszip';
 
 /**
  * DOCX (OOXML) inspection helpers for E2E tests.
@@ -18,19 +18,19 @@ import JSZip from "jszip";
  * Pure function: Buffer in, boolean out.
  */
 export function zipContainsEntry(buffer: Buffer, entryName: string): boolean {
-  const needle = Buffer.from(entryName, "utf-8");
-  // Search through the buffer for the entry name
-  for (let i = 0; i <= buffer.length - needle.length; i++) {
-    let found = true;
-    for (let j = 0; j < needle.length; j++) {
-      if (buffer[i + j] !== needle[j]) {
-        found = false;
-        break;
-      }
-    }
-    if (found) return true;
-  }
-  return false;
+	const needle = Buffer.from(entryName, 'utf-8');
+	// Search through the buffer for the entry name
+	for (let i = 0; i <= buffer.length - needle.length; i++) {
+		let found = true;
+		for (let j = 0; j < needle.length; j++) {
+			if (buffer[i + j] !== needle[j]) {
+				found = false;
+				break;
+			}
+		}
+		if (found) return true;
+	}
+	return false;
 }
 
 /**
@@ -43,12 +43,12 @@ export function zipContainsEntry(buffer: Buffer, entryName: string): boolean {
  * Pure function: Buffer in, string out (async due to JSZip).
  */
 export async function extractDocxText(buffer: Buffer): Promise<string> {
-  const zip = await JSZip.loadAsync(buffer);
-  const documentXml = zip.file("word/document.xml");
-  if (!documentXml) return "";
-  const xmlContent = await documentXml.async("string");
-  // Strip XML tags to get plaintext — sufficient for marker-based content checks
-  return xmlContent.replace(/<[^>]+>/g, "");
+	const zip = await JSZip.loadAsync(buffer);
+	const documentXml = zip.file('word/document.xml');
+	if (!documentXml) return '';
+	const xmlContent = await documentXml.async('string');
+	// Strip XML tags to get plaintext — sufficient for marker-based content checks
+	return xmlContent.replace(/<[^>]+>/g, '');
 }
 
 /**
@@ -58,18 +58,18 @@ export async function extractDocxText(buffer: Buffer): Promise<string> {
  * Case-insensitive search for robustness against OCR/VLM/translation casing variance.
  */
 export function countMarkerMatches(
-  text: string,
-  markers: readonly string[],
+	text: string,
+	markers: readonly string[]
 ): { count: number; matched: string[]; missed: string[] } {
-  const lowerText = text.toLowerCase();
-  const matched: string[] = [];
-  const missed: string[] = [];
-  for (const marker of markers) {
-    if (lowerText.includes(marker.toLowerCase())) {
-      matched.push(marker);
-    } else {
-      missed.push(marker);
-    }
-  }
-  return { count: matched.length, matched, missed };
+	const lowerText = text.toLowerCase();
+	const matched: string[] = [];
+	const missed: string[] = [];
+	for (const marker of markers) {
+		if (lowerText.includes(marker.toLowerCase())) {
+			matched.push(marker);
+		} else {
+			missed.push(marker);
+		}
+	}
+	return { count: matched.length, matched, missed };
 }

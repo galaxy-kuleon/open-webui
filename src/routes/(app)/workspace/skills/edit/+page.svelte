@@ -69,4 +69,3 @@
 {#if skill}
 	<SkillEditor {skill} {onSubmit} {disabled} edit />
 {/if}
-

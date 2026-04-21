@@ -28,7 +28,7 @@ Upstream: `open-webui/open-webui` (origin: Dev branch)
 
 | Marker | File | Line range | Wave | Intent | Status |
 |---|---|---|---|---|---|
-| _(none yet — W1 populates)_ | | | | | |
+| HERMES-HOOK-IDENTITY-PIPE | `backend/open_webui/pipes/hermes_agent.py` | 124-126, 133-137 | 1 | Inject X-Hermes-User-Id + X-Hermes-Tenant-Id headers when resolve_hermes_identity(__user__) returns non-None | load-bearing |
 
 ---
 
@@ -39,7 +39,9 @@ Upstream: `NousResearch/hermes-agent`
 
 | Marker | File | Line range | Wave | Intent | Status |
 |---|---|---|---|---|---|
-| _(none yet — W1 populates)_ | | | | | |
+| HERMES-HOOK-IDENTITY-API-SERVER-HEADER | `gateway/platforms/api_server.py` | 817-825 | 1 | Extract X-Hermes-User-Id + X-Hermes-Tenant-Id from _handle_chat_completions request headers, strip whitespace, treat empty-after-strip as absent | load-bearing |
+| HERMES-HOOK-IDENTITY-API-SERVER-AGENT | `gateway/platforms/api_server.py` | 614-623 | 1 | Accept user_id/tenant_id kwargs in _create_agent; build identity_kwargs dict omitting falsy values; forward via **identity_kwargs to AIAgent constructor | load-bearing |
+| HERMES-HOOK-IDENTITY-AIAGENT | `run_agent.py` | 1417-1422 | 1 | AIAgent.__init__ accepts tenant_id (user_id existed pre-wave); populate _init_kwargs["tenant_id"] when self._tenant_id is truthy, forwarded into memory_manager.initialize_all(**_init_kwargs) | load-bearing |
 
 ---
 

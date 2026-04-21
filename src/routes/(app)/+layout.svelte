@@ -217,9 +217,7 @@
 		// Check Ollama connection — notify user if unreachable
 		getOllamaVersion(localStorage.token).catch(() => {
 			toast.warning(
-				$i18n.t(
-					'Ollama is not reachable. Make sure Ollama is running at the configured URL.'
-				),
+				$i18n.t('Ollama is not reachable. Make sure Ollama is running at the configured URL.'),
 				{ duration: 8000 }
 			);
 		});
