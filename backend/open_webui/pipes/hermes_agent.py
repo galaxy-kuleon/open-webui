@@ -250,6 +250,20 @@ class Pipe:
                                 continue
                             # [HERMES-HOOK-MEMORY-RECALL-PIPE-END]
 
+                            # [HERMES-HOOK-CONTINUATION-PIPE-BEGIN]
+                            # Hermes proactive continuation event — emitted at most
+                            # once per session by run_agent's continuation probe when
+                            # a reasoning-capable provider reports an incomplete task.
+                            if current_event_type == 'hermes.continuation.suggested':
+                                try:
+                                    payload_data = json.loads(data_str)
+                                    await self._emit_continuation(__event_emitter__, payload_data)
+                                except json.JSONDecodeError:
+                                    log.warning(f'Bad continuation JSON: {data_str}')
+                                current_event_type = None
+                                continue
+                            # [HERMES-HOOK-CONTINUATION-PIPE-END]
+
                             # Standard OpenAI chunk — yield as dict for process_line
                             try:
                                 chunk = json.loads(data_str)
@@ -417,3 +431,31 @@ class Pipe:
             )
         except Exception as e:
             log.debug(f'Memory recall emit failed: {e}')
+
+    # [HERMES-HOOK-CONTINUATION-PIPE-BEGIN]
+    @staticmethod
+    async def _emit_continuation(emitter, payload: dict):
+        """Translate hermes.continuation.suggested into Open WebUI status event.
+
+        Emitted at most once per session when the hermes-side continuation
+        probe finds an incomplete task in the user's prior history. Frontend
+        surfaces this as a ContinueCard via action="hermes_continuation".
+        """
+        if not emitter:
+            return
+        try:
+            await emitter(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'hermes_continuation',
+                        'task_summary': payload.get('task_summary', ''),
+                        'confidence': payload.get('confidence', 'low'),
+                        'last_session_age_hours': payload.get('last_session_age_hours'),
+                        'done': False,
+                    },
+                }
+            )
+        except Exception as e:
+            log.debug(f'Continuation emit failed: {e}')
+    # [HERMES-HOOK-CONTINUATION-PIPE-END]
