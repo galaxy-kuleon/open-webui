@@ -32,6 +32,7 @@ Upstream: `open-webui/open-webui` (origin: Dev branch)
 | HERMES-HOOK-MEMORY-RECALL-PIPE | `backend/open_webui/pipes/hermes_agent.py` | 240-251 | 2 | Translate `event: hermes.memory.recalled` SSE frame into `__event_emitter__` status event with `action="hermes_memory_recall"` for downstream UI | load-bearing |
 | HERMES-HOOK-MEMORY-RECALL-UI | `src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte` | import block + `{:else if status?.action === 'hermes_memory_recall'}` branch | 2b | Mount HermesMemoryRecallStatus component when status action matches the memory-recall dispatch from pipe | cosmetic |
 | HERMES-HOOK-MEMORY-ROUTER-REGISTER | `backend/open_webui/main.py` | import block + app.include_router call | 3 | Register /api/v1/hermes/memory/* router that proxies to hermes POST /v1/memory/tool | load-bearing |
+| HERMES-HOOK-MEMORY-PANEL-UI | `src/lib/components/chat/SettingsModal.svelte` | import block + allSettings array entry + tab-button render + tab-content switch (4 regions, same marker name) | 3b | Expose HermesMemory settings tab wiring /api/v1/hermes/memory/* to ProfilePanel UX | cosmetic |
 
 ---
 

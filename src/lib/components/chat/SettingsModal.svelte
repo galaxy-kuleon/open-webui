@@ -14,6 +14,9 @@
 	import Audio from './Settings/Audio.svelte';
 	import DataControls from './Settings/DataControls.svelte';
 	import Personalization from './Settings/Personalization.svelte';
+	// HERMES-HOOK-MEMORY-PANEL-UI-BEGIN
+	import HermesMemory from './Settings/HermesMemory.svelte';
+	// HERMES-HOOK-MEMORY-PANEL-UI-END
 	import Search from '../icons/Search.svelte';
 	import XMark from '../icons/XMark.svelte';
 	import Connections from './Settings/Connections.svelte';
@@ -259,6 +262,27 @@
 				'userpreferences'
 			]
 		},
+		// HERMES-HOOK-MEMORY-PANEL-UI-BEGIN
+		{
+			id: 'hermes-memory',
+			title: 'Hermes memory',
+			keywords: [
+				'hermes',
+				'hermes memory',
+				'hermesmemory',
+				'agent memory',
+				'agentmemory',
+				'peer card',
+				'peercard',
+				'facts',
+				'fact store',
+				'factstore',
+				'recall',
+				'remember',
+				'recalled'
+			]
+		},
+		// HERMES-HOOK-MEMORY-PANEL-UI-END
 		{
 			id: 'audio',
 			title: 'Audio',
@@ -751,6 +775,33 @@
 								</div>
 								<div class=" self-center">{$i18n.t('Personalization')}</div>
 							</button>
+						<!-- HERMES-HOOK-MEMORY-PANEL-UI-BEGIN -->
+						{:else if tabId === 'hermes-memory'}
+							<button
+								role="tab"
+								aria-controls="tab-hermes-memory"
+								aria-selected={selectedTab === 'hermes-memory'}
+								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
+								${
+									selectedTab === 'hermes-memory'
+										? ($settings?.highContrastMode ?? false)
+											? 'dark:bg-gray-800 bg-gray-200'
+											: ''
+										: ($settings?.highContrastMode ?? false)
+											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
+											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
+								}`}
+								on:click={() => {
+									selectedTab = 'hermes-memory';
+								}}
+								data-testid="hermes-memory-tab-button"
+							>
+								<div class=" self-center mr-2">
+									<Face strokeWidth="2" />
+								</div>
+								<div class=" self-center">{$i18n.t('Hermes memory')}</div>
+							</button>
+						<!-- HERMES-HOOK-MEMORY-PANEL-UI-END -->
 						{:else if tabId === 'audio'}
 							<button
 								role="tab"
@@ -911,6 +962,10 @@
 							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
+				<!-- HERMES-HOOK-MEMORY-PANEL-UI-BEGIN -->
+				{:else if selectedTab === 'hermes-memory'}
+					<HermesMemory />
+				<!-- HERMES-HOOK-MEMORY-PANEL-UI-END -->
 				{:else if selectedTab === 'audio'}
 					<Audio
 						{saveSettings}
