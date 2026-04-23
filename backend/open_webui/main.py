@@ -93,6 +93,7 @@ from open_webui.routers import (
     groups,
     files,
     functions,
+    hermes_memory,
     memories,
     models,
     knowledge,
@@ -728,6 +729,16 @@ async def lifespan(app: FastAPI):
             log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
         except Exception as e:
             log.warning(f'Failed to initialize tool/terminal servers at startup: {e}')
+
+    # Register codebase-built-in pipe functions (e.g. hermes_agent) into the DB.
+    # Runs after install_tool_and_function_dependencies so the hermes_agent.py
+    # source is available before the upsert logic reads it.
+    try:
+        from open_webui.utils.builtin_pipes import ensure_builtin_pipes
+
+        await ensure_builtin_pipes()
+    except Exception as e:
+        log.warning(f'Failed to register builtin pipes at startup: {e}')
 
     # Mark application as ready to accept traffic from a startup perspective.
     app.state.startup_complete = True
@@ -1428,6 +1439,7 @@ app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
 app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
 
 app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
+app.include_router(hermes_memory.router, prefix='/api/v1/hermes/memory', tags=['hermes-memory'])
 app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
 app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
 app.include_router(files.router, prefix='/api/v1/files', tags=['files'])

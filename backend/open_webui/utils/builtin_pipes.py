@@ -22,7 +22,7 @@ _BUILTIN_PIPES = [
 ]
 
 
-def ensure_builtin_pipes() -> None:
+async def ensure_builtin_pipes() -> None:
     """Upsert built-in pipe functions into the DB.
 
     - If the function doesn't exist, insert it (type=pipe, is_active=True).
@@ -38,9 +38,10 @@ def ensure_builtin_pipes() -> None:
         return
 
     # We need an owner user_id.  Prefer super-admin, fall back to first user.
-    admin = Users.get_super_admin_user()
+    # All model methods are async in v0.9.1 — must await each call.
+    admin = await Users.get_super_admin_user()
     if admin is None:
-        admin = Users.get_first_user()
+        admin = await Users.get_first_user()
     if admin is None:
         log.info('No users exist yet — skipping builtin pipe registration')
         return
@@ -54,7 +55,7 @@ def ensure_builtin_pipes() -> None:
         content = pipe_path.read_text(encoding='utf-8')
         content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
-        existing = Functions.get_function_by_id(pipe_def['id'])
+        existing = await Functions.get_function_by_id(pipe_def['id'])
         if existing:
             existing_hash = ''
             if existing.meta:
@@ -66,7 +67,7 @@ def ensure_builtin_pipes() -> None:
 
             # Content changed — update
             try:
-                Functions.update_function_by_id(
+                await Functions.update_function_by_id(
                     pipe_def['id'],
                     {
                         'content': content,
@@ -82,7 +83,7 @@ def ensure_builtin_pipes() -> None:
         else:
             # New — insert
             try:
-                Functions.insert_new_function(
+                await Functions.insert_new_function(
                     admin.id,
                     'pipe',
                     FunctionForm(
@@ -96,7 +97,7 @@ def ensure_builtin_pipes() -> None:
                     ),
                 )
                 # Activate the pipe
-                Functions.update_function_by_id(pipe_def['id'], {'is_active': True})
+                await Functions.update_function_by_id(pipe_def['id'], {'is_active': True})
                 log.info(f'Registered builtin pipe: {pipe_def["id"]}')
             except Exception as e:
                 log.error(f"Failed to register builtin pipe '{pipe_def['id']}': {e}")

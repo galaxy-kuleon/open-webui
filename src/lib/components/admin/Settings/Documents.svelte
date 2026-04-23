@@ -1100,6 +1100,201 @@
 							</div>
 						</div>
 
+						<!-- ── Hermes-port additions: Full Document Context ─────── -->
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'When enabled, the entire document is injected as context rather than retrieved chunks. Useful for short documents where full context is preferred.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Full Document Context')}
+								</Tooltip>
+							</div>
+							<div class="flex items-center relative">
+								<Switch bind:state={RAGConfig.RAG_FULL_DOCUMENT_CONTEXT} />
+							</div>
+						</div>
+
+						{#if RAGConfig.RAG_FULL_DOCUMENT_CONTEXT}
+							<div class="  mb-2.5 flex w-full justify-between">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Maximum number of tokens to include when injecting the full document as context. Set to 0 for unlimited.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Full Document Max Tokens')}
+									</Tooltip>
+								</div>
+								<div class="">
+									<input
+										bind:value={RAGConfig.RAG_FULL_DOCUMENT_MAX_TOKENS}
+										type="number"
+										class=" bg-transparent text-center w-20 outline-none"
+										min="0"
+										step="1"
+										placeholder="0"
+									/>
+								</div>
+							</div>
+						{/if}
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Number of concurrent subchat retrieval queries to run in parallel. Set to 0 for unlimited.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Subchat Concurrency')}
+								</Tooltip>
+							</div>
+							<div class="">
+								<input
+									bind:value={RAGConfig.RAG_SUBCHAT_CONCURRENCY}
+									type="number"
+									class=" bg-transparent text-center w-14 outline-none"
+									min="0"
+									step="1"
+									placeholder="0"
+								/>
+							</div>
+						</div>
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Allow users to search and retrieve from their own personal document collections in addition to shared knowledge bases.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('User Collection Retrieval')}
+								</Tooltip>
+							</div>
+							<div
+								class="flex items-center relative"
+								data-testid="rag-user-collection-enabled-switch"
+							>
+								<Switch bind:state={RAGConfig.RAG_USER_COLLECTION_ENABLED} />
+							</div>
+						</div>
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class=" self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'Export processed markdown files to a directory for external tools (e.g., OpenCode) to browse and organize. Files are auto-sorted by topic.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Knowledge Export')}
+								</Tooltip>
+							</div>
+							<div class="flex items-center relative">
+								<Switch bind:state={RAGConfig.RAG_KNOWLEDGE_EXPORT_ENABLED} />
+							</div>
+						</div>
+
+						{#if RAGConfig.RAG_KNOWLEDGE_EXPORT_ENABLED}
+							<div class="  mb-2.5 flex flex-col w-full">
+								<div class=" mb-1 text-xs font-medium">
+									{$i18n.t('Export Directory')}
+								</div>
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('Enter export directory path')}
+									bind:value={RAGConfig.RAG_KNOWLEDGE_EXPORT_DIR}
+								/>
+							</div>
+
+							<div class="  mb-2.5 flex flex-col w-full">
+								<div class=" mb-1 text-xs font-medium">
+									{$i18n.t('Research Model')}
+								</div>
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('e.g. lmstudio.unsloth/qwen3.5-35b-a3b')}
+									bind:value={RAGConfig.RAG_RESEARCH_MODEL}
+								/>
+							</div>
+
+							<div class="  mb-2.5 flex flex-col w-full">
+								<div class=" mb-1 text-xs font-medium">
+									{$i18n.t('Knowledge Organizer Model')}
+								</div>
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('e.g. lmstudio.qwen3.5-9b')}
+									bind:value={RAGConfig.RAG_KNOWLEDGE_ORGANIZER_MODEL}
+								/>
+							</div>
+						{/if}
+
+						<div class="  mb-2.5 flex w-full justify-between">
+							<div class="self-center text-xs font-medium">
+								<Tooltip
+									content={$i18n.t(
+										'When enabled, a compact index summary is generated for each document to speed up retrieval and improve relevance ranking.'
+									)}
+									placement="top-start"
+								>
+									{$i18n.t('Document Index Generation')}
+								</Tooltip>
+							</div>
+							<div class="flex items-center relative">
+								<Switch bind:state={RAGConfig.RAG_DOCUMENT_INDEX_GENERATION} />
+							</div>
+						</div>
+
+						{#if RAGConfig.RAG_DOCUMENT_INDEX_GENERATION}
+							<div class="  mb-2.5 flex w-full justify-between">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Model used to generate document index summaries. Leave empty to use the default model.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Document Index Model')}
+									</Tooltip>
+								</div>
+								<div class="flex items-center relative">
+									<input
+										bind:value={RAGConfig.RAG_DOCUMENT_INDEX_MODEL}
+										type="text"
+										class="flex-1 w-full text-sm bg-transparent outline-hidden text-right"
+										placeholder={$i18n.t('e.g. llama3.2')}
+									/>
+								</div>
+							</div>
+
+							<div class="  mb-2.5 flex w-full justify-between">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t('Timeout for document index generation requests (seconds).')}
+										placement="top-start"
+									>
+										{$i18n.t('Document Index Timeout')}
+									</Tooltip>
+								</div>
+								<div class="">
+									<input
+										bind:value={RAGConfig.RAG_DOCUMENT_INDEX_TIMEOUT}
+										type="number"
+										class=" bg-transparent text-center w-20 outline-none"
+										min="0"
+										step="1"
+										placeholder="0"
+									/>
+								</div>
+							</div>
+						{/if}
+
 						{#if !RAGConfig.RAG_FULL_CONTEXT}
 							<div class="  mb-2.5 flex w-full justify-between">
 								<div class=" self-center text-xs font-medium">{$i18n.t('Hybrid Search')}</div>

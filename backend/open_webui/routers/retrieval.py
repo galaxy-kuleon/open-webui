@@ -127,6 +127,15 @@ from open_webui.constants import ERROR_MESSAGES
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Document index dispatch timeout constants (F-11)
+# PER_CHUNK_TIMEOUT_SECONDS: wall-clock budget for one LLM round-trip per chunk.
+# MAX_TOTAL_TIMEOUT_SECONDS: hard ceiling for the entire multi-chunk index job.
+# total_timeout = min(chunk_count * PER_CHUNK_TIMEOUT_SECONDS, MAX_TOTAL_TIMEOUT_SECONDS)
+# ---------------------------------------------------------------------------
+PER_CHUNK_TIMEOUT_SECONDS = 120
+MAX_TOTAL_TIMEOUT_SECONDS = 1800
+
 ##########################################
 #
 # Utility functions
@@ -694,6 +703,37 @@ class ConfigForm(BaseModel):
     MINERU_API_TIMEOUT: Optional[str] = None
     MINERU_PARAMS: Optional[dict] = None
 
+    # ── Hermes-port additions (F-1 … F-11) ──────────────────────────────────
+    # Full-document context (F-1, F-2)
+    RAG_FULL_DOCUMENT_CONTEXT: Optional[bool] = None
+    RAG_FULL_DOCUMENT_MAX_TOKENS: Optional[int] = None
+    # Subchat concurrency (F-3)
+    RAG_SUBCHAT_CONCURRENCY: Optional[int] = None
+    # Document index generation (F-11)
+    RAG_DOCUMENT_INDEX_GENERATION: Optional[bool] = None
+    RAG_DOCUMENT_INDEX_MODEL: Optional[str] = None
+    RAG_DOCUMENT_INDEX_TIMEOUT: Optional[int] = None
+    # Knowledge export (F-5)
+    RAG_KNOWLEDGE_EXPORT_ENABLED: Optional[bool] = None
+    RAG_KNOWLEDGE_EXPORT_DIR: Optional[str] = None
+    # Research / organizer models (F-6)
+    RAG_RESEARCH_MODEL: Optional[str] = None
+    RAG_KNOWLEDGE_ORGANIZER_MODEL: Optional[str] = None
+    # User collection retrieval (F-7)
+    RAG_USER_COLLECTION_ENABLED: Optional[bool] = None
+    # KG1 (GLM-OCR) loader (F-4b)
+    KG1_GLMOCR_PROJECT_DIR: Optional[str] = None
+    KG1_OLLAMA_HOST: Optional[str] = None
+    KG1_OLLAMA_PORT: Optional[int] = None
+    KG1_LAYOUT_DEVICE: Optional[str] = None
+    KG1_SOFFICE_PATH: Optional[str] = None
+    KG1_TIMEOUT: Optional[int] = None
+    KG1_GLM_OCR_CONCURRENCY: Optional[int] = None
+    # Image Analysis Pipeline (F-8)
+    IMAGE_ANALYSIS_ENABLED: Optional[bool] = None
+    IMAGE_ANALYSIS_CLASSIFIER_MODEL: Optional[str] = None
+    IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH: Optional[int] = None
+
     # Reranking settings
     RAG_RERANKING_MODEL: Optional[str] = None
     RAG_RERANKING_ENGINE: Optional[str] = None
@@ -724,6 +764,113 @@ class ConfigForm(BaseModel):
     web: Optional[WebConfig] = None
 
 
+# ---------------------------------------------------------------------------
+# Directory-path validation helpers (F-4b, F-5)
+# ---------------------------------------------------------------------------
+
+
+def _kg1_allowed_roots() -> list[str]:
+    """Return the list of allowed filesystem roots for KG1_GLMOCR_PROJECT_DIR.
+
+    Default: ~/.kg1-ocr (created if absent so a fresh install works).
+    Override: KG1_GLMOCR_ALLOWED_ROOT env var; split on ':' for multi-root.
+    """
+    env_override = os.environ.get('KG1_GLMOCR_ALLOWED_ROOT', '').strip()
+    if env_override:
+        roots = [r.strip() for r in env_override.split(':') if r.strip()]
+    else:
+        roots = [os.path.expanduser('~/.kg1-ocr')]
+
+    # Ensure each root exists so a fresh install with defaults succeeds.
+    for root in roots:
+        os.makedirs(root, exist_ok=True)
+
+    return roots
+
+
+def _rag_export_allowed_roots() -> list[str]:
+    """Return the list of allowed filesystem roots for RAG_KNOWLEDGE_EXPORT_DIR.
+
+    Default: ~/.open-webui/knowledge-export (created if absent).
+    Override: RAG_KNOWLEDGE_EXPORT_ROOT env var; split on ':' for multi-root.
+    """
+    env_override = os.environ.get('RAG_KNOWLEDGE_EXPORT_ROOT', '').strip()
+    if env_override:
+        roots = [r.strip() for r in env_override.split(':') if r.strip()]
+    else:
+        roots = [os.path.expanduser('~/.open-webui/knowledge-export')]
+
+    for root in roots:
+        os.makedirs(root, exist_ok=True)
+
+    return roots
+
+
+def _validate_admin_dir(value: str, *, allowed_roots: list[str], setting_name: str) -> str:
+    """Validate an admin-supplied directory path.
+
+    Returns the resolved absolute path on success.
+    Raises HTTPException(400) on any violation.
+
+    The ``detail`` field MUST NOT echo the raw ``value`` — it names only the
+    ``setting_name`` and a fixed reason class, so it is safe to surface to
+    the client without leaking internal filesystem layout.
+
+    Validation order (fail-fast):
+    1. Empty / whitespace-only value.
+    2. Null byte (\\x00) or traversal segment ('..') in value.
+    3. Resolve to absolute path via os.path.realpath (collapses symlinks).
+    4. Containment check: resolved path must be under one of allowed_roots.
+    5. Resolved path must exist.
+    6. Resolved path must be a directory.
+    """
+
+    # 1. Empty / whitespace
+    if not value or not value.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{setting_name}: value is empty',
+        )
+
+    # 2. Null byte or traversal segment — defense-in-depth before realpath
+    if '\x00' in value or '..' in Path(value).parts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{setting_name}: invalid path',
+        )
+
+    # 3. Resolve symlinks to get the true absolute path
+    resolved = os.path.realpath(value)
+
+    # 4. Containment check — must be under (or equal to) one of the allowed roots.
+    # Use the trailing-sep form so '/tmp/ok-evil' does NOT match root '/tmp/ok'.
+    def _within(resolved_path: str, root: str) -> bool:
+        real_root = os.path.realpath(root)
+        return resolved_path == real_root or resolved_path.startswith(real_root + os.sep)
+
+    if not any(_within(resolved, r) for r in allowed_roots):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{setting_name}: path outside allowed roots',
+        )
+
+    # 5. Path must exist
+    if not os.path.exists(resolved):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{setting_name}: path does not exist',
+        )
+
+    # 6. Path must be a directory
+    if not os.path.isdir(resolved):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{setting_name}: not a directory',
+        )
+
+    return resolved
+
+
 @router.post('/config/update')
 async def update_rag_config(request: Request, form_data: ConfigForm, user=Depends(get_admin_user)):
     # RAG settings
@@ -740,6 +887,72 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         form_data.RAG_FULL_CONTEXT
         if form_data.RAG_FULL_CONTEXT is not None
         else request.app.state.config.RAG_FULL_CONTEXT
+    )
+
+    # ── Hermes-port additions ─────────────────────────────────────────────────
+    # Full-document context (F-1, F-2)
+    request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT = (
+        form_data.RAG_FULL_DOCUMENT_CONTEXT
+        if form_data.RAG_FULL_DOCUMENT_CONTEXT is not None
+        else request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT
+    )
+    request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS = (
+        form_data.RAG_FULL_DOCUMENT_MAX_TOKENS
+        if form_data.RAG_FULL_DOCUMENT_MAX_TOKENS is not None
+        else request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS
+    )
+    # Subchat concurrency (F-3)
+    request.app.state.config.RAG_SUBCHAT_CONCURRENCY = (
+        form_data.RAG_SUBCHAT_CONCURRENCY
+        if form_data.RAG_SUBCHAT_CONCURRENCY is not None
+        else request.app.state.config.RAG_SUBCHAT_CONCURRENCY
+    )
+    # Document index generation (F-11)
+    request.app.state.config.RAG_DOCUMENT_INDEX_GENERATION = (
+        form_data.RAG_DOCUMENT_INDEX_GENERATION
+        if form_data.RAG_DOCUMENT_INDEX_GENERATION is not None
+        else request.app.state.config.RAG_DOCUMENT_INDEX_GENERATION
+    )
+    request.app.state.config.RAG_DOCUMENT_INDEX_MODEL = (
+        form_data.RAG_DOCUMENT_INDEX_MODEL
+        if form_data.RAG_DOCUMENT_INDEX_MODEL is not None
+        else request.app.state.config.RAG_DOCUMENT_INDEX_MODEL
+    )
+    request.app.state.config.RAG_DOCUMENT_INDEX_TIMEOUT = (
+        form_data.RAG_DOCUMENT_INDEX_TIMEOUT
+        if form_data.RAG_DOCUMENT_INDEX_TIMEOUT is not None
+        else request.app.state.config.RAG_DOCUMENT_INDEX_TIMEOUT
+    )
+    # Knowledge export (F-5)
+    request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED = (
+        form_data.RAG_KNOWLEDGE_EXPORT_ENABLED
+        if form_data.RAG_KNOWLEDGE_EXPORT_ENABLED is not None
+        else request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED
+    )
+    if form_data.RAG_KNOWLEDGE_EXPORT_DIR is not None:
+        # F-5: validate before accepting the admin-supplied path.
+        request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR = _validate_admin_dir(
+            value=form_data.RAG_KNOWLEDGE_EXPORT_DIR,
+            allowed_roots=_rag_export_allowed_roots(),
+            setting_name='RAG_KNOWLEDGE_EXPORT_DIR',
+        )
+    # else: keep the existing value unchanged
+    # Research / organizer models (F-6)
+    request.app.state.config.RAG_RESEARCH_MODEL = (
+        form_data.RAG_RESEARCH_MODEL
+        if form_data.RAG_RESEARCH_MODEL is not None
+        else request.app.state.config.RAG_RESEARCH_MODEL
+    )
+    request.app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL = (
+        form_data.RAG_KNOWLEDGE_ORGANIZER_MODEL
+        if form_data.RAG_KNOWLEDGE_ORGANIZER_MODEL is not None
+        else request.app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL
+    )
+    # User collection retrieval (F-7)
+    request.app.state.config.RAG_USER_COLLECTION_ENABLED = (
+        form_data.RAG_USER_COLLECTION_ENABLED
+        if form_data.RAG_USER_COLLECTION_ENABLED is not None
+        else request.app.state.config.RAG_USER_COLLECTION_ENABLED
     )
 
     # Hybrid search settings
@@ -905,6 +1118,57 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
     )
     request.app.state.config.MINERU_PARAMS = (
         form_data.MINERU_PARAMS if form_data.MINERU_PARAMS is not None else request.app.state.config.MINERU_PARAMS
+    )
+
+    # KG1 (GLM-OCR) settings (F-4b)
+    if form_data.KG1_GLMOCR_PROJECT_DIR is not None:
+        # F-4b: validate before accepting the admin-supplied path.
+        request.app.state.config.KG1_GLMOCR_PROJECT_DIR = _validate_admin_dir(
+            value=form_data.KG1_GLMOCR_PROJECT_DIR,
+            allowed_roots=_kg1_allowed_roots(),
+            setting_name='KG1_GLMOCR_PROJECT_DIR',
+        )
+    # else: keep the existing value unchanged
+    request.app.state.config.KG1_OLLAMA_HOST = (
+        form_data.KG1_OLLAMA_HOST if form_data.KG1_OLLAMA_HOST is not None else request.app.state.config.KG1_OLLAMA_HOST
+    )
+    request.app.state.config.KG1_OLLAMA_PORT = (
+        form_data.KG1_OLLAMA_PORT if form_data.KG1_OLLAMA_PORT is not None else request.app.state.config.KG1_OLLAMA_PORT
+    )
+    request.app.state.config.KG1_LAYOUT_DEVICE = (
+        form_data.KG1_LAYOUT_DEVICE
+        if form_data.KG1_LAYOUT_DEVICE is not None
+        else request.app.state.config.KG1_LAYOUT_DEVICE
+    )
+    request.app.state.config.KG1_SOFFICE_PATH = (
+        form_data.KG1_SOFFICE_PATH
+        if form_data.KG1_SOFFICE_PATH is not None
+        else request.app.state.config.KG1_SOFFICE_PATH
+    )
+    request.app.state.config.KG1_TIMEOUT = (
+        form_data.KG1_TIMEOUT if form_data.KG1_TIMEOUT is not None else request.app.state.config.KG1_TIMEOUT
+    )
+    request.app.state.config.KG1_GLM_OCR_CONCURRENCY = (
+        form_data.KG1_GLM_OCR_CONCURRENCY
+        if form_data.KG1_GLM_OCR_CONCURRENCY is not None
+        else request.app.state.config.KG1_GLM_OCR_CONCURRENCY
+    )
+
+    # Image Analysis Pipeline (F-8)
+    request.app.state.config.IMAGE_ANALYSIS_ENABLED = (
+        form_data.IMAGE_ANALYSIS_ENABLED
+        if form_data.IMAGE_ANALYSIS_ENABLED is not None
+        else request.app.state.config.IMAGE_ANALYSIS_ENABLED
+    )
+    request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL = (
+        form_data.IMAGE_ANALYSIS_CLASSIFIER_MODEL
+        if form_data.IMAGE_ANALYSIS_CLASSIFIER_MODEL is not None
+        else request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL
+    )
+    request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH = (
+        form_data.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH
+        if form_data.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH is not None
+        else request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH
     )
 
     # Reranking settings
@@ -1158,6 +1422,30 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'MINERU_API_KEY': request.app.state.config.MINERU_API_KEY,
         'MINERU_API_TIMEOUT': request.app.state.config.MINERU_API_TIMEOUT,
         'MINERU_PARAMS': request.app.state.config.MINERU_PARAMS,
+        # ── Hermes-port additions ─────────────────────────────────────────────
+        'RAG_FULL_DOCUMENT_CONTEXT': request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT,
+        'RAG_FULL_DOCUMENT_MAX_TOKENS': request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS,
+        'RAG_SUBCHAT_CONCURRENCY': request.app.state.config.RAG_SUBCHAT_CONCURRENCY,
+        'RAG_DOCUMENT_INDEX_GENERATION': request.app.state.config.RAG_DOCUMENT_INDEX_GENERATION,
+        'RAG_DOCUMENT_INDEX_MODEL': request.app.state.config.RAG_DOCUMENT_INDEX_MODEL,
+        'RAG_DOCUMENT_INDEX_TIMEOUT': request.app.state.config.RAG_DOCUMENT_INDEX_TIMEOUT,
+        'RAG_KNOWLEDGE_EXPORT_ENABLED': request.app.state.config.RAG_KNOWLEDGE_EXPORT_ENABLED,
+        'RAG_KNOWLEDGE_EXPORT_DIR': request.app.state.config.RAG_KNOWLEDGE_EXPORT_DIR,
+        'RAG_RESEARCH_MODEL': request.app.state.config.RAG_RESEARCH_MODEL,
+        'RAG_KNOWLEDGE_ORGANIZER_MODEL': request.app.state.config.RAG_KNOWLEDGE_ORGANIZER_MODEL,
+        'RAG_USER_COLLECTION_ENABLED': request.app.state.config.RAG_USER_COLLECTION_ENABLED,
+        # KG1 (GLM-OCR) settings
+        'KG1_GLMOCR_PROJECT_DIR': request.app.state.config.KG1_GLMOCR_PROJECT_DIR,
+        'KG1_OLLAMA_HOST': request.app.state.config.KG1_OLLAMA_HOST,
+        'KG1_OLLAMA_PORT': request.app.state.config.KG1_OLLAMA_PORT,
+        'KG1_LAYOUT_DEVICE': request.app.state.config.KG1_LAYOUT_DEVICE,
+        'KG1_SOFFICE_PATH': request.app.state.config.KG1_SOFFICE_PATH,
+        'KG1_TIMEOUT': request.app.state.config.KG1_TIMEOUT,
+        'KG1_GLM_OCR_CONCURRENCY': request.app.state.config.KG1_GLM_OCR_CONCURRENCY,
+        # Image Analysis Pipeline
+        'IMAGE_ANALYSIS_ENABLED': request.app.state.config.IMAGE_ANALYSIS_ENABLED,
+        'IMAGE_ANALYSIS_CLASSIFIER_MODEL': request.app.state.config.IMAGE_ANALYSIS_CLASSIFIER_MODEL,
+        'IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH': request.app.state.config.IMAGE_ANALYSIS_MAX_CLASSIFY_WIDTH,
         # Reranking settings
         'RAG_RERANKING_MODEL': request.app.state.config.RAG_RERANKING_MODEL,
         'RAG_RERANKING_ENGINE': request.app.state.config.RAG_RERANKING_ENGINE,
@@ -1535,6 +1823,307 @@ class ProcessFileForm(BaseModel):
     file_id: str
     content: Optional[str] = None
     collection_name: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Document index generation (F-11)
+# ---------------------------------------------------------------------------
+
+INDEX_CHUNK_SIZE = 128_000  # tokens per chunk for large document indexing
+INDEX_CHUNK_OVERLAP = 32_000  # token overlap between chunks
+
+
+def _split_text_by_tokens(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """Split text into token-bounded chunks using tiktoken cl100k_base."""
+    enc = tiktoken.get_encoding('cl100k_base')
+    tokens = enc.encode(text)
+    total = len(tokens)
+
+    if total <= chunk_size:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < total:
+        end = min(start + chunk_size, total)
+        chunk_tokens = tokens[start:end]
+        chunks.append(enc.decode(chunk_tokens))
+        if end >= total:
+            break
+        start = end - overlap  # overlap for continuity
+
+    log.info(
+        f'Document index: split {total} tokens into {len(chunks)} chunks (chunk_size={chunk_size}, overlap={overlap})'
+    )
+    return chunks
+
+
+def _call_index_llm(
+    request,
+    model_id: str,
+    system_prompt: str,
+    user_content: str,
+    user,
+    timeout: int = PER_CHUNK_TIMEOUT_SECONDS,
+) -> tuple:
+    """
+    Call the LLM for index generation via run_coroutine_threadsafe.
+
+    Returns (content_string_or_None, wall_clock_seconds).
+    Cancels the future unconditionally in finally; logs DEBUG if cancel returns False
+    (benign — means the future already completed before cancel was called).
+    """
+    import time as _time
+
+    from open_webui.utils.chat import generate_chat_completion
+
+    payload = {
+        'model': model_id,
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_content},
+        ],
+        'stream': False,
+        'metadata': {'task': 'rag_document_index'},
+    }
+
+    future = asyncio.run_coroutine_threadsafe(
+        generate_chat_completion(request, form_data=payload, user=user, bypass_filter=True),
+        request.app.state.main_loop,
+    )
+    t0 = _time.monotonic()
+    try:
+        response = future.result(timeout=timeout)
+        elapsed = _time.monotonic() - t0
+
+        if hasattr(response, 'body'):
+            import json as _json
+
+            body = _json.loads(response.body.decode('utf-8'))
+            return body['choices'][0]['message']['content'], elapsed
+        elif isinstance(response, dict) and 'choices' in response:
+            return response['choices'][0]['message']['content'], elapsed
+        else:
+            log.warning('Document index generation: unexpected response format')
+            return None, elapsed
+    finally:
+        cancelled = future.cancel()
+        if not cancelled:
+            log.debug('Document index LLM future: cancel() returned False (future already completed — benign)')
+
+
+def generate_document_index(
+    request,
+    text_content: str,
+    filename: str,
+    user,
+    db=None,
+    event_emitter=None,
+):
+    """
+    Generate a structured index/summary of a document using AI.
+    Called during document processing to create an additional embedding anchor.
+
+    DB session contract (F-11): if a ``db`` session is passed in, it is closed
+    BEFORE any ``run_coroutine_threadsafe`` dispatch to prevent connection-pool
+    exhaustion during long LLM calls.  If file metadata is needed after the
+    call, the caller must refetch by ID in a fresh session.
+
+    For large documents (>128k tokens), splits into chunks with 32k overlap,
+    generates index for each chunk sequentially, then merges all part indexes.
+
+    Timeout policy (F-11):
+        per_chunk = PER_CHUNK_TIMEOUT_SECONDS (120 s)
+        total     = min(chunk_count * PER_CHUNK_TIMEOUT_SECONDS, MAX_TOTAL_TIMEOUT_SECONDS)
+
+    Returns the index text (str), or None (sentinel) on failure.
+    Callers MUST handle None by skipping index storage.
+
+    On failure emits events via ``event_emitter`` (an async callable dispatched
+    via the main loop):
+        - ``document_index_dispatch_timeout``  on concurrent.futures.TimeoutError
+        - ``document_index_dispatch_failed``   on any other exception
+    """
+    import time as _time
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+    from open_webui.config import DEFAULT_RAG_DOCUMENT_INDEX_PROMPT
+
+    # ── 0. Guard: early exits before any DB interaction ─────────────
+    model_id = request.app.state.config.RAG_DOCUMENT_INDEX_MODEL
+    if not model_id:
+        models = request.app.state.MODELS or {}
+        if models:
+            model_id = next(iter(models))
+        else:
+            log.warning('Document index generation: no model available')
+            return None
+
+    if not text_content or not text_content.strip():
+        return None
+
+    # ── 1. Compute chunks BEFORE releasing the DB session ───────────
+    db_closed = False  # guard against double-close across happy-path and finally
+    try:
+        chunks = _split_text_by_tokens(text_content, INDEX_CHUNK_SIZE, INDEX_CHUNK_OVERLAP)
+        chunk_count = len(chunks)
+        per_chunk_timeout = PER_CHUNK_TIMEOUT_SECONDS
+        total_timeout = min(chunk_count * per_chunk_timeout, MAX_TOTAL_TIMEOUT_SECONDS)
+
+        # ── 2. Release DB session BEFORE any executor dispatch ──────────
+        # This prevents connection-pool exhaustion during long LLM round-trips.
+        # Any file metadata needed post-call must be fetched in a fresh session.
+        if db is not None:
+            db.close()  # mutable state boundary: release before threading
+            db_closed = True
+            db = None
+
+        # ── 3. WARN log dispatch configuration on entry ─────────────────
+        pool_type = type(request.app.state.main_loop).__name__
+        log.warning(
+            'Document index dispatch config: '
+            f'file={filename!r} pool={pool_type} chunk_count={chunk_count} '
+            f'per_chunk_timeout={per_chunk_timeout}s '
+            f'total_timeout={total_timeout}s'
+        )
+
+        t_job_start = _time.monotonic()
+        chunk_wall_times: list = []
+
+        def _emit_event(event_dict: dict) -> None:
+            """Dispatch an async event via the main loop (fire-and-forget)."""
+            if event_emitter is None:
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    event_emitter(event_dict),
+                    request.app.state.main_loop,
+                )
+            except Exception as emit_err:
+                log.debug(f'Document index: event emit failed (non-fatal): {emit_err}')
+
+        try:
+            if chunk_count == 1:
+                # Small document: single pass
+                content, elapsed = _call_index_llm(
+                    request,
+                    model_id,
+                    DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
+                    f'Document: {filename}\n\n{text_content}',
+                    user,
+                    timeout=per_chunk_timeout,
+                )
+                chunk_wall_times.append(elapsed)
+                log.warning(f'Document index exit: file={filename!r} chunk_wall_times={chunk_wall_times}')
+                return content
+
+            # Large document: index each chunk sequentially, then merge
+            deadline = _time.monotonic() + total_timeout
+            part_indexes = []
+            chunks_completed = 0
+            for i, chunk in enumerate(chunks):
+                # enforce total_timeout as hard deadline
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    elapsed = _time.monotonic() - (deadline - total_timeout)
+                    log.warning(
+                        f'Document index TOTAL_TIMEOUT exceeded: '
+                        f'{chunks_completed}/{chunk_count} chunks completed in {elapsed:.1f}s'
+                    )
+                    _emit_event(
+                        {
+                            'type': 'status',
+                            'data': {
+                                'action': 'document_index_dispatch_timeout',
+                                'description': 'Total timeout exceeded before all chunks processed',
+                                'done': True,
+                                'total_timeout': total_timeout,
+                                'elapsed': elapsed,
+                                'chunks_completed': chunks_completed,
+                                'chunks_total': chunk_count,
+                            },
+                        }
+                    )
+                    return None
+                effective_timeout = min(per_chunk_timeout, remaining)
+                part_label = f'Part {i + 1}/{chunk_count}'
+                log.info(f'Document index: generating index for {filename} [{part_label}]')
+                part_content, elapsed = _call_index_llm(
+                    request,
+                    model_id,
+                    DEFAULT_RAG_DOCUMENT_INDEX_PROMPT,
+                    f'Document: {filename} [{part_label}]\n\n{chunk}',
+                    user,
+                    timeout=effective_timeout,
+                )
+                chunk_wall_times.append(elapsed)
+                chunks_completed += 1
+                if part_content:
+                    part_indexes.append(f'## {part_label}\n\n{part_content}')
+                else:
+                    log.warning(f'Document index: {filename} [{part_label}] returned empty')
+
+            if not part_indexes:
+                log.error(f'Document index: all {chunk_count} parts failed for {filename}')
+                return None
+
+            merged = '\n\n---\n\n'.join(part_indexes)
+            log.warning(
+                f'Document index exit: file={filename!r} '
+                f'parts={len(part_indexes)}/{chunk_count} '
+                f'merged_chars={len(merged)} '
+                f'chunk_wall_times={chunk_wall_times}'
+            )
+            return merged
+
+        except FuturesTimeoutError:
+            elapsed = _time.monotonic() - t_job_start
+            log.error(
+                f'Document index dispatch timeout for {filename!r}: '
+                f'elapsed={elapsed:.1f}s chunk_count={chunk_count} '
+                f'total_timeout={total_timeout}s'
+            )
+            _emit_event(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'document_index_dispatch_timeout',
+                        'description': 'Document index LLM dispatch timed out',
+                        'done': True,
+                        'chunk_count': chunk_count,
+                        'elapsed': elapsed,
+                        'total_timeout': total_timeout,
+                    },
+                }
+            )
+            return None
+
+        except Exception as e:
+            elapsed = _time.monotonic() - t_job_start
+            log.error(
+                f'Document index generation failed for {filename!r}: '
+                f'{type(e).__name__}: {e or "(no message)"} '
+                f'elapsed={elapsed:.1f}s chunk_count={chunk_count}'
+            )
+            _emit_event(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'document_index_dispatch_failed',
+                        'description': 'Document index LLM dispatch failed',
+                        'done': True,
+                        'chunk_count': chunk_count,
+                        'elapsed': elapsed,
+                        'error': type(e).__name__,
+                    },
+                }
+            )
+            return None
+
+    finally:
+        # Ensure db.close() fires on exception path if not yet closed
+        if db is not None and not db_closed:
+            db.close()
 
 
 @router.post('/process/file')

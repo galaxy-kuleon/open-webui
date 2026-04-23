@@ -68,6 +68,7 @@ from open_webui.utils.files import (
 
 
 from open_webui.models.users import UserModel
+from open_webui.models.files import Files
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
@@ -141,9 +142,17 @@ from open_webui.env import (
 )
 from open_webui.utils.headers import include_user_info_headers
 from open_webui.constants import TASKS
+from open_webui.utils.skip_rag import build_skip_rag_context as _build_skip_rag_context
+from open_webui.utils.skip_rag import _SKIP_RAG_PREAMBLE as _SKIP_RAG_PREAMBLE_FROM_MODULE
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
+
+# ── skip_rag prompt-injection hardening ─────────────────────────────────────
+# Preamble constant lives in utils/skip_rag.py (single source of truth).
+# Re-exported here under the original name so existing imports and tests that
+# reference open_webui.utils.middleware._SKIP_RAG_PREAMBLE continue to work.
+_SKIP_RAG_PREAMBLE = _SKIP_RAG_PREAMBLE_FROM_MODULE
 
 
 # We believe in one maker of all models, seen and unseen,
@@ -951,19 +960,15 @@ def get_source_context(sources: list, source_ids: dict = None, include_content: 
     if source_ids is None:
         source_ids = {}
     for source in sources:
-        for doc, meta in zip(source.get('document', []), source.get('metadata', [])):
+        for doc, meta in zip(source.get('document') or [], source.get('metadata') or []):
             source_id = meta.get('source') or source.get('source', {}).get('id') or 'N/A'
             if source_id not in source_ids:
                 source_ids[source_id] = len(source_ids) + 1
             src_name = source.get('source', {}).get('name')
-            src_type = source.get('source', {}).get('type')
-            src_rid = source.get('source', {}).get('id')
             body = doc if include_content else ''
             context_string += (
                 f'<source id="{source_ids[source_id]}"'
                 + (f' name="{src_name}"' if src_name else '')
-                + (f' resource-type="{src_type}"' if src_type else '')
-                + (f' resource-id="{src_rid}"' if src_rid else '')
                 + f'>{body}</source>\n'
             )
     return context_string
@@ -1938,15 +1943,505 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
     return form_data
 
 
+####################################
+# Full Document Context (Phase A) + 3-Tier Token Budget Cascade
+####################################
+
+
+def expand_sources_to_full_documents(sources: list) -> list:
+    """
+    Trace chunk-level sources back to their source files via file_id in metadata,
+    load full document content, deduplicate by file_id, and return document-level sources.
+    """
+    if not sources:
+        return sources
+
+    seen_files = {}  # file_id -> { source_info, name }
+    for source in sources:
+        # `or []` handles both missing key AND metadata=None
+        metadatas = source.get('metadata') or []
+        source_info = source.get('source', {})
+        for meta in metadatas:
+            file_id = meta.get('file_id')
+            if file_id and file_id not in seen_files:
+                seen_files[file_id] = {
+                    'source_info': source_info,
+                    'name': meta.get('name') or meta.get('source') or source_info.get('name', ''),
+                }
+
+    if not seen_files:
+        return sources
+
+    expanded = []
+    for file_id, info in seen_files.items():
+        file_obj = Files.get_file_by_id(file_id)
+        if file_obj and file_obj.data:
+            full_content = file_obj.data.get('content', '')
+            index_content = file_obj.data.get('index_content', '')
+            if full_content:
+                # Combine content + index for richer context
+                combined = full_content
+                if index_content:
+                    combined = f'{full_content}\n\n---\n\n## Document Index\n\n{index_content}'
+                log.info(
+                    f'[RAG] expand {info["name"]}: '
+                    f'content={len(full_content)} chars, '
+                    f'index={len(index_content)} chars, '
+                    f'combined={len(combined)} chars'
+                )
+                expanded.append(
+                    {
+                        'source': info['source_info'],
+                        'document': [combined],
+                        'metadata': [
+                            {
+                                'file_id': file_id,
+                                'name': info['name'],
+                                'source': info['name'],
+                            }
+                        ],
+                    }
+                )
+            else:
+                log.warning(f'[RAG] expand: file {file_id} ({info["name"]}) has no content')
+        else:
+            log.warning(f'[RAG] expand: could not load file {file_id}')
+
+    log.info(f'[RAG] expand_sources: {len(seen_files)} files -> {len(expanded)} sources')
+    return expanded if expanded else sources
+
+
+def estimate_tokens(text: str, encoding_name: str = 'cl100k_base') -> int:
+    """Estimate token count using tiktoken, with character-based fallback."""
+    try:
+        import tiktoken
+
+        encoding = tiktoken.get_encoding(encoding_name)
+        return len(encoding.encode(text))
+    except Exception:
+        return len(text) // 4
+
+
+def estimate_sources_total_tokens(sources: list, encoding_name: str = 'cl100k_base') -> int:
+    """Sum token estimates across all source documents."""
+    total = 0
+    for source in sources:
+        for doc in source.get('document', []):
+            total += estimate_tokens(doc if isinstance(doc, str) else str(doc), encoding_name)
+    return total
+
+
+def build_index_only_sources(sources: list) -> list | None:
+    """
+    Produce a new sources list where each source's document content is replaced
+    with only the index_content from the DB (Tier 2 of the token budget cascade).
+
+    Returns None if NO sources had index_content (i.e., Tier 2 can't help).
+    Sources without index_content retain their original document content.
+    """
+    if not sources:
+        return None
+
+    new_sources = []
+    any_replaced = False
+
+    for source in sources:
+        # `or []` handles both missing key AND metadata=None
+        metadatas = source.get('metadata') or []
+        file_id = metadatas[0].get('file_id') if metadatas else None
+
+        index_content = ''
+        if file_id:
+            file_obj = Files.get_file_by_id(file_id)
+            if file_obj and file_obj.data:
+                index_content = (file_obj.data.get('index_content') or '').strip()
+
+        if index_content:
+            any_replaced = True
+            new_sources.append(
+                {
+                    'source': source.get('source', {}),
+                    'document': [index_content],
+                    'metadata': source.get('metadata') or [],
+                }
+            )
+        else:
+            # Keep original document content for files without index
+            src_name = source.get('source', {}).get('name', 'unknown')
+            log.warning(
+                f"[RAG] cascade Tier 2: file '{src_name}' (id={file_id}) "
+                f'has no index_content — retaining original content'
+            )
+            new_sources.append(
+                {
+                    'source': source.get('source', {}),
+                    'document': list(source.get('document', [])),
+                    'metadata': source.get('metadata') or [],
+                }
+            )
+
+    return new_sources if any_replaced else None
+
+
+async def apply_token_budget_cascade(
+    sources: list,
+    max_tokens: int | None,
+    request,
+    body: dict,
+    user,
+    event_emitter,
+) -> list:
+    """
+    Apply a 3-tier token budget cascade to RAG sources, degrading gracefully:
+
+      Tier 1: full .md content + .index.md  (richest context)
+      Tier 2: only .index.md per file        (pre-computed summary, zero query-time cost)
+      Tier 3: sub-chat extraction via LLM    (most precise but most expensive)
+
+    Returns the sources list that fits within the token budget, at the
+    highest-fidelity tier possible.
+
+    max_tokens of 0 or None means "no budget limit" — returns Tier 1 immediately.
+    """
+    # No budget constraint → Tier 1 as-is
+    if not max_tokens or max_tokens <= 0:
+        return sources
+
+    # --- Tier 1 check ---
+    tier1_tokens = estimate_sources_total_tokens(sources)
+    log.info(f'[RAG] cascade: Tier 1 (full content) tokens={tier1_tokens} budget={max_tokens}')
+    if tier1_tokens <= max_tokens:
+        return sources
+
+    # --- Tier 2: index-only ---
+    index_only = build_index_only_sources(sources)
+    if index_only is not None:
+        tier2_tokens = estimate_sources_total_tokens(index_only)
+        log.info(f'[RAG] cascade: Tier 2 (index-only) tokens={tier2_tokens} budget={max_tokens}')
+        if tier2_tokens <= max_tokens:
+            if event_emitter:
+                await event_emitter(
+                    {
+                        'type': 'status',
+                        'data': {
+                            'action': 'rag_cascade',
+                            'description': 'Using document summaries to fit token budget',
+                            'done': False,
+                        },
+                    }
+                )
+            log.info('[RAG] cascade: Tier 2 (index-only) within budget')
+            return index_only
+
+    # --- Tier 3: sub-chat extraction on ORIGINAL full content ---
+    model_id = body['model']
+    user_query = get_last_user_message(body['messages'])
+
+    # Guard: sub-chat extraction without a user query is meaningless —
+    # the LLM needs a query to know what to extract. Fall back to the
+    # best available tier instead of making a pointless API call.
+    if user_query is None:
+        log.warning(
+            '[RAG] cascade: Tier 3 skipped — no user query available. Returning %s',
+            'Tier 2 (index-only)' if index_only is not None else 'Tier 1 (full, over budget)',
+        )
+        return index_only if index_only is not None else sources
+
+    if event_emitter:
+        await event_emitter(
+            {
+                'type': 'status',
+                'data': {
+                    'action': 'rag_cascade',
+                    'description': 'Extracting relevant content via sub-chat (over budget)',
+                    'done': False,
+                },
+            }
+        )
+    log.info('[RAG] cascade: Tier 3 (sub-chat extraction)')
+    concurrency = request.app.state.config.RAG_SUBCHAT_CONCURRENCY or 3
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _extract(src_idx, doc_idx, doc_text, doc_name):
+        async with semaphore:
+            return (
+                src_idx,
+                doc_idx,
+                await extract_relevant_content_from_document(
+                    request=request,
+                    model_id=model_id,
+                    user_query=user_query,
+                    document_content=doc_text,
+                    document_name=doc_name,
+                    user=user,
+                ),
+            )
+
+    # Build extraction tasks from the original (Tier 1) sources
+    tasks = []
+    for src_idx, source in enumerate(sources):
+        # `or []` handles both missing key AND metadata=None
+        metadatas = source.get('metadata') or []
+        for doc_idx, doc in enumerate(source.get('document', [])):
+            meta = metadatas[min(doc_idx, len(metadatas) - 1)] if metadatas else {}
+            doc_name = meta.get('name') or f'doc_{src_idx}'
+            tasks.append(_extract(src_idx, doc_idx, doc, doc_name))
+
+    # Deep copy sources so we don't mutate the original
+    extracted_sources = copy.deepcopy(sources)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Track per-doc success/failure for partial-failure event
+    failure_map: dict[str, str] = {}  # key: "src_idx/doc_idx" → reason
+    success_map: dict[str, bool] = {}
+
+    for result in results:
+        if isinstance(result, Exception):
+            # We cannot recover src_idx/doc_idx from the exception tuple here —
+            # the task raised before returning the tuple. Log and record generically.
+            log.error(f'[RAG] cascade Tier 3 extraction task raised: {result}')
+            continue
+        src_idx, doc_idx, extracted = result
+        key = f'{src_idx}/{doc_idx}'
+        if extracted is None:
+            # Sentinel: helper returned None — treat as extraction failure.
+            # Leave extracted_sources unchanged (retains Tier-1 content for this slot).
+            log.error(f'[RAG] cascade Tier 3 extraction returned None for doc {key}')
+            failure_map[key] = 'extraction_returned_none'
+        else:
+            extracted_sources[src_idx]['document'][doc_idx] = extracted
+            success_map[key] = True
+
+    # Emit partial-failure event if any extraction failed or raised.
+    # Guard: suppress the partial event when both maps are empty — this happens when
+    # every task raised an Exception (the exception path uses `continue`, so neither
+    # map is populated).  In that case only token_cascade_failed should fire (below).
+    any_failed = bool(failure_map) or any(isinstance(r, Exception) for r in results)
+    has_any_map_data = bool(success_map) or bool(failure_map)
+    if any_failed and has_any_map_data and event_emitter:
+        await event_emitter(
+            {
+                'type': 'status',
+                'data': {
+                    'action': 'token_cascade_partial',
+                    'description': 'Some documents failed Tier-3 extraction',
+                    'done': False,
+                    'success_map': success_map,
+                    'failure_map': failure_map,
+                },
+            }
+        )
+
+    # Re-measure after gather; if still over budget, escalate to cascade failure
+    post_tier3_tokens = estimate_sources_total_tokens(extracted_sources)
+    log.info(f'[RAG] cascade Tier 3 post-gather tokens={post_tier3_tokens} budget={max_tokens}')
+    if post_tier3_tokens > max_tokens:
+        log.error(
+            '[RAG] cascade Tier 3 completed but still over budget '
+            f'({post_tier3_tokens} > {max_tokens}); emitting token_cascade_failed'
+        )
+        if event_emitter:
+            await event_emitter(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'token_cascade_failed',
+                        'description': 'Tier-3 extraction could not fit sources within token budget',
+                        'done': True,
+                        'tokens': post_tier3_tokens,
+                        'max_tokens': max_tokens,
+                    },
+                }
+            )
+        return []
+
+    return extracted_sources
+
+
+async def extract_relevant_content_from_document(
+    request: Request,
+    model_id: str,
+    user_query: str,
+    document_content: str,
+    document_name: str,
+    user,
+    extraction_template: str = '',
+) -> str | None:
+    """
+    Spawn a sub-completion to extract query-relevant content from a document.
+
+    Returns ``None`` (sentinel) on dispatch or exception failures — specifically
+    when ``generate_chat_completion`` raises any exception (network error, timeout,
+    model unavailability, etc.).  Returns ``document_content`` (the original input,
+    unchanged) on degenerate non-exception cases: empty streaming content (the
+    ``body_iterator`` path yields no ``choices[0].message.content``) or an
+    unrecognized response format (neither ``body_iterator`` nor a ``choices``-keyed
+    dict).  Callers MUST handle the ``None`` sentinel explicitly; returning
+    ``document_content`` on the degenerate cases preserves the Tier-1 content
+    without masking the failure.
+    """
+    from open_webui.config import DEFAULT_RAG_SUBCHAT_EXTRACTION_TEMPLATE
+
+    if not extraction_template or not extraction_template.strip():
+        extraction_template = DEFAULT_RAG_SUBCHAT_EXTRACTION_TEMPLATE
+
+    payload = {
+        'model': model_id,
+        'messages': [
+            {'role': 'system', 'content': extraction_template},
+            {
+                'role': 'user',
+                'content': (
+                    f'Query: {user_query}\n\n'
+                    f'Document ({document_name}):\n'
+                    f'{document_content}\n\n'
+                    f'Extract the relevant information:'
+                ),
+            },
+        ],
+        'stream': False,
+        'metadata': {'task': 'rag_subchat_extraction'},
+    }
+
+    try:
+        response = await generate_chat_completion(request, form_data=payload, user=user, bypass_filter=True)
+        if hasattr(response, 'body_iterator'):
+            content = None
+            async for chunk in response.body_iterator:
+                data = json.loads(chunk.decode('utf-8', 'replace'))
+                if 'choices' in data and data['choices']:
+                    content = data['choices'][0].get('message', {}).get('content')
+            if hasattr(response, 'background') and response.background is not None:
+                await response.background()
+            return content or document_content
+        elif isinstance(response, dict) and 'choices' in response:
+            return response['choices'][0]['message']['content']
+        else:
+            return document_content
+    except Exception as e:
+        log.error(f'Sub-chat extraction failed for {document_name}: {e}')
+        return None  # Sentinel: caller must handle None; do NOT silently return original content
+
+
+def _build_direct_file_sources(
+    items: list[dict],
+) -> list[dict] | None:
+    """
+    Build RAG sources directly from file DB content (.md + .index.md),
+    bypassing vector search entirely.
+
+    Returns None if any file lacks content (caller should fall back to
+    the normal vector-search path).
+    """
+    sources = []
+    for item in items:
+        file_id = item.get('id')
+        if not file_id:
+            return None
+
+        file_obj = Files.get_file_by_id(file_id)
+        if not file_obj or not file_obj.data:
+            return None
+
+        content = (file_obj.data.get('content') or '').strip()
+        if not content:
+            return None
+
+        # Combine extracted content and AI-generated index
+        index_content = (file_obj.data.get('index_content') or '').strip()
+        if index_content:
+            combined = f'{content}\n\n---\n## Document Index\n\n{index_content}'
+        else:
+            combined = content
+
+        sources.append(
+            {
+                'source': {
+                    'id': file_id,
+                    'name': item.get('name') or file_obj.filename,
+                    'type': 'file',
+                },
+                'document': [combined],
+                'metadata': [
+                    {
+                        'file_id': file_id,
+                        'name': item.get('name') or file_obj.filename,
+                        'source': item.get('name') or file_obj.filename,
+                    }
+                ],
+            }
+        )
+
+    return sources if sources else None
+
+
 async def chat_completion_files_handler(
     request: Request, body: dict, extra_params: dict, user: UserModel
 ) -> tuple[dict, dict[str, list]]:
     __event_emitter__ = extra_params['__event_emitter__']
     sources = []
 
-    if files := body.get('metadata', {}).get('files', None):
+    files = body.get('metadata', {}).get('files', None) or []
+    user_collection_enabled = request.app.state.config.RAG_USER_COLLECTION_ENABLED
+
+    # ── Direct Content Mode ──────────────────────────────────────
+    # When the user only uploaded files (no collections), bypass vector search
+    # and inject full .md + .index.md content directly. This gives the LLM
+    # complete document context instead of top-k chunks.
+    only_uploaded_files = files and all(item.get('type') == 'file' for item in files)
+
+    if only_uploaded_files:
+        direct_sources = _build_direct_file_sources(files)
+        if direct_sources is not None:
+            log.info(
+                f'[RAG] direct content mode: {len(direct_sources)} files, bypassing vector search for uploaded files'
+            )
+            sources = direct_sources
+
+            await __event_emitter__(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'direct_content',
+                        'description': 'Using full document content for uploaded files',
+                        'done': True,
+                    },
+                }
+            )
+
+            # Apply 3-tier token budget cascade (full → index-only → sub-chat)
+            max_tokens = request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS
+            sources = await apply_token_budget_cascade(
+                sources=sources,
+                max_tokens=max_tokens,
+                request=request,
+                body=body,
+                user=user,
+                event_emitter=__event_emitter__,
+            )
+
+            # Emit final source count
+            unique_ids = set()
+            for source in sources:
+                for meta in source.get('metadata') or []:
+                    unique_ids.add(meta.get('source') or meta.get('file_id') or 'N/A')
+            total_ctx_tokens = estimate_sources_total_tokens(sources)
+            log.info(f'[RAG] direct content final: {len(unique_ids)} sources, ~{total_ctx_tokens} tokens')
+            await __event_emitter__(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'sources_retrieved',
+                        'count': len(unique_ids),
+                        'done': True,
+                    },
+                }
+            )
+            return body, {'sources': sources}
+
+    if files or user_collection_enabled:
         # Check if all files are in full context mode
-        all_full_context = all(item.get('context') == 'full' for item in files)
+        all_full_context = all(item.get('context') == 'full' for item in files) if files else False
 
         queries = []
         if not all_full_context:
@@ -1972,7 +2467,7 @@ async def chat_completion_files_handler(
 
                     queries_response = queries_response[bracket_start:bracket_end]
                     queries_response = json.loads(queries_response)
-                except Exception as e:
+                except Exception:
                     queries_response = {'queries': [queries_response]}
 
                 queries = queries_response.get('queries', [])
@@ -1990,35 +2485,136 @@ async def chat_completion_files_handler(
                 }
             )
 
+        # If model returned no queries, decide whether to fallback
+        # Skip user collection when the user has attached files — the user is
+        # asking about *those* files, not their entire cross-chat collection.
+        has_attached_files = any(item.get('type') == 'file' for item in files)
+        skip_user_collection = has_attached_files
+
         if len(queries) == 0:
+            if files:
+                # Has attached files — always search them with user message
+                queries = [get_last_user_message(body['messages'])]
+            elif user_collection_enabled:
+                # Only user collection, no attached files —
+                # model decided no retrieval needed, skip user collection search
+                skip_user_collection = True
+                log.info('[RAG] model determined no retrieval needed, skipping user collection')
+
+        if not queries and not skip_user_collection:
             queries = [get_last_user_message(body['messages'])]
 
+        log.info(f'[RAG] queries: {queries} skip_user_collection={skip_user_collection}')
+
+        # Inject user collection for cross-chat RAG if enabled
+        if request.app.state.config.RAG_USER_COLLECTION_ENABLED and not skip_user_collection:
+            user_collection_name = f'user-{user.id}'
+            # Avoid duplicating if already present
+            existing_collections = {item.get('collection_name') for item in files if item.get('collection_name')}
+            if user_collection_name not in existing_collections:
+                files.append(
+                    {
+                        'collection_name': user_collection_name,
+                        'name': 'User Collection',
+                        'type': 'user_collection',
+                    }
+                )
+
+        # Split items: user collection must ALWAYS use vector search (never full_context)
+        # even when RAG_FULL_CONTEXT is globally enabled.
+        user_collection_items = [item for item in files if item.get('type') == 'user_collection']
+        other_items = [item for item in files if item.get('type') != 'user_collection']
+        log.info(
+            f'[RAG] retrieval split: other_items={len(other_items)}, user_collection_items={len(user_collection_items)}'
+        )
+
+        # Common kwargs shared by both retrieval calls
+        _retrieval_kwargs = dict(
+            request=request,
+            queries=queries,
+            embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                query, prefix=prefix, user=user
+            ),
+            k=request.app.state.config.TOP_K,
+            reranking_function=(
+                (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
+                if request.app.state.RERANKING_FUNCTION
+                else None
+            ),
+            k_reranker=request.app.state.config.TOP_K_RERANKER,
+            r=request.app.state.config.RELEVANCE_THRESHOLD,
+            hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
+            hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+            user=user,
+        )
+
+        other_sources = []
+        user_collection_sources = []
+
         try:
-            # Directly await async get_sources_from_items (no thread needed - fully async now)
-            sources = await get_sources_from_items(
-                request=request,
-                items=files,
-                queries=queries,
-                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
-                    query, prefix=prefix, user=user
-                ),
-                k=request.app.state.config.TOP_K,
-                reranking_function=(
-                    (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
-                    if request.app.state.RERANKING_FUNCTION
-                    else None
-                ),
-                k_reranker=request.app.state.config.TOP_K_RERANKER,
-                r=request.app.state.config.RELEVANCE_THRESHOLD,
-                hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
-                hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
-                full_context=all_full_context or request.app.state.config.RAG_FULL_CONTEXT,
-                user=user,
-            )
+            # Retrieve other items (files, collections) — respects global full_context setting
+            if other_items:
+                other_sources = await get_sources_from_items(
+                    items=other_items,
+                    full_context=all_full_context or request.app.state.config.RAG_FULL_CONTEXT,
+                    **_retrieval_kwargs,
+                )
+            else:
+                other_sources = []
+
+            # Retrieve user collection — ALWAYS vector search, never dump all chunks
+            if user_collection_items:
+                user_collection_sources = await get_sources_from_items(
+                    items=user_collection_items,
+                    full_context=False,
+                    **_retrieval_kwargs,
+                )
+            else:
+                user_collection_sources = []
+
+            sources = other_sources + user_collection_sources
         except Exception as e:
             log.exception(e)
 
-        log.debug(f'rag_contexts:sources: {sources}')
+        # Log retrieval results (raw, before Phase A / cascade)
+        for i, src in enumerate(sources):
+            metas = src.get('metadata') or []
+            docs = src.get('document') or []
+            name = metas[0].get('name', '?') if metas else '?'
+            doc_lens = [len(d) if isinstance(d, str) else 0 for d in docs]
+            meta_types = [m.get('type', '-') for m in metas]
+            log.info(f'[RAG] retrieval hit [{i}]: {name} chunks={len(docs)} lens={doc_lens} types={meta_types}')
+
+        # ── Phase A + 3-tier cascade ──────────────────────────────
+        # User collection: ALWAYS expand + cascade (vector search is file selector)
+        # Other sources:   expand + cascade only when RAG_FULL_DOCUMENT_CONTEXT is on
+        max_tokens = request.app.state.config.RAG_FULL_DOCUMENT_MAX_TOKENS
+
+        if user_collection_sources:
+            user_collection_sources = expand_sources_to_full_documents(user_collection_sources)
+            log.info(f'[RAG] user collection Phase A: expanded to {len(user_collection_sources)} full document sources')
+            user_collection_sources = await apply_token_budget_cascade(
+                sources=user_collection_sources,
+                max_tokens=max_tokens,
+                request=request,
+                body=body,
+                user=user,
+                event_emitter=__event_emitter__,
+            )
+
+        if other_sources and request.app.state.config.RAG_FULL_DOCUMENT_CONTEXT:
+            other_sources = expand_sources_to_full_documents(other_sources)
+            log.info(f'[RAG] other sources Phase A: expanded to {len(other_sources)} full document sources')
+            other_sources = await apply_token_budget_cascade(
+                sources=other_sources,
+                max_tokens=max_tokens,
+                request=request,
+                body=body,
+                user=user,
+                event_emitter=__event_emitter__,
+            )
+
+        sources = other_sources + user_collection_sources
 
         unique_ids = set()
         for source in sources or []:
@@ -2035,6 +2631,8 @@ async def chat_completion_files_handler(
                 unique_ids.add(_id)
 
         sources_count = len(unique_ids)
+        total_ctx_tokens = estimate_sources_total_tokens(sources) if sources else 0
+        log.info(f'[RAG] final: {sources_count} sources, ~{total_ctx_tokens} tokens injected into context')
         await __event_emitter__(
             {
                 'type': 'status',
@@ -2180,6 +2778,74 @@ def process_messages_with_output(messages: list[dict]) -> list[dict]:
     return processed
 
 
+def inject_analyzed_images(form_data: dict, model: dict) -> dict:
+    """
+    For images that have been analyzed (file.data.content exists):
+      1. Add to metadata.files so they enter the RAG pipeline (like .pdf/.doc)
+      2. For non-vision models: strip image_url from message content
+
+    Must run BEFORE convert_url_images_to_base64, while image URLs are still
+    file UUIDs (not yet base64).
+
+    NOTE: Full image-analysis integration is Wave 5 scope (utils/image_analysis.py).
+    This stub ensures tests that patch this symbol can load correctly.
+    """
+    model_has_vision = (((model.get('info') or {}).get('meta') or {}).get('capabilities') or {}).get('vision', True)
+
+    files_metadata = form_data.get('metadata', {}).get('files', None) or []
+    existing_file_ids = {f.get('id') for f in files_metadata}
+
+    for message in form_data.get('messages', []):
+        content = message.get('content')
+        if not isinstance(content, list):
+            continue
+
+        new_content = []
+        for item in content:
+            if not isinstance(item, dict) or item.get('type') != 'image_url':
+                new_content.append(item)
+                continue
+
+            url = item.get('image_url', {}).get('url', '')
+
+            # Already base64 or external URL — can't look up file
+            if url.startswith('data:') or url.startswith('http'):
+                if model_has_vision:
+                    new_content.append(item)
+                continue
+
+            # URL is a file UUID — look up analyzed content
+            file_obj = Files.get_file_by_id(url)
+
+            # Add analyzed image to files metadata for RAG context injection
+            if file_obj and file_obj.data and file_obj.data.get('content') and url not in existing_file_ids:
+                files_metadata.append(
+                    {
+                        'id': url,
+                        'name': file_obj.filename,
+                        'type': 'file',
+                        'content_type': (file_obj.meta.get('content_type') if file_obj.meta else None),
+                    }
+                )
+                existing_file_ids.add(url)
+
+            if model_has_vision:
+                new_content.append(item)
+            else:
+                if not (file_obj and file_obj.data and file_obj.data.get('content')):
+                    filename = file_obj.filename if file_obj else 'unknown'
+                    new_content.append(
+                        {
+                            'type': 'text',
+                            'text': f'[Image: {filename} — analysis pending]',
+                        }
+                    )
+
+        message['content'] = new_content
+
+    return form_data
+
+
 async def process_chat_payload(request, form_data, user, metadata, model):
     # Pipeline Inlet -> Filter Inlet -> Chat Memory -> Chat Web Search -> Chat Image Generation
     # -> Chat Code Interpreter (Form Data Update) -> (Default) Chat Tools Function Calling
@@ -2216,6 +2882,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     form_data = apply_params_to_form_data(form_data, model)
     log.debug(f'form_data: {form_data}')
+
+    # Check if this model should bypass all RAG processing (default False)
+    skip_rag = (((model.get('info') or {}).get('meta') or {}).get('capabilities') or {}).get('skip_rag', False)
 
     # Load messages from DB when available — DB preserves structured 'output' items
     # which the frontend strips, causing tool calls to be merged into content.
@@ -2264,10 +2933,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         except Exception:
             pass
 
+    form_data = inject_analyzed_images(form_data, model)
     form_data = await convert_url_images_to_base64(form_data)
 
-    event_emitter = await get_event_emitter(metadata)
-    event_caller = await get_event_call(metadata)
+    event_emitter = get_event_emitter(metadata)
+    event_caller = get_event_call(metadata)
 
     extra_params = {
         '__event_emitter__': event_emitter,
@@ -2332,7 +3002,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     user_message = get_last_user_message(form_data['messages'])
     model_knowledge = model.get('info', {}).get('meta', {}).get('knowledge', False)
 
-    if model_knowledge and metadata.get('params', {}).get('function_calling') != 'native':
+    if model_knowledge and not skip_rag and metadata.get('params', {}).get('function_calling') != 'native':
         await event_emitter(
             {
                 'type': 'status',
@@ -2777,15 +3447,107 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 except Exception as e:
                     log.exception(e)
 
+    # ── Pre-RAG snapshot ──
+    # Capture user message BEFORE any RAG/file-content injection.
+    # Used by skill keyword intercept (which needs the raw user intent,
+    # not the prompt with docling markdown injected).
+    _pre_rag_last_user_msg = get_last_user_message(form_data['messages'])
+    _pre_rag_messages = [{k: v for k, v in m.items()} for m in form_data.get('messages', [])]
+
+    # ── Predict agent-skill keyword intercept ──
+    # The skill intercept below (search for "__agent_skill_result__") short-circuits
+    # the main LLM when the user's message names an active agent_skill.  In that case
+    # RAG / skip_rag injection is wasted work: the LLM never sees the context and the
+    # caller streams the skill output synthetically.
+    # We do the name match ONCE here and reuse the result as a gate for the RAG/skip_rag
+    # branches and as the match for the execution block.  This is prediction-based
+    # short-circuit, not post-hoc cleanup.
+    matched_skill = None
+    if available_skills and _pre_rag_last_user_msg:
+        _msg_lower = _pre_rag_last_user_msg.lower()
+        for _sk in available_skills:
+            _sk_meta_for_match = _sk.meta.model_dump() if hasattr(_sk.meta, 'model_dump') else _sk.meta
+            if (_sk_meta_for_match or {}).get('type') == 'agent_skill' and _sk.name.lower() in _msg_lower:
+                matched_skill = _sk
+                break
+
     # Check if file context extraction is enabled for this model (default True)
     file_context_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('file_context', True)
 
-    if file_context_enabled:
+    if matched_skill:
+        log.info(
+            f'[skill-intercept] predicted {matched_skill.name!r} will fire — '
+            'bypassing RAG/skip_rag injection to avoid wasted work'
+        )
+    elif file_context_enabled and not skip_rag:
         try:
             form_data, flags = await chat_completion_files_handler(request, form_data, extra_params, user)
             sources.extend(flags.get('sources', []))
         except Exception as e:
             log.exception(e)
+    elif skip_rag:
+        log.info('[skip_rag] RAG bypass active — skipping query generation, user collection, and KB retrieval')
+
+        # ── Docling-based direct MD injection for skip_rag ─────────
+        # All business logic lives in utils/skip_rag.py (build_skip_rag_context).
+        # Dependency injection: pass callable references from THIS module's namespace
+        # so that test patches on open_webui.utils.middleware.Files / Storage / etc.
+        # continue to intercept correctly without patching skip_rag.py internals.
+        skip_rag_files = form_data.get('metadata', {}).get('files', None) or []
+        if skip_rag_files:
+            from open_webui.storage.provider import Storage as _Storage
+            from open_webui.utils.docling import (
+                SUPPORTED_EXTENSIONS as _DOCLING_EXTS,
+            )
+            from open_webui.utils.docling import (
+                convert_to_markdown as _docling_convert,
+            )
+
+            _skip_rag_ctx = await _build_skip_rag_context(
+                files_list=skip_rag_files,
+                messages=form_data.get('messages', []),
+                get_file_fn=Files.get_file_by_id,
+                update_file_fn=Files.update_file_data_by_id,
+                docling_convert_fn=_docling_convert,
+                storage_get_file_fn=_Storage.get_file,
+                docling_exts=_DOCLING_EXTS,
+            )
+
+            # Emit truncation events collected by the near-pure function.
+            for _trunc_event in _skip_rag_ctx.truncation_events:
+                await event_emitter(_trunc_event)
+
+            if _skip_rag_ctx.context_block:
+                direct_context = _skip_rag_ctx.context_block
+
+                # Prepend preamble as system message (idempotent — guard fired in fn).
+                if _skip_rag_ctx.preamble_needed:
+                    form_data['messages'] = [
+                        {'role': 'system', 'content': _SKIP_RAG_PREAMBLE},
+                        *form_data.get('messages', []),
+                    ]
+
+                if RAG_SYSTEM_CONTEXT:
+                    form_data['messages'] = add_or_update_system_message(
+                        direct_context,
+                        form_data['messages'],
+                        append=True,
+                    )
+                else:
+                    form_data['messages'] = add_or_update_user_message(
+                        direct_context,
+                        form_data['messages'],
+                        append=False,
+                    )
+
+                sources.extend(_skip_rag_ctx.sources)
+
+                log.info(
+                    f'[skip_rag] injected {len(_skip_rag_ctx.sources)} file(s) '
+                    f'directly into prompt ({len(direct_context)} chars)'
+                )
+            else:
+                log.info('[skip_rag] files attached but none produced content — no injection performed')
 
     # Save the pre-RAG message state so the native tool call loop can
     # restore to the true original (before file-source injection) rather

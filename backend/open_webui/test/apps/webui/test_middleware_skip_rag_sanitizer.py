@@ -192,8 +192,8 @@ def _all_patches(file_db, event_emitter_fn, additional_patches=None):
     """
     patches = [
         (f'{PATCH_BASE}.process_pipeline_inlet_filter', AsyncMock(side_effect=lambda req, fd, ep, u: fd)),
-        (f'{PATCH_BASE}.get_sorted_filter_ids', MagicMock(return_value=[])),
-        (f'{PATCH_BASE}.Functions.get_functions_by_ids', MagicMock(return_value=[])),
+        (f'{PATCH_BASE}.get_sorted_filter_ids', AsyncMock(return_value=[])),
+        (f'{PATCH_BASE}.Functions.get_functions_by_ids', AsyncMock(return_value=[])),
         (f'{PATCH_BASE}.process_filter_functions', AsyncMock(side_effect=lambda **kw: (kw['form_data'], {}))),
         (f'{PATCH_BASE}.apply_params_to_form_data', MagicMock(side_effect=lambda fd, m: fd)),
         (f'{PATCH_BASE}.get_event_emitter', MagicMock(return_value=event_emitter_fn)),
@@ -201,12 +201,12 @@ def _all_patches(file_db, event_emitter_fn, additional_patches=None):
         (f'{PATCH_BASE}.convert_url_images_to_base64', AsyncMock(side_effect=lambda fd: fd)),
         (f'{PATCH_BASE}.inject_analyzed_images', MagicMock(side_effect=lambda fd, m: fd)),
         (f'{PATCH_BASE}.process_messages_with_output', MagicMock(side_effect=lambda msgs: msgs)),
-        (f'{PATCH_BASE}.Chats.get_chat_by_id_and_user_id', MagicMock(return_value=None)),
-        (f'{PATCH_BASE}.Chats.get_chat_folder_id', MagicMock(return_value=None)),
-        (f'{PATCH_BASE}.Folders.get_folder_by_id_and_user_id', MagicMock(return_value=None)),
+        (f'{PATCH_BASE}.Chats.get_chat_by_id_and_user_id', AsyncMock(return_value=None)),
+        (f'{PATCH_BASE}.Chats.get_chat_folder_id', AsyncMock(return_value=None)),
+        (f'{PATCH_BASE}.Folders.get_folder_by_id_and_user_id', AsyncMock(return_value=None)),
         (f'{PATCH_BASE}.get_system_oauth_token', AsyncMock(return_value=None)),
-        (f'{PATCH_BASE}.Files.get_file_by_id', MagicMock(side_effect=lambda fid: file_db.get(fid))),
-        (f'{PATCH_BASE}.Files.update_file_data_by_id', MagicMock(return_value=None)),
+        (f'{PATCH_BASE}.Files.get_file_by_id', AsyncMock(side_effect=lambda fid: file_db.get(fid))),
+        (f'{PATCH_BASE}.Files.update_file_data_by_id', AsyncMock(return_value=None)),
     ]
     if additional_patches:
         patches.extend(additional_patches)

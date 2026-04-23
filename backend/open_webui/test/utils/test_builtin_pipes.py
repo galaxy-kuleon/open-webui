@@ -8,10 +8,13 @@ Covers 4 scenarios:
 
 All mocks go through pytest monkeypatch so they are automatically restored.
 No shared mutable state between tests.
+
+NOTE: ensure_builtin_pipes is async (v0.9.1 model methods are all async).
+All DB mock callables are AsyncMock and tests are marked pytest.mark.asyncio.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -33,17 +36,14 @@ def _fake_existing(content_hash: str):
     """Return a fake FunctionModel with the given content hash in meta."""
     return SimpleNamespace(
         id='hermes_agent',
-        meta=SimpleNamespace(
-            model_dump=lambda: {
-                'manifest': {'content_hash': content_hash, 'builtin': True}
-            }
-        ),
+        meta=SimpleNamespace(model_dump=lambda: {'manifest': {'content_hash': content_hash, 'builtin': True}}),
     )
 
 
 # ---------------------------------------------------------------------------
 # Fixture: patch the pipe source path so no real file I/O occurs
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def patch_pipe_source(monkeypatch):
@@ -63,17 +63,19 @@ def patch_pipe_source(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Fixture: patch Users and Functions on their modules
+# Fixture: patch Users and Functions on their modules with AsyncMock
+# (all model methods are async in v0.9.1)
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def mock_users(monkeypatch):
-    """Return a namespace of mock callables for Users methods."""
+    """Return a namespace of AsyncMock callables for Users methods."""
     from open_webui.models import users as users_mod
 
     mocks = {
-        'get_super_admin_user': MagicMock(return_value=None),
-        'get_first_user': MagicMock(return_value=None),
+        'get_super_admin_user': AsyncMock(return_value=None),
+        'get_first_user': AsyncMock(return_value=None),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(users_mod.Users, name, staticmethod(mock))
@@ -82,13 +84,13 @@ def mock_users(monkeypatch):
 
 @pytest.fixture()
 def mock_functions(monkeypatch):
-    """Return a namespace of mock callables for Functions methods."""
+    """Return a namespace of AsyncMock callables for Functions methods."""
     from open_webui.models import functions as fn_mod
 
     mocks = {
-        'get_function_by_id': MagicMock(return_value=None),
-        'insert_new_function': MagicMock(return_value=SimpleNamespace(id='hermes_agent')),
-        'update_function_by_id': MagicMock(return_value=None),
+        'get_function_by_id': AsyncMock(return_value=None),
+        'insert_new_function': AsyncMock(return_value=SimpleNamespace(id='hermes_agent')),
+        'update_function_by_id': AsyncMock(return_value=None),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(fn_mod.Functions, name, staticmethod(mock))
@@ -99,7 +101,9 @@ def mock_functions(monkeypatch):
 # Scenario (a): no users → returns early, no Functions calls
 # ---------------------------------------------------------------------------
 
-def test_no_users_returns_early(mock_users, mock_functions):
+
+@pytest.mark.asyncio
+async def test_no_users_returns_early(mock_users, mock_functions):
     """When both get_super_admin_user and get_first_user return None,
     ensure_builtin_pipes must return without touching Functions at all."""
     mock_users['get_super_admin_user'].return_value = None
@@ -107,7 +111,7 @@ def test_no_users_returns_early(mock_users, mock_functions):
 
     from open_webui.utils.builtin_pipes import ensure_builtin_pipes
 
-    ensure_builtin_pipes()
+    await ensure_builtin_pipes()
 
     mock_functions['get_function_by_id'].assert_not_called()
     mock_functions['insert_new_function'].assert_not_called()
@@ -118,7 +122,9 @@ def test_no_users_returns_early(mock_users, mock_functions):
 # Scenario (b): first user exists, pipe not in DB → insert + activate
 # ---------------------------------------------------------------------------
 
-def test_new_pipe_is_inserted_and_activated(mock_users, mock_functions):
+
+@pytest.mark.asyncio
+async def test_new_pipe_is_inserted_and_activated(mock_users, mock_functions):
     """When no super-admin exists but a first user does, and the pipe is absent
     from the DB, ensure_builtin_pipes must call insert_new_function then
     update_function_by_id({is_active: True})."""
@@ -128,7 +134,7 @@ def test_new_pipe_is_inserted_and_activated(mock_users, mock_functions):
 
     from open_webui.utils.builtin_pipes import ensure_builtin_pipes
 
-    ensure_builtin_pipes()
+    await ensure_builtin_pipes()
 
     # insert called once with correct positional args
     assert mock_functions['insert_new_function'].call_count == 1
@@ -146,19 +152,18 @@ def test_new_pipe_is_inserted_and_activated(mock_users, mock_functions):
 
     # activate call: update_function_by_id('hermes_agent', {'is_active': True})
     activate_calls = [
-        c for c in mock_functions['update_function_by_id'].call_args_list
-        if c[0][1] == {'is_active': True}
+        c for c in mock_functions['update_function_by_id'].call_args_list if c[0][1] == {'is_active': True}
     ]
-    assert len(activate_calls) == 1, (
-        'Expected exactly one update_function_by_id call with {is_active: True}'
-    )
+    assert len(activate_calls) == 1, 'Expected exactly one update_function_by_id call with {is_active: True}'
 
 
 # ---------------------------------------------------------------------------
 # Scenario (c): pipe exists with matching hash → no DB write
 # ---------------------------------------------------------------------------
 
-def test_matching_hash_skips_db_write(mock_users, mock_functions):
+
+@pytest.mark.asyncio
+async def test_matching_hash_skips_db_write(mock_users, mock_functions):
     """When the pipe exists in DB with the same content hash as the file,
     ensure_builtin_pipes must not call insert or update."""
     mock_users['get_super_admin_user'].return_value = _FAKE_USER
@@ -166,7 +171,7 @@ def test_matching_hash_skips_db_write(mock_users, mock_functions):
 
     from open_webui.utils.builtin_pipes import ensure_builtin_pipes
 
-    ensure_builtin_pipes()
+    await ensure_builtin_pipes()
 
     mock_functions['insert_new_function'].assert_not_called()
     mock_functions['update_function_by_id'].assert_not_called()
@@ -176,7 +181,9 @@ def test_matching_hash_skips_db_write(mock_users, mock_functions):
 # Scenario (d): pipe exists with different hash → update_function_by_id
 # ---------------------------------------------------------------------------
 
-def test_changed_hash_triggers_update(mock_users, mock_functions):
+
+@pytest.mark.asyncio
+async def test_changed_hash_triggers_update(mock_users, mock_functions):
     """When the pipe exists in DB but its stored hash differs from the file,
     ensure_builtin_pipes must call update_function_by_id with new content."""
     mock_users['get_super_admin_user'].return_value = _FAKE_USER
@@ -184,7 +191,7 @@ def test_changed_hash_triggers_update(mock_users, mock_functions):
 
     from open_webui.utils.builtin_pipes import ensure_builtin_pipes
 
-    ensure_builtin_pipes()
+    await ensure_builtin_pipes()
 
     mock_functions['insert_new_function'].assert_not_called()
 

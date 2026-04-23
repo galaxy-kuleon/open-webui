@@ -138,7 +138,7 @@ async def build_skip_rag_context(
         if not file_id:
             continue
 
-        file_obj = get_file_fn(file_id)
+        file_obj = await get_file_fn(file_id)
         if not file_obj:
             log.warning(f'[skip_rag] file {file_id} not found — skipping')
             continue

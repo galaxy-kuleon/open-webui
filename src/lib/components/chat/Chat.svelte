@@ -908,9 +908,22 @@
 				};
 			}
 
+			// When all selected models have skip_rag, skip embedding at upload time
+			// and set skip_rag metadata so middleware handles docling at chat time.
+			const effectiveModels = atSelectedModel?.id ? [atSelectedModel.id] : selectedModels;
+			const allSkipRag =
+				effectiveModels.length > 0 &&
+				effectiveModels.every(
+					(id) => $models.find((m) => m.id === id)?.info?.meta?.capabilities?.skip_rag === true
+				);
+			if (allSkipRag) {
+				metadata = { ...(metadata || {}), skip_rag: true };
+			}
+			const process = allSkipRag ? false : null;
+
 			// Upload file to server
 			console.log('Uploading file to server...');
-			const uploadedFile = await uploadFile(localStorage.token, file, metadata);
+			const uploadedFile = await uploadFile(localStorage.token, file, metadata, process);
 
 			if (!uploadedFile) {
 				throw new Error('Server returned null response for file upload');
