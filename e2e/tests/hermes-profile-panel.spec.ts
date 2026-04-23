@@ -9,14 +9,15 @@ import { login } from '../helpers/auth';
  *   2. hermes-agent reachable with /v1/memory/tool endpoint live (W3)
  *   3. active provider that supports fact_store (holographic OK for W3b)
  *
- * Selector contract (from HermesMemory.svelte):
- *   - panel:        [data-testid="hermes-memory-panel"]
- *   - new-fact:     [data-testid="hermes-memory-new-fact-input"]
- *   - add button:   [data-testid="hermes-memory-add-button"]
- *   - search input: [data-testid="hermes-memory-search-input"]
- *   - fact list:    [data-testid="hermes-memory-fact-list"]
- *   - delete btn:   [data-testid="hermes-memory-delete-button"]
- *   - tab button:   [data-testid="hermes-memory-tab-button"]
+ * Selector contract (from SettingsModal.svelte + HermesMemory.svelte):
+ *   - settings dialog: getByRole('dialog')
+ *   - hermes tab:      button[role="tab"] with text "Hermes Memory"
+ *   - panel:           [data-testid="hermes-memory-panel"]
+ *   - new-fact:        [data-testid="hermes-memory-new-fact-input"]
+ *   - add button:      [data-testid="hermes-memory-add-button"]
+ *   - search input:    [data-testid="hermes-memory-search-input"]
+ *   - fact list:       [data-testid="hermes-memory-fact-list"]
+ *   - delete btn:      [data-testid="hermes-memory-delete-button"]
  *
  * This spec is intentionally not auto-run until a live stack is available.
  */
@@ -29,11 +30,11 @@ test.describe('Hermes memory profile panel', () => {
 
 		// Open Settings modal (keyboard shortcut or menu click — follow existing
 		// patterns from other settings e2e tests in this repo)
-		await page.keyboard.press('Meta+Comma');
+		await page.keyboard.press('Control+.');
 		await expect(page.getByRole('dialog').first()).toBeVisible({ timeout: 15_000 });
 
 		// Click the Hermes memory tab
-		await page.locator('[data-testid="hermes-memory-tab-button"]').click();
+		await page.getByRole('tab', { name: 'Hermes Memory' }).click();
 
 		// Panel visible
 		await expect(page.locator('[data-testid="hermes-memory-panel"]')).toBeVisible();
@@ -41,8 +42,9 @@ test.describe('Hermes memory profile panel', () => {
 
 	test('add a fact and it appears in the list', async ({ page }) => {
 		await login(page);
-		await page.keyboard.press('Meta+Comma');
-		await page.locator('[data-testid="hermes-memory-tab-button"]').click();
+		await page.keyboard.press('Control+.');
+		await expect(page.getByRole('dialog').first()).toBeVisible({ timeout: 15_000 });
+		await page.getByRole('tab', { name: 'Hermes Memory' }).click();
 		await expect(page.locator('[data-testid="hermes-memory-panel"]')).toBeVisible();
 
 		const unique = `test-fact-${Date.now()}`;
@@ -59,8 +61,9 @@ test.describe('Hermes memory profile panel', () => {
 
 	test('search returns relevant facts', async ({ page }) => {
 		await login(page);
-		await page.keyboard.press('Meta+Comma');
-		await page.locator('[data-testid="hermes-memory-tab-button"]').click();
+		await page.keyboard.press('Control+.');
+		await expect(page.getByRole('dialog').first()).toBeVisible({ timeout: 15_000 });
+		await page.getByRole('tab', { name: 'Hermes Memory' }).click();
 
 		// Seed a fact to search for
 		const token = `searchable-${Date.now()}`;

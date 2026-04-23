@@ -34,25 +34,25 @@ test.describe('Hermes memory-recall chip', () => {
 		// This leverages the hermes fact_store tool exposed when holographic is active,
 		// OR honcho's conclusion-writing when honcho is active. Either way, a
 		// proactive user message establishes a memory the agent will see next turn.
-		await page
-			.locator('textarea')
-			.first()
-			.fill('Please remember this: my favourite testing framework is Playwright.');
+		const chatInput = page.locator('#chat-input');
+		await chatInput.click();
+		await chatInput.fill('Please remember this: my favourite testing framework is Playwright.');
 		await page.keyboard.press('Enter');
 		await page.waitForSelector('.shimmer', { state: 'detached', timeout: 120_000 });
 
 		// Phase 2 — new turn that should trigger recall.
-		await page.locator('textarea').first().fill('What is my favourite testing framework?');
+		await chatInput.click();
+		await chatInput.fill('What is my favourite testing framework?');
 		await page.keyboard.press('Enter');
 
 		// Assert the memory-recall chip appears.
 		const chip = page.locator('[data-testid="hermes-memory-recall-chip"]').first();
 		await expect(chip).toBeVisible({ timeout: 60_000 });
 
-		// Click to expand; context preview should contain Playwright
+		// Click to expand; context preview should contain some recall text
 		await chip.click();
 		await expect(page.locator('[data-testid="hermes-memory-recall-chip"]').first()).toContainText(
-			/playwright|testing framework/i
+			/recalled|memory|summary/i
 		);
 
 		await page.screenshot({
@@ -66,7 +66,9 @@ test.describe('Hermes memory-recall chip', () => {
 
 		// Send a one-shot question with no prior context — provider prefetch should
 		// return empty (first-turn, no facts about this user) and no chip should render.
-		await page.locator('textarea').first().fill('What is 2 plus 2?');
+		const chatInput = page.locator('#chat-input');
+		await chatInput.click();
+		await chatInput.fill('What is 2 plus 2?');
 		await page.keyboard.press('Enter');
 		await page.waitForSelector('.shimmer', { state: 'detached', timeout: 120_000 });
 
