@@ -71,6 +71,30 @@ def resize_image_for_analysis(file_path: str, max_width: int = 2000) -> str:
     return f'data:{mime};base64,{encoded}'
 
 
+def _update_file_data_sync(app: Any, file_id: str, data: dict) -> None:
+    """
+    Synchronous bridge for Files.update_file_data_by_id (which is async in v0.9.1).
+
+    Dispatches the coroutine onto the main event loop from a sync/thread context —
+    the same pattern used by call_vision_llm.  Failures are logged as warnings and
+    swallowed so a status-update error never kills the analysis pipeline.
+    """
+    from open_webui.models.files import Files
+
+    loop = getattr(getattr(app, 'state', None), 'main_loop', None)
+    if loop is None or loop.is_closed():
+        log.warning(f'Cannot update file {file_id}: app.state.main_loop not available')
+        return
+    future = asyncio.run_coroutine_threadsafe(
+        Files.update_file_data_by_id(file_id, data),
+        loop,
+    )
+    try:
+        future.result(timeout=5.0)
+    except Exception as e:
+        log.warning(f'Failed to update file {file_id} data: {e}')
+
+
 def _build_vision_messages(prompt: str, image_b64_uri: str) -> list[dict]:
     """Build OpenAI-format multimodal messages for a vision LLM call."""
     return [
@@ -169,7 +193,7 @@ def _run_kg1_ocr(app: Any, stored_file_path: str, file_id: str) -> str:
         soffice_path=config.KG1_SOFFICE_PATH or 'soffice',
         timeout=kg1_timeout,
         concurrency=kg1_concurrency,
-        status_callback=lambda s: Files.update_file_data_by_id(file_id, {'status': s}),
+        status_callback=lambda s: _update_file_data_sync(app, file_id, {'status': s}),
     )
 
     docs = loader.load()
@@ -236,7 +260,7 @@ def analyze_image(
         stored_path = str(stored_path) if stored_path else file_path
 
         # Step 1: Resize for classifier
-        Files.update_file_data_by_id(file_id, {'status': 'processing:classifying'})
+        _update_file_data_sync(app, file_id, {'status': 'processing:classifying'})
         log.info(f'Image analysis: classifying {file_id} (max_width={max_width})')
 
         image_b64 = resize_image_for_analysis(stored_path, max_width)
@@ -253,15 +277,15 @@ def analyze_image(
         # Step 3: Process based on classification
         if is_ocr:
             if _is_kg1_configured(config):
-                Files.update_file_data_by_id(file_id, {'status': 'processing:extracting (OCR)'})
+                _update_file_data_sync(app, file_id, {'status': 'processing:extracting (OCR)'})
                 log.info(f'Image analysis: running KG1 OCR on {file_id}')
                 content = _run_kg1_ocr(app, stored_path, file_id)
             else:
-                Files.update_file_data_by_id(file_id, {'status': 'processing:extracting (vision fallback)'})
+                _update_file_data_sync(app, file_id, {'status': 'processing:extracting (vision fallback)'})
                 log.info(f'Image analysis: KG1 not configured, using vision OCR fallback for {file_id}')
                 content = _run_vision_ocr_fallback(app, image_b64, model_id, user=user)
         else:
-            Files.update_file_data_by_id(file_id, {'status': 'processing:describing'})
+            _update_file_data_sync(app, file_id, {'status': 'processing:describing'})
             log.info(f'Image analysis: describing {file_id}')
             content = call_vision_llm(app, DESCRIBE_PROMPT, image_b64, model_id, timeout=120.0, user=user)
 
@@ -270,7 +294,8 @@ def analyze_image(
 
         # Step 4: Store result
         analysis_type = 'ocr' if is_ocr else 'description'
-        Files.update_file_data_by_id(
+        _update_file_data_sync(
+            app,
             file_id,
             {
                 'content': content.strip(),
@@ -282,7 +307,8 @@ def analyze_image(
 
     except Exception as e:
         log.error(f'Image analysis failed for {file_id}: {e}')
-        Files.update_file_data_by_id(
+        _update_file_data_sync(
+            app,
             file_id,
             {
                 'status': 'failed',

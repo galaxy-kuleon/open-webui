@@ -1,34 +1,29 @@
+import asyncio
+import json
 import logging
 import os
 import uuid
-import json
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
-import asyncio
 
 from fastapi import (
-    BackgroundTasks,
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     status,
-    Query,
 )
-
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-from open_webui.internal.db import get_async_session, get_async_db_context
-
+from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STORAGE_LOCAL_CACHE, STORAGE_PROVIDER, UPLOAD_DIR
 from open_webui.constants import ERROR_MESSAGES
-from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
-
+from open_webui.internal.db import get_async_session
 from open_webui.models.channels import Channels
-from open_webui.models.users import Users
 from open_webui.models.files import (
     FileForm,
     FileListResponse,
@@ -36,22 +31,16 @@ from open_webui.models.files import (
     FileModelResponse,
     Files,
 )
-from open_webui.models.chats import Chats
 from open_webui.models.knowledge import Knowledges
-from open_webui.models.groups import Groups
-from open_webui.models.access_grants import AccessGrants
-
-
-from open_webui.routers.retrieval import ProcessFileForm, process_file
+from open_webui.models.users import Users
+from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.audio import transcribe
-
+from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.storage.provider import Storage
-
-
-from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STORAGE_LOCAL_CACHE, STORAGE_PROVIDER, UPLOAD_DIR
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import strict_match_mime_type
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
 
@@ -102,16 +91,43 @@ def _cleanup_local_cache(file_path: str) -> None:
         log.warning(f'Failed to clean up local cache for {file_path}: {e}')
 
 
-async def process_uploaded_file(
+def _run_coroutine_on_main_loop(app, coro):
+    """
+    Schedule an async coroutine on app.state.main_loop from a sync context.
+
+    Used by process_uploaded_file (sync) to call async functions (process_file,
+    Files.update_file_data_by_id) without requiring an event loop in the caller.
+    Raises on timeout (30 s) or if main_loop is unavailable.
+    """
+    loop = getattr(getattr(app, 'state', None), 'main_loop', None)
+    if loop is None or loop.is_closed():
+        raise RuntimeError('app.state.main_loop not available — cannot bridge to async')
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=30.0)
+
+
+def process_uploaded_file(
     request,
     file,
     file_path,
     file_item,
     file_metadata,
     user,
-    db: Optional[AsyncSession] = None,
+    db=None,
 ):
-    async def _process_handler(db_session):
+    """
+    Synchronous file processing dispatcher.
+
+    Routes uploaded files to the correct processing pipeline:
+      - STT audio types → transcribe → process_file
+      - Image types with IMAGE_ANALYSIS_ENABLED → analyze_image (acting_user threaded via user=)
+      - Other types → process_file
+      - External extraction engine → process_file regardless of type
+
+    Image analysis and normal RAG extraction both flow through this path.
+    """
+
+    def _process_handler(db_session):
         try:
             content_type = file.content_type
 
@@ -124,52 +140,75 @@ async def process_uploaded_file(
                 stt_supported_content_types = getattr(request.app.state.config, 'STT_SUPPORTED_CONTENT_TYPES', [])
 
                 if strict_match_mime_type(stt_supported_content_types, content_type):
-                    file_path_processed = await asyncio.to_thread(Storage.get_file, file_path)
+                    file_path_processed = Storage.get_file(file_path)
                     result = transcribe(request, file_path_processed, file_metadata, user)
 
-                    await process_file(
-                        request,
-                        ProcessFileForm(file_id=file_item.id, content=result.get('text', '')),
+                    _run_coroutine_on_main_loop(
+                        request.app,
+                        process_file(
+                            request,
+                            ProcessFileForm(file_id=file_item.id, content=result.get('text', '')),
+                            user=user,
+                        ),
+                    )
+                elif content_type.startswith('image/') and getattr(
+                    request.app.state.config, 'IMAGE_ANALYSIS_ENABLED', False
+                ):
+                    # Image analysis pipeline: classify → OCR or describe → store in file.data.content
+                    # acting_user is threaded through so LLM calls run under the correct credentials.
+                    from open_webui.utils.image_analysis import analyze_image
+
+                    analyze_image(
+                        app=request.app,
+                        file_id=file_item.id,
+                        file_path=file_path,
+                        content_type=content_type,
                         user=user,
-                        db=db_session,
                     )
                 elif (not content_type.startswith(('image/', 'video/'))) or (
                     request.app.state.config.CONTENT_EXTRACTION_ENGINE == 'external'
                 ):
-                    await process_file(
-                        request,
-                        ProcessFileForm(file_id=file_item.id),
-                        user=user,
-                        db=db_session,
+                    _run_coroutine_on_main_loop(
+                        request.app,
+                        process_file(
+                            request,
+                            ProcessFileForm(file_id=file_item.id),
+                            user=user,
+                        ),
                     )
                 else:
                     raise Exception(f'File type {content_type} is not supported for processing')
             else:
                 log.info(f'File type {file.content_type} is not provided, but trying to process anyway')
-                await process_file(
-                    request,
-                    ProcessFileForm(file_id=file_item.id),
-                    user=user,
-                    db=db_session,
+                _run_coroutine_on_main_loop(
+                    request.app,
+                    process_file(
+                        request,
+                        ProcessFileForm(file_id=file_item.id),
+                        user=user,
+                    ),
                 )
 
         except Exception as e:
             log.error(f'Error processing file: {file_item.id}')
-            await Files.update_file_data_by_id(
-                file_item.id,
-                {
-                    'status': 'failed',
-                    'error': str(e.detail) if hasattr(e, 'detail') else str(e),
-                },
-                db=db_session,
-            )
+            try:
+                _run_coroutine_on_main_loop(
+                    request.app,
+                    Files.update_file_data_by_id(
+                        file_item.id,
+                        {
+                            'status': 'failed',
+                            'error': str(e.detail) if hasattr(e, 'detail') else str(e),
+                        },
+                    ),
+                )
+            except Exception:
+                pass  # Best-effort status update; don't mask the original error
 
     try:
-        if db:
-            await _process_handler(db)
-        else:
-            async with get_async_db_context() as db_session:
-                await _process_handler(db_session)
+        # db is accepted for API compatibility but sync processing manages its own session.
+        # Mutable state: session lifecycle is confined to this function boundary.
+        _process_handler(db)
     finally:
         _cleanup_local_cache(file_path)
 
@@ -179,7 +218,7 @@ async def upload_file(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    metadata: Optional[dict | str] = Form(None),
+    metadata: dict | str | None = Form(None),
     process: bool = Query(True),
     process_in_background: bool = Query(True),
     user=Depends(get_verified_user),
@@ -200,12 +239,12 @@ async def upload_file(
 async def upload_file_handler(
     request: Request,
     file: UploadFile = File(...),
-    metadata: Optional[dict | str] = Form(None),
+    metadata: dict | str | None = Form(None),
     process: bool = Query(True),
     process_in_background: bool = Query(True),
     user=Depends(get_verified_user),
-    background_tasks: Optional[BackgroundTasks] = None,
-    db: Optional[AsyncSession] = None,
+    background_tasks: BackgroundTasks | None = None,
+    db: AsyncSession | None = None,
 ):
     log.info(f'file.content_type: {file.content_type} {process}')
 
@@ -293,7 +332,7 @@ async def upload_file_handler(
                 )
                 return {'status': True, **file_item.model_dump()}
             else:
-                await process_uploaded_file(
+                process_uploaded_file(
                     request,
                     file,
                     file_path,

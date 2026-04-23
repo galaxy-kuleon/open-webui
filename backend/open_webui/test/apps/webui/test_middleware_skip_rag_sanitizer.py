@@ -648,8 +648,8 @@ def test_skill_intercept_bypasses_skip_rag_injection():
     emitter, _captured = _make_spy_emitter()
 
     extra = [
-        ('open_webui.models.skills.Skills.get_skills_by_user_id', MagicMock(return_value=[skill_stub])),
-        ('open_webui.models.skills.Skills.get_skill_by_id', MagicMock(return_value=skill_stub)),
+        ('open_webui.models.skills.Skills.get_skills_by_user_id', AsyncMock(return_value=[skill_stub])),
+        ('open_webui.models.skills.Skills.get_skill_by_id', AsyncMock(return_value=skill_stub)),
         ('open_webui.tools.builtin.run_agent_skill', AsyncMock(return_value='{"output": "ok"}')),
         ('open_webui.utils.skill_params.extract_skill_params', AsyncMock(return_value={})),
         ('open_webui.utils.skill_params.build_enriched_skill_prompt', MagicMock(side_effect=lambda *a, **kw: a[2])),
