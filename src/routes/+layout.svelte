@@ -37,8 +37,10 @@
 		showFileNavPath,
 		showFileNavDir,
 		pyodideWorker,
-		desktopEvent
+		desktopEvent,
+		imageAnalysisEnabled
 	} from '$lib/stores';
+	import { getRAGConfig } from '$lib/apis/retrieval';
 	import { getFileContentById } from '$lib/apis/files';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
@@ -1031,6 +1033,17 @@
 							await config.set(await getBackendConfig());
 						} catch (error) {
 							console.error('Error refreshing backend config:', error);
+						}
+
+						// Populate image-analysis capability flag from RAG config.
+						// Default is false (fail-closed); we only open the gate when the
+						// backend explicitly says IMAGE_ANALYSIS_ENABLED=true.
+						try {
+							const ragConfig = await getRAGConfig(localStorage.token);
+							imageAnalysisEnabled.set(ragConfig?.IMAGE_ANALYSIS_ENABLED === true);
+						} catch (error) {
+							console.error('Error fetching RAG config for image analysis flag:', error);
+							// Leave store at default false — fail-closed is correct here.
 						}
 
 						// Keep user timezone in sync on every app load/refresh

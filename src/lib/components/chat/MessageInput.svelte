@@ -34,7 +34,8 @@
 		showSettings,
 		selectedTerminalId,
 		TTSWorker,
-		temporaryChatEnabled
+		temporaryChatEnabled,
+		imageAnalysisEnabled
 	} from '$lib/stores';
 
 	import {
@@ -500,6 +501,14 @@
 		(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.terminal ?? true
 	);
 
+	// Models with skip_rag: files bypass RAG pipeline (no embedding/vector store),
+	// converted to markdown and injected directly into prompt context.
+	// Defaults to false — only models explicitly configured get this.
+	let skipRagModels = [];
+	$: skipRagModels = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels).filter(
+		(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.skip_rag === true
+	);
+
 	let toggleFilters = [];
 	$: toggleFilters = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
 		.map((id) => ($models.find((model) => model.id === id) || {})?.filters ?? [])
@@ -632,8 +641,27 @@
 					};
 				}
 
+				// Only set skip_rag metadata + bypass processing when ALL selected
+				// models have skip_rag.  In mixed-model scenarios (some skip_rag,
+				// some not), we must NOT set skip_rag metadata — non-skip_rag models
+				// need normal RAG embeddings.
+				const totalModels = atSelectedModel?.id ? 1 : selectedModels.length;
+				if (skipRagModels.length > 0 && skipRagModels.length === totalModels) {
+					metadata = { ...(metadata || {}), skip_rag: true };
+					process = false;
+				}
+
 				// During the file upload, file content is automatically extracted.
-				const uploadedFile = await uploadFile(localStorage.token, file, metadata, process);
+				const uploadedFile = await uploadFile(
+					localStorage.token,
+					file,
+					metadata,
+					process,
+					(status) => {
+						fileItem.status = status;
+						files = files;
+					}
+				);
 
 				if (uploadedFile) {
 					console.log('File upload completed:', {
@@ -735,8 +763,20 @@
 
 			if (file['type'].startsWith('image/')) {
 				if (visionCapableModels.length === 0) {
-					toast.error($i18n.t('Selected model(s) do not support image inputs'));
-					return;
+					if (!$imageAnalysisEnabled) {
+						// No vision model selected AND image analysis is disabled on the backend.
+						// Block the upload entirely — proceeding would silently fail or produce
+						// nonsensical results.
+						toast.error(
+							$i18n.t(
+								'Image analysis is not enabled. Select a vision-capable model or ask your administrator to enable image analysis.'
+							)
+						);
+						return;
+					}
+					// Vision model not selected but image analysis is enabled:
+					// allow upload and inform the user the image will be processed as text.
+					toast.info($i18n.t('Images will be analyzed as text for selected model(s)'));
 				}
 
 				const compressImageHandler = async (imageUrl, settings = {}, config = {}) => {
@@ -795,7 +835,13 @@
 						const blob = await (await fetch(imageUrl)).blob();
 						const compressedFile = new File([blob], file.name, { type: file.type });
 
-						uploadFileHandler(compressedFile, false);
+						// process=true only when no vision model is selected and image analysis
+						// is enabled — the backend will run analyze_image() to extract text.
+						// process=false for vision models: they receive the raw image directly;
+						// passing true would invoke process_uploaded_file which raises when
+						// IMAGE_ANALYSIS_ENABLED=False (files.py:144-145).
+						const shouldProcess = visionCapableModels.length === 0 && $imageAnalysisEnabled;
+						uploadFileHandler(compressedFile, shouldProcess);
 					}
 				};
 
@@ -1391,7 +1437,21 @@
 												name={file.name}
 												type={file.type}
 												size={file?.size}
-												loading={file.status === 'uploading'}
+												loading={file.status === 'uploading' ||
+													(file.status && file.status.startsWith('processing'))}
+												statusText={file.status?.startsWith('processing:extracting')
+													? file.status.includes('(')
+														? file.status.replace('processing:extracting ', '')
+														: $i18n.t('Extracting content...')
+													: file.status === 'processing:embedding'
+														? $i18n.t('Embedding...')
+														: file.status === 'processing:indexing'
+															? $i18n.t('Generating index...')
+															: file.status === 'processing:quick_mode'
+																? $i18n.t('Quick Mode: converting to markdown...')
+																: file.status === 'uploading'
+																	? $i18n.t('Uploading...')
+																	: ''}
 												dismissible={true}
 												edit={true}
 												small={true}
