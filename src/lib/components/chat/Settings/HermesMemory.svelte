@@ -207,7 +207,9 @@
 				<div class="text-xs text-red-600">{error}</div>
 			{:else if facts.length === 0}
 				<div class="text-xs text-gray-500 italic">
-					{$i18n.t('No facts yet. Add one above, or chat with Hermes and it will remember things for you automatically.')}
+					{$i18n.t(
+						'No facts yet. Add one above, or chat with Hermes and it will remember things for you automatically.'
+					)}
 				</div>
 			{:else}
 				<ul class="space-y-1" data-testid="hermes-memory-fact-list">

@@ -707,17 +707,6 @@
 		const audioQueueInstance = new AudioQueue(document.getElementById('audioElement'));
 		audioQueue.set(audioQueueInstance);
 
-		// Restore direct terminal enabled states based on persisted selectedTerminalId
-		if ($settings?.terminalServers?.length) {
-			settings.set({
-				...$settings,
-				terminalServers: ($settings.terminalServers ?? []).map((s) => ({
-					...s,
-					enabled: $selectedTerminalId !== null && s.url === $selectedTerminalId
-				}))
-			});
-		}
-
 		const pageSubscribe = page.subscribe(async (p) => {
 			if (p.url.pathname === '/') {
 				await tick();

@@ -13,7 +13,7 @@
 
 - **Master directive for this turn**: T0 plan — inspect `git diff v0.9.1..hermes-v0.8.12-final` for hermes-only additions to each target file; apply 3 primary grafts (config.py env vars, MessageInput.svelte paste+upload gate, Capabilities.svelte skip_rag toggle); run pytest + npm check; confirm no forbidden files touched.
 - **Principal work**:
-  - `backend/open_webui/config.py`: hermes env vars appended after LDAP block under `# === Hermes additions ===` header — KG1_* (KG1_DB_HOST, KG1_DB_PORT, KG1_DB_NAME, KG1_DB_USER, KG1_DB_PASS), IMAGE_ANALYSIS_* (ENABLE_IMAGE_ANALYSIS, IMAGE_ANALYSIS_MODEL, IMAGE_ANALYSIS_PROMPT), RAG_FULL_DOCUMENT_CONTEXT, RAG_DOCUMENT_INDEX_* (RAG_DOCUMENT_INDEX_PROVIDER, RAG_DOCUMENT_INDEX_URL), RAG_KNOWLEDGE_EXPORT_* (RAG_KNOWLEDGE_EXPORT_ENABLED, RAG_KNOWLEDGE_EXPORT_PROVIDER), RAG_USER_COLLECTION_ENABLED. Zero upstream-line modification.
+  - `backend/open_webui/config.py`: hermes env vars appended after LDAP block under `# === Hermes additions ===` header — KG1*\* (KG1_DB_HOST, KG1_DB_PORT, KG1_DB_NAME, KG1_DB_USER, KG1_DB_PASS), IMAGE_ANALYSIS*_ (ENABLE*IMAGE_ANALYSIS, IMAGE_ANALYSIS_MODEL, IMAGE_ANALYSIS_PROMPT), RAG_FULL_DOCUMENT_CONTEXT, RAG_DOCUMENT_INDEX*_ (RAG*DOCUMENT_INDEX_PROVIDER, RAG_DOCUMENT_INDEX_URL), RAG_KNOWLEDGE_EXPORT*\* (RAG_KNOWLEDGE_EXPORT_ENABLED, RAG_KNOWLEDGE_EXPORT_PROVIDER), RAG_USER_COLLECTION_ENABLED. Zero upstream-line modification.
   - `src/lib/components/chat/MessageInput.svelte`: image-analysis gate grafted at paste handler (`let paste = async (e)`) and at `uploadFile(...)` call site; skip_rag metadata attached to upload payload.
   - `src/lib/components/workspace/Models/Capabilities.svelte`: skip_rag capability toggle row inserted.
   - Scope creep detected (3 extras): `src/lib/stores/index.ts` (imageAnalysisEnabled store), `src/lib/components/common/FileItem.svelte` (statusText prop + Spinner Tooltip), `src/lib/apis/files/index.ts` (onProgress parameter). Ruled acceptable as legitimate graft dependencies (MessageInput.svelte imports them directly).
@@ -32,10 +32,12 @@
 **T1 REDIRECT (kind-3 master directive issued)**: Fix dormant hydration by porting the 3-line hydration block into `src/routes/+layout.svelte`; revert pyodide-lock.json drift via `git checkout v0.9.1 -- static/pyodide/pyodide-lock.json`.
 
 **T1 retry (principal)**:
+
 - `src/routes/+layout.svelte:1043`: hydration block inserted inside `if (sessionUser)` guard — reads `getRAGConfig()` response, extracts `image_analysis_enabled`, calls `imageAnalysisEnabled.set(...)`. Import of `imageAnalysisEnabled` store added at :41; `getRAGConfig` import added at :43.
 - `static/pyodide/pyodide-lock.json`: reverted to v0.9.1 via `git checkout v0.9.1 -- static/pyodide/pyodide-lock.json`; empty diff confirmed.
 
 **T1 retry evaluator verdict**: PASS
+
 - Hydration chain verified end-to-end: stores/index.ts → +layout.svelte (setter) → MessageInput.svelte (consumer)
 - Pyodide diff confirmed empty
 - pytest 23/23 (hermes + pipes + builtin_pipes)

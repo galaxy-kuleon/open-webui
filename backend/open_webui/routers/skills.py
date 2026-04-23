@@ -1,15 +1,24 @@
 import logging
+import os
+import re
+import shutil
+import stat
+import tempfile
+import time
+import zipfile
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 
 from open_webui.models.groups import Groups
 from pydantic import BaseModel
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from open_webui.internal.db import get_async_session
 from open_webui.models.skills import (
     SkillForm,
+    SkillMeta,
     SkillModel,
     SkillResponse,
     SkillUserResponse,
@@ -428,3 +437,257 @@ async def delete_skill_by_id(
 
     result = await Skills.delete_skill_by_id(id, db=db)
     return result
+
+
+############################
+# UploadSkillZip
+############################
+
+MAX_ZIP_SIZE = 50 * 1024 * 1024  # 50MB
+
+
+def _slugify(name: str) -> str:
+    slug = name.lower().strip()
+    slug = re.sub(r'[^\w\s-]', '', slug)
+    slug = re.sub(r'[-\s]+', '-', slug)
+    return slug.strip('-')
+
+
+def _parse_skill_md_frontmatter(content: str) -> dict:
+    import yaml
+
+    if not content.startswith('---'):
+        return {}
+    parts = content.split('---', 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        return yaml.safe_load(parts[1]) or {}
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Zip-safety helpers
+# These are pure functions (no filesystem I/O) and can be unit-tested
+# in isolation without a running database or HTTP server.
+# ---------------------------------------------------------------------------
+
+# Unix file-type bits (S_IFMT nibble)
+_S_IFMT = 0o170000
+_S_IFLNK = 0o120000  # symbolic link
+
+
+def _is_unsafe_zip_member(info: zipfile.ZipInfo) -> tuple[bool, str]:
+    """Return (True, detail-string) if the zip entry must be rejected.
+
+    Checks performed (in order):
+    1. Symlink — entry is a Unix symlink (external_attr mode bits).
+    2. Hardlink — entry uses a non-standard mode sometimes set by archiving
+       tools to mark hardlinks (mode 0o010000 = FIFO on Unix, abused here).
+    3. Absolute path — POSIX-style (/etc/passwd) or Windows-style (C:/...).
+    4. Path traversal — any '..' component in the name.
+
+    The 'detail' string is safe to return to the client: it does NOT
+    include paths, temp directories, or internal state.
+    """
+    name = info.filename
+
+    # 1. Symlink detection via Unix mode bits in external_attr (high 16 bits)
+    unix_mode = (info.external_attr >> 16) & _S_IFMT
+    if unix_mode == _S_IFLNK:
+        return True, 'Symlinks not permitted'
+
+    # 2. Hardlink: mode 0o010000 (sometimes used by zip-creating tools for hardlinks)
+    if (info.external_attr >> 16) & _S_IFMT == 0o010000:
+        return True, 'Hardlinks not permitted'
+
+    # 3. Absolute path — check both POSIX and Windows interpretations
+    posix = PurePosixPath(name)
+    win = PureWindowsPath(name)
+    if posix.is_absolute() or win.is_absolute():
+        return True, 'Unsafe path in zip'
+
+    # 4. Path traversal — any '..' in any path component
+    if '..' in posix.parts or '..' in win.parts:
+        return True, 'Unsafe path in zip'
+
+    return False, ''
+
+
+def _assert_no_symlinks_in_tree(root: Path) -> None:
+    """Post-extraction defense: walk the extracted tree and raise if any
+    symlink survived extraction.  followlinks=False ensures we never follow
+    a symlink during the walk itself.
+
+    Raises HTTPException(400) — never leaks the filesystem path.
+    """
+    for dirpath, dirnames, filenames in os.walk(str(root), followlinks=False):
+        for name in filenames + dirnames:
+            full = Path(dirpath) / name
+            if full.is_symlink():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail='Symlinks not permitted',
+                )
+
+
+@router.post('/upload-zip', response_model=Optional[SkillResponse])
+async def upload_skill_zip(
+    request: Request,
+    file: UploadFile = File(...),
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    if user.role != 'admin' and not await has_permission(
+        user.id, 'workspace.skills', request.app.state.config.USER_PERMISSIONS, db=db
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.UNAUTHORIZED,
+        )
+
+    if not file.filename or not file.filename.lower().endswith('.zip'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Only .zip files are accepted',
+        )
+
+    content = await file.read()
+    if len(content) > MAX_ZIP_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'File too large. Maximum size is {MAX_ZIP_SIZE // (1024 * 1024)}MB',
+        )
+
+    tmp_zip = None
+    tmp_extract = None
+    try:
+        tmp_zip = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
+        tmp_zip.write(content)
+        tmp_zip.close()
+
+        if not zipfile.is_zipfile(tmp_zip.name):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Invalid zip file',
+            )
+
+        with zipfile.ZipFile(tmp_zip.name, 'r') as zf:
+            members = zf.infolist()
+
+            # ── Pre-extract walk: validate every member BEFORE touching disk ──
+            # This is the primary defense against zip-slip, symlink escape,
+            # absolute-path traversal, and hardlink abuse.
+            for info in members:
+                unsafe, detail = _is_unsafe_zip_member(info)
+                if unsafe:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=detail,
+                    )
+
+            # Uncompressed-size cap (pre-existing guard — preserved unchanged)
+            total_size = sum(info.file_size for info in members)
+            if total_size > MAX_ZIP_SIZE:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f'Uncompressed size too large ({total_size // (1024 * 1024)}MB). Maximum is {MAX_ZIP_SIZE // (1024 * 1024)}MB',
+                )
+
+            # Extract per-member (not extractall) so we control exactly which
+            # entries land on disk.  No extractall() call means no need for
+            # the filter='data' kwarg (which is unavailable in this build).
+            tmp_extract = tempfile.mkdtemp(prefix='skill-zip-')
+            for info in members:
+                zf.extract(info, tmp_extract)
+
+        # ── Post-extract walk: defense-in-depth symlink check ──────────────
+        # Catches any symlinks that survive extraction despite the pre-walk.
+        # followlinks=False in os.walk prevents following symlinks during traversal.
+        _assert_no_symlinks_in_tree(Path(tmp_extract))
+
+        skill_md_path = None
+        skill_root = None
+        extract_path = Path(tmp_extract)
+
+        if (extract_path / 'SKILL.md').exists():
+            skill_md_path = extract_path / 'SKILL.md'
+            skill_root = extract_path
+        else:
+            for child in extract_path.iterdir():
+                if child.is_dir() and (child / 'SKILL.md').exists():
+                    skill_md_path = child / 'SKILL.md'
+                    skill_root = child
+                    break
+
+        if not skill_md_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='No SKILL.md found in zip archive (checked root and one level deep)',
+            )
+
+        skill_content = skill_md_path.read_text(encoding='utf-8')
+        frontmatter = _parse_skill_md_frontmatter(skill_content)
+
+        skill_name = frontmatter.get('name', '')
+        if not skill_name:
+            skill_name = skill_root.name if skill_root != extract_path else file.filename.replace('.zip', '')
+
+        description = frontmatter.get('description', '')
+
+        skill_id = _slugify(skill_name)
+        if not skill_id:
+            skill_id = f'agent-skill-{int(time.time())}'
+
+        existing = await Skills.get_skill_by_id(skill_id, db=db)
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ERROR_MESSAGES.ID_TAKEN,
+            )
+
+        persistent_dir = Path.home() / '.claude' / 'skills' / skill_id
+        persistent_dir.mkdir(parents=True, exist_ok=True)
+        # symlinks=False: never copy symlinks as symlinks — dereference them.
+        # This is defense in depth: even if a symlink somehow survived the
+        # pre-walk and post-extract checks, it will not be copied to the
+        # persistent skill directory as a symlink.
+        shutil.copytree(str(skill_root), str(persistent_dir), symlinks=False, dirs_exist_ok=True)
+
+        form_data = SkillForm(
+            id=skill_id,
+            name=skill_name,
+            description=description,
+            content=skill_content,
+            meta=SkillMeta(
+                type='agent_skill',
+                disk_path=str(persistent_dir),
+                tags=frontmatter.get('tags', []) or [],
+            ),
+            is_active=True,
+        )
+
+        skill = await Skills.insert_new_skill(user.id, form_data, db=db)
+        if skill:
+            return skill
+        else:
+            shutil.rmtree(str(persistent_dir), ignore_errors=True)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ERROR_MESSAGES.DEFAULT('Error creating agent skill'),
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(f'Failed to upload agent skill zip: {e}')
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT(str(e)),
+        )
+    finally:
+        if tmp_zip and os.path.exists(tmp_zip.name):
+            os.unlink(tmp_zip.name)
+        if tmp_extract and os.path.exists(tmp_extract):
+            shutil.rmtree(tmp_extract, ignore_errors=True)

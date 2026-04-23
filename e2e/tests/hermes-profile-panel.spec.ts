@@ -52,10 +52,9 @@ test.describe('Hermes memory profile panel', () => {
 		await page.locator('[data-testid="hermes-memory-add-button"]').click();
 
 		// Fact should now appear in the list (after loadFacts re-fetches)
-		await expect(page.locator('[data-testid="hermes-memory-fact-list"]')).toContainText(
-			unique,
-			{ timeout: 15_000 }
-		);
+		await expect(page.locator('[data-testid="hermes-memory-fact-list"]')).toContainText(unique, {
+			timeout: 15_000
+		});
 	});
 
 	test('search returns relevant facts', async ({ page }) => {

@@ -24,6 +24,10 @@ from open_webui.retrieval.loaders.mistral import MistralLoader
 from open_webui.retrieval.loaders.datalab_marker import DatalabMarkerLoader
 from open_webui.retrieval.loaders.mineru import MinerULoader
 
+# HERMES-HOOK-KG1-LOADER-BEGIN
+from open_webui.retrieval.loaders.kg1 import KG1Loader
+# HERMES-HOOK-KG1-LOADER-END
+
 
 from open_webui.env import GLOBAL_LOG_LEVEL, REQUESTS_VERIFY
 
@@ -399,6 +403,38 @@ class Loader:
                 api_key=self.kwargs.get('MISTRAL_OCR_API_KEY'),
                 file_path=file_path,
             )
+        # HERMES-HOOK-KG1-LOADER-BEGIN
+        elif self.engine == 'kg1' and self.kwargs.get('KG1_GLMOCR_PROJECT_DIR'):
+            kg1_timeout = self.kwargs.get('KG1_TIMEOUT', '600')
+            try:
+                kg1_timeout = int(kg1_timeout)
+            except (ValueError, TypeError):
+                kg1_timeout = 600
+
+            kg1_ollama_port = self.kwargs.get('KG1_OLLAMA_PORT', '11434')
+            try:
+                kg1_ollama_port = int(kg1_ollama_port)
+            except (ValueError, TypeError):
+                kg1_ollama_port = 11434
+
+            kg1_concurrency = self.kwargs.get('KG1_GLM_OCR_CONCURRENCY', '1')
+            try:
+                kg1_concurrency = int(kg1_concurrency)
+            except (ValueError, TypeError):
+                kg1_concurrency = 1
+
+            loader = KG1Loader(
+                file_path=file_path,
+                glmocr_project_dir=self.kwargs.get('KG1_GLMOCR_PROJECT_DIR'),
+                ollama_host=self.kwargs.get('KG1_OLLAMA_HOST', '127.0.0.1'),
+                ollama_port=kg1_ollama_port,
+                layout_device=self.kwargs.get('KG1_LAYOUT_DEVICE', 'mps'),
+                soffice_path=self.kwargs.get('KG1_SOFFICE_PATH', 'soffice'),
+                timeout=kg1_timeout,
+                concurrency=kg1_concurrency,
+                status_callback=self.kwargs.get('status_callback'),
+            )
+        # HERMES-HOOK-KG1-LOADER-END
         else:
             if file_ext == 'pdf':
                 loader = PyPDFLoader(

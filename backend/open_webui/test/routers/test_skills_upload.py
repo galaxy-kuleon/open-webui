@@ -44,7 +44,7 @@ os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret-key-for-skill-zip-tests')
 # ---------------------------------------------------------------------------
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
+from unittest.mock import AsyncMock
 
 from open_webui.routers import skills as skills_module
 from open_webui.routers.skills import (
@@ -53,7 +53,7 @@ from open_webui.routers.skills import (
     router as skills_router,
 )
 from open_webui.utils.auth import get_verified_user
-from open_webui.internal.db import get_session
+from open_webui.internal.db import get_async_session
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +242,8 @@ def _fake_get_verified_user():
     return _FAKE_ADMIN
 
 
-def _fake_get_session():
-    """Yield a stub session — upload_skill_zip only calls
+async def _fake_get_async_session():
+    """Yield a stub async session — upload_skill_zip only calls
     Skills.get_skill_by_id and Skills.insert_new_skill on it, both of which
     we intercept via monkeypatching in the happy-path test."""
     yield None  # type: ignore[misc]
@@ -258,7 +258,7 @@ def _build_test_app() -> FastAPI:
     app = FastAPI()
     app.include_router(skills_router, prefix='/api/v1/skills')
     app.dependency_overrides[get_verified_user] = _fake_get_verified_user
-    app.dependency_overrides[get_session] = _fake_get_session
+    app.dependency_overrides[get_async_session] = _fake_get_async_session
     return app
 
 
@@ -391,12 +391,12 @@ class TestHappyPathAccepted:
         monkeypatch.setattr(
             skills_models.Skills,
             'get_skill_by_id',
-            lambda skill_id, db: None,
+            AsyncMock(return_value=None),
         )
         monkeypatch.setattr(
             skills_models.Skills,
             'insert_new_skill',
-            lambda user_id, form_data, db: fake_skill,
+            AsyncMock(return_value=fake_skill),
         )
 
         # Also prevent the copytree from writing to ~/.claude/skills in CI

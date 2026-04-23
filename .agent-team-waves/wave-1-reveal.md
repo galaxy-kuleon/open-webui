@@ -12,6 +12,7 @@ From `/Users/noelbao/.claude-thx/plans/plan-how-do-we-fancy-quilt.md` §Pre-W0:
 > Files to pull via `git checkout hermes-v0.8.12-final -- <path>` (zero upstream collision; verified):
 >
 > **Backend:**
+>
 > - `backend/open_webui/hermes/__init__.py`
 > - `backend/open_webui/hermes/identity.py`
 > - `backend/open_webui/pipes/hermes_agent.py`
@@ -27,6 +28,7 @@ From `/Users/noelbao/.claude-thx/plans/plan-how-do-we-fancy-quilt.md` §Pre-W0:
 > - All NEW tests under `backend/open_webui/test/hermes/`, `test/pipes/`, `test/utils/`
 >
 > **Frontend:**
+>
 > - `src/lib/apis/hermes/memory.ts`
 > - `src/lib/apis/skills/index.ts` (additions)
 > - `src/lib/components/chat/Settings/HermesMemory.svelte`
@@ -39,12 +41,14 @@ From `/Users/noelbao/.claude-thx/plans/plan-how-do-we-fancy-quilt.md` §Pre-W0:
 From §Prerequisites P4 (async-contract audit — read-only reference):
 
 > Read these v0.9.1 files end-to-end before writing any code:
+>
 > - `backend/open_webui/functions.py` — confirm pipe `extra_params` (v0.9.1 adds `__oauth_token__`; decide if hermes pipe should forward it).
 > - `backend/open_webui/utils/plugin.py` — `load_function_module_by_id` is async; caller-internal so our pipe definition stays.
 > - `backend/open_webui/routers/memories.py` — canonical async router with `ASYNC_VECTOR_DB_CLIENT` + `AsyncSession` DI.
 > - `backend/open_webui/routers/skills.py` — canonical `AsyncSession = Depends(get_async_session)` + `await db.execute(...)` pattern.
 >
 > **Key confirmed facts (already verified):**
+>
 > - Our `async def pipe(self, body, __event_emitter__, __user__, __chat_id__, __files__, __metadata__, **kwargs)` signature still works.
 > - `upload_skill_zip` (W2) MUST be rewritten for `AsyncSession`.
 > - `hermes_memory` router (W3) is httpx-only — no DB → no async-session migration needed.
@@ -90,6 +94,7 @@ None.
 This is the first wave. No prior wave context.
 
 **Pre-wave state (verified by kind 7 before this reveal):**
+
 - Branch `feat/v0.9.1-hermes-port` is checked out, at commit `0a8a620fb` (upstream `v0.9.1`).
 - Working tree clean.
 - Source branch `feat/v0.8.12-hermes-port` stabilised at `27530a551`, tagged `hermes-v0.8.12-final` locally.

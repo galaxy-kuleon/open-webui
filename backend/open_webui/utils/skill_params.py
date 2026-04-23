@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 # Each is an optional string — None if the LLM could not detect it.
 # Only translation-relevant params: opencode already has the raw file
 # and user message, so context_summary/task_intent are redundant.
-PARAM_KEYS = frozenset({"lang", "style", "terms"})
+PARAM_KEYS = frozenset({'lang', 'style', 'terms'})
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a parameter extraction assistant. You will receive a chat conversation \
@@ -65,24 +65,24 @@ def _format_chat_for_extraction(messages: list[dict], skill_name: str) -> str:
 
     Pure function: messages in, string out. No mutation.
     """
-    parts = [f"Skill to be invoked: {skill_name}", "", "Chat history:"]
+    parts = [f'Skill to be invoked: {skill_name}', '', 'Chat history:']
     for msg in messages:
-        role = msg.get("role", "unknown").upper()
-        content = msg.get("content", "")
+        role = msg.get('role', 'unknown').upper()
+        content = msg.get('content', '')
         # Content can be a string or a list of content parts
         if isinstance(content, list):
             text_parts = []
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_parts.append(str(part.get("text") or ""))
+                if isinstance(part, dict) and part.get('type') == 'text':
+                    text_parts.append(str(part.get('text') or ''))
                 elif isinstance(part, str):
                     text_parts.append(part)
-            content = "\n".join(text_parts)
-        parts.append(f"{role}: {content}")
-    return "\n".join(parts)
+            content = '\n'.join(text_parts)
+        parts.append(f'{role}: {content}')
+    return '\n'.join(parts)
 
 
-_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", re.DOTALL)
+_FENCE_RE = re.compile(r'^```(?:json)?\s*\n?(.*?)\n?\s*```$', re.DOTALL)
 
 
 def _strip_markdown_fences(text: str) -> str:
@@ -102,7 +102,7 @@ def _parse_extraction_response(raw: Any) -> dict:
     Handles markdown fence wrapping (```json ... ```).
     """
     if not isinstance(raw, str):
-        log.warning("Skill params: expected str, got %s", type(raw).__name__)
+        log.warning('Skill params: expected str, got %s', type(raw).__name__)
         return {}
 
     cleaned = _strip_markdown_fences(raw)
@@ -110,11 +110,11 @@ def _parse_extraction_response(raw: Any) -> dict:
     try:
         data = json.loads(cleaned)
     except (json.JSONDecodeError, TypeError):
-        log.warning("Skill params: failed to parse LLM response as JSON: %s", raw[:200])
+        log.warning('Skill params: failed to parse LLM response as JSON: %s', raw[:200])
         return {}
 
     if not isinstance(data, dict):
-        log.warning("Skill params: LLM response is not a dict: %s", type(data))
+        log.warning('Skill params: LLM response is not a dict: %s', type(data))
         return {}
 
     # Extract only the expected keys, normalize values to Optional[str].
@@ -141,70 +141,60 @@ async def _call_llm(app: Any, messages: list[dict], model_id: str) -> str:
     from open_webui.models.users import Users
     from open_webui.utils.chat import generate_chat_completion
 
-    admin_user = Users.get_super_admin_user()
+    admin_user = await Users.get_super_admin_user()
     if admin_user is None:
-        admin_user = Users.get_first_user()
+        admin_user = await Users.get_first_user()
     if admin_user is None:
-        raise RuntimeError("No admin user available for skill param extraction")
+        raise RuntimeError('No admin user available for skill param extraction')
 
     request = Request(
         {
-            "type": "http",
-            "asgi.version": "3.0",
-            "asgi.spec_version": "2.0",
-            "method": "POST",
-            "path": "/internal/skill-param-extraction",
-            "query_string": b"",
-            "headers": Headers({}).raw,
-            "client": ("127.0.0.1", 0),
-            "server": ("127.0.0.1", 80),
-            "scheme": "http",
-            "app": app,
+            'type': 'http',
+            'asgi.version': '3.0',
+            'asgi.spec_version': '2.0',
+            'method': 'POST',
+            'path': '/internal/skill-param-extraction',
+            'query_string': b'',
+            'headers': Headers({}).raw,
+            'client': ('127.0.0.1', 0),
+            'server': ('127.0.0.1', 80),
+            'scheme': 'http',
+            'app': app,
         }
     )
 
     payload = {
-        "model": model_id,
-        "messages": messages,
-        "stream": False,
-        "metadata": {"task": "skill_param_extraction"},
+        'model': model_id,
+        'messages': messages,
+        'stream': False,
+        'metadata': {'task': 'skill_param_extraction'},
     }
 
-    response = await generate_chat_completion(
-        request, form_data=payload, user=admin_user, bypass_filter=True
-    )
+    response = await generate_chat_completion(request, form_data=payload, user=admin_user, bypass_filter=True)
 
     # Handle the 3 response types (dict, StreamingResponse, JSONResponse)
     # following the exact pattern from knowledge_export.py
-    if isinstance(response, dict) and "choices" in response:
-        content = (
-            response["choices"][0].get("message", {}).get("content", "")
-            if response["choices"]
-            else ""
-        )
-    elif hasattr(response, "body_iterator"):
+    if isinstance(response, dict) and 'choices' in response:
+        content = response['choices'][0].get('message', {}).get('content', '') if response['choices'] else ''
+    elif hasattr(response, 'body_iterator'):
         # StreamingResponse — drain and extract content
         content = None
         async for chunk in response.body_iterator:
-            data = json.loads(chunk.decode("utf-8", "replace"))
-            if "choices" in data and data["choices"]:
-                content = data["choices"][0].get("message", {}).get("content")
-        if hasattr(response, "background") and response.background is not None:
+            data = json.loads(chunk.decode('utf-8', 'replace'))
+            if 'choices' in data and data['choices']:
+                content = data['choices'][0].get('message', {}).get('content')
+        if hasattr(response, 'background') and response.background is not None:
             await response.background()
-        content = content or ""
-    elif hasattr(response, "body"):
+        content = content or ''
+    elif hasattr(response, 'body'):
         # JSONResponse — parse the body
-        data = json.loads(response.body.decode("utf-8", "replace"))
-        content = (
-            data["choices"][0].get("message", {}).get("content", "")
-            if data.get("choices")
-            else ""
-        )
+        data = json.loads(response.body.decode('utf-8', 'replace'))
+        content = data['choices'][0].get('message', {}).get('content', '') if data.get('choices') else ''
     else:
-        raise RuntimeError(f"Unexpected response type from LLM: {type(response)}")
+        raise RuntimeError(f'Unexpected response type from LLM: {type(response)}')
 
     if not content:
-        raise RuntimeError("LLM returned empty content for skill param extraction")
+        raise RuntimeError('LLM returned empty content for skill param extraction')
 
     return content
 
@@ -217,17 +207,17 @@ def _build_extraction_messages(messages: list[dict], skill_name: str) -> list[di
     """
     user_content = _format_chat_for_extraction(messages, skill_name)
     return [
-        {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
+        {'role': 'system', 'content': EXTRACTION_SYSTEM_PROMPT},
+        {'role': 'user', 'content': user_content},
     ]
 
 
 # Fixed rendering order for deterministic output (frozenset iteration is arbitrary).
-_PARAM_RENDER_ORDER = ("lang", "style", "terms")
+_PARAM_RENDER_ORDER = ('lang', 'style', 'terms')
 _PARAM_LABELS = {
-    "lang": "Target language",
-    "style": "Style",
-    "terms": "Terms to preserve",
+    'lang': 'Target language',
+    'style': 'Style',
+    'terms': 'Terms to preserve',
 }
 
 
@@ -258,12 +248,12 @@ def build_enriched_skill_prompt(
     sections: list[str] = []
 
     # --- Task (always the user's own words) ---
-    sections.append(f"## Task\n{user_message}")
+    sections.append(f'## Task\n{user_message}')
 
     # --- Input Files (omit if empty) ---
     if file_paths:
-        file_lines = "\n".join(f"- {fp}" for fp in file_paths)
-        sections.append(f"## Input Files\n{file_lines}")
+        file_lines = '\n'.join(f'- {fp}' for fp in file_paths)
+        sections.append(f'## Input Files\n{file_lines}')
 
     # --- Translation Parameters (omit if params is {} or all keys are empty) ---
     if params:
@@ -271,11 +261,11 @@ def build_enriched_skill_prompt(
         for key in _PARAM_RENDER_ORDER:
             val = params.get(key)
             if val:
-                param_lines.append(f"- {_PARAM_LABELS[key]}: {val}")
+                param_lines.append(f'- {_PARAM_LABELS[key]}: {val}')
         if param_lines:
-            sections.append("## Translation Parameters\n" + "\n".join(param_lines))
+            sections.append('## Translation Parameters\n' + '\n'.join(param_lines))
 
-    return "\n\n".join(sections)
+    return '\n\n'.join(sections)
 
 
 async def extract_skill_params(
@@ -301,27 +291,27 @@ async def extract_skill_params(
         Returns {} on any failure — caller should fallback to current behavior.
     """
     if not messages:
-        log.debug("Skill params: no messages provided, returning empty dict")
+        log.debug('Skill params: no messages provided, returning empty dict')
         return {}
 
     try:
         llm_messages = _build_extraction_messages(messages, skill_name)
 
         raw_response = await _call_llm(app, llm_messages, model_id)
-        log.debug("Skill params: raw LLM response: %s", raw_response[:500])
+        log.debug('Skill params: raw LLM response: %s', raw_response[:500])
 
         params = _parse_extraction_response(raw_response)
         if not params:
-            log.warning("Skill params: extraction returned empty params")
+            log.warning('Skill params: extraction returned empty params')
             return {}
 
         log.info(
-            "Skill params: extracted for skill=%s: %s",
+            'Skill params: extracted for skill=%s: %s',
             skill_name,
-            {k: (v[:50] + "..." if v and len(v) > 50 else v) for k, v in params.items()},
+            {k: (v[:50] + '...' if v and len(v) > 50 else v) for k, v in params.items()},
         )
         return params
 
     except Exception:
-        log.exception("Skill params: failed to extract params for skill=%s", skill_name)
+        log.exception('Skill params: failed to extract params for skill=%s', skill_name)
         return {}

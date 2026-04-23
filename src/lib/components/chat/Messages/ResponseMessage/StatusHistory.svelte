@@ -3,17 +3,21 @@
 	const i18n = getContext('i18n');
 
 	import StatusItem from './StatusHistory/StatusItem.svelte';
-	import equal from 'fast-deep-equal';
 	export let statusHistory = [];
 	export let expand = false;
 
 	let showHistory = true;
 
-	$: if (expand) {
+	// HERMES-HOOK-MEMORY-RECALL-UI-BEGIN
+	// Auto-expand for agent skill events so users see the full timeline
+	$: hasAgentSkill = history.some((s) => s?.action === 'agent_skill');
+
+	$: if (expand || hasAgentSkill) {
 		showHistory = true;
 	} else {
 		showHistory = false;
 	}
+	// HERMES-HOOK-MEMORY-RECALL-UI-END
 
 	let history = [];
 	let status = null;
@@ -22,7 +26,10 @@
 		status = history.at(-1);
 	}
 
-	$: if (!equal(statusHistory, history)) {
+	$: if (
+		statusHistory.length !== history.length ||
+		JSON.stringify(statusHistory) !== JSON.stringify(history)
+	) {
 		history = statusHistory;
 	}
 </script>

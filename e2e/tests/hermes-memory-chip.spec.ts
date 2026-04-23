@@ -34,9 +34,10 @@ test.describe('Hermes memory-recall chip', () => {
 		// This leverages the hermes fact_store tool exposed when holographic is active,
 		// OR honcho's conclusion-writing when honcho is active. Either way, a
 		// proactive user message establishes a memory the agent will see next turn.
-		await page.locator('textarea').first().fill(
-			'Please remember this: my favourite testing framework is Playwright.'
-		);
+		await page
+			.locator('textarea')
+			.first()
+			.fill('Please remember this: my favourite testing framework is Playwright.');
 		await page.keyboard.press('Enter');
 		await page.waitForSelector('.shimmer', { state: 'detached', timeout: 120_000 });
 

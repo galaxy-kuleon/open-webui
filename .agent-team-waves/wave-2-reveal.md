@@ -10,18 +10,20 @@
 From `/Users/noelbao/.claude-thx/plans/plan-how-do-we-fancy-quilt.md` §W1 — Identity propagation, RAG_USER_COLLECTION_ENABLED, image-analysis gate:
 
 > **Actions:**
-> 1. `backend/open_webui/config.py` — append the ~20 hermes env vars (name-verified zero-collision with upstream's new STORAGE_LOCAL_CACHE, ENABLE_PASSWORD_CHANGE_FORM, USER_PERMISSIONS_FEATURES_AUTOMATIONS, ENABLE_CALENDAR, ENABLE_AUTOMATIONS, AUTOMATION_*, RAG_RERANKING_BATCH_SIZE, AUDIO_TTS_MISTRAL_*). Use anchor-based insertion (below the `RAG_` block).
+>
+> 1. `backend/open_webui/config.py` — append the ~20 hermes env vars (name-verified zero-collision with upstream's new STORAGE*LOCAL_CACHE, ENABLE_PASSWORD_CHANGE_FORM, USER_PERMISSIONS_FEATURES_AUTOMATIONS, ENABLE_CALENDAR, ENABLE_AUTOMATIONS, AUTOMATION*_, RAG*RERANKING_BATCH_SIZE, AUDIO_TTS_MISTRAL*_). Use anchor-based insertion (below the `RAG_` block).
 > 2. `src/lib/components/chat/MessageInput.svelte` — re-find the `uploadFile` call site and `let paste = async (e)` handler. Graft the `imageAnalysisEnabled` gate + vision-capability check.
 > 3. `src/lib/components/workspace/Models/Capabilities.svelte` — add the `skip_rag` capability toggle.
 > 4. Skip the `research.py` removal (upstream already removed it).
 >
 > **Tests:**
+>
 > - `pytest backend/open_webui/test/hermes/test_identity.py backend/open_webui/test/pipes/test_hermes_agent_headers.py backend/open_webui/test/utils/test_hermes_pipes_manifold.py -x`
 > - `npm run check`
 
 ## Source of truth for grafted content
 
-- **`config.py`**: diff `git diff v0.9.1..hermes-v0.8.12-final -- backend/open_webui/config.py` shows the hermes additions. Extract ONLY the hermes-specific additions (RAG_USER_COLLECTION_ENABLED, HERMES_*, SKIP_RAG_*, ENABLE_IMAGE_ANALYSIS, IMAGE_ANALYSIS_*, etc.) and append at the correct anchor (below RAG block).
+- **`config.py`**: diff `git diff v0.9.1..hermes-v0.8.12-final -- backend/open_webui/config.py` shows the hermes additions. Extract ONLY the hermes-specific additions (RAG*USER_COLLECTION_ENABLED, HERMES*_, SKIP*RAG*_, ENABLE*IMAGE_ANALYSIS, IMAGE_ANALYSIS*\*, etc.) and append at the correct anchor (below RAG block).
 - **`MessageInput.svelte`**: diff `git diff v0.9.1..hermes-v0.8.12-final -- src/lib/components/chat/MessageInput.svelte` shows 74 insertions / 0 deletions hermes-only. The changes cluster around (a) the `paste = async (e)` handler (image clipboard handling) and (b) the `uploadFile(...)` call (image analysis gating).
 - **`Capabilities.svelte`**: diff `git diff v0.9.1..hermes-v0.8.12-final -- src/lib/components/workspace/Models/Capabilities.svelte` shows 13 insertions. The `skip_rag` toggle.
 
@@ -34,7 +36,7 @@ However, Wave 2's work on MessageInput.svelte must NOT touch image_analysis.py r
 ## Constraints for This Wave
 
 - **Allowed files to modify**:
-  - `backend/open_webui/config.py` (hermes-only additive graft; anchor = below RAG_ block)
+  - `backend/open_webui/config.py` (hermes-only additive graft; anchor = below RAG\_ block)
   - `src/lib/components/chat/MessageInput.svelte` (2 anchor-based grafts: paste handler + uploadFile gate)
   - `src/lib/components/workspace/Models/Capabilities.svelte` (skip_rag toggle insertion)
 - **Forbidden files** (deferred to later waves):
@@ -59,6 +61,7 @@ However, Wave 2's work on MessageInput.svelte must NOT touch image_analysis.py r
 Wave 1 closed COMPLETE at `a7a56a5b4`. Delivered: 78 NEW collision-free Hermes modules + minimum additive graft on env.py/sanitize.py/pyproject.toml/uv.lock + version `0.9.1+hermes.0`. Two runtime async-contract fixes (Groups.get_groups_by_member_id × 5 sites; Files.get_file_by_id × 1 site) + secondary UPLOAD_DIR import source correction.
 
 Wave 1 staged state now on `feat/v0.9.1-hermes-port`:
+
 - `package.json` = `0.9.1+hermes.0`
 - `env.py` +14 lines (HERMES_API_URL, OPENCODE_PATH, etc.)
 - `sanitize.py` +177 lines (hermes-branch superset prepended)
@@ -66,6 +69,7 @@ Wave 1 staged state now on `feat/v0.9.1-hermes-port`:
 - All hermes runtime-reachable code is async-contract-correct
 
 Test baseline from Wave 1:
+
 - `pytest backend/open_webui/test/hermes/ backend/open_webui/test/pipes/ backend/open_webui/test/utils/test_builtin_pipes.py -q`: 23/23 pass
 - `npm run check`: 9381 errors / 377 files-with-problems (= pristine v0.9.1 baseline)
 
