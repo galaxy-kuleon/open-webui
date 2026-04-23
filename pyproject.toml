@@ -107,6 +107,7 @@ dependencies = [
     "pytube==15.0.0",
 
     "pydub==0.25.1",
+    "anyascii==0.3.3",
     "ddgs==9.11.3",
 
     "google-api-python-client==2.193.0",
