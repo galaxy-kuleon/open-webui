@@ -13,7 +13,7 @@ import logging
 from typing import AsyncGenerator
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from open_webui.hermes.identity import resolve_hermes_identity
 
@@ -54,12 +54,31 @@ class Pipe:
             description='Timeout for health check / model discovery (seconds)',
         )
 
+        @model_validator(mode='after')
+        def _warn_if_key_absent(self) -> 'Pipe.Valves':
+            # An empty key is allowed — session continuity is silently disabled.
+            # Whitespace-only strings are normalised to empty to prevent subtle bugs.
+            if self.hermes_api_key and not self.hermes_api_key.strip():
+                object.__setattr__(self, 'hermes_api_key', '')
+            return self
+
     def __init__(self):
         self.valves = self.Valves()
 
     # ------------------------------------------------------------------
     # Manifold: expose hermes profiles as sub-models
     # ------------------------------------------------------------------
+    # Hermes runs its own skill router, tool loop and file I/O via
+    # _resolve_file_paths/_inject_file_context — middleware MUST NOT inject
+    # agent-skill keyword intercepts or skip_rag/RAG content for these models.
+    # functions.get_function_models() forwards this `meta` dict into
+    # model['info']['meta'] so middleware can read .capabilities.delegated_orchestration.
+    _HERMES_PIPE_META: dict = {
+        'capabilities': {
+            'delegated_orchestration': True,
+        },
+    }
+
     async def pipes(self) -> list[dict]:
         """Query hermes /v1/models and return one entry per profile.
 
@@ -73,13 +92,34 @@ class Pipe:
             async with httpx.AsyncClient(timeout=self.valves.health_check_timeout) as client:
                 r = await client.get(f'{url}/v1/models', headers=headers)
                 if r.status_code != 200:
+                    if r.status_code == 401:
+                        log.error(
+                            'Hermes /v1/models returned HTTP 401 — hermes_api_key is wrong or '
+                            'expired. Session memory continuity will be broken. '
+                            'Update the hermes_api_key valve to match API_SERVER_KEY on the Hermes server.'
+                        )
+                    else:
+                        log.warning('Hermes /v1/models returned HTTP %s', r.status_code)
                     return []
                 data = r.json().get('data', [])
                 if not data:
-                    return [{'id': 'default', 'name': 'Hermes Agent'}]
-                return [{'id': m.get('id', 'default'), 'name': m.get('id', 'Hermes Agent')} for m in data]
-        except (httpx.ConnectError, httpx.TimeoutException, Exception) as e:
-            log.debug(f'Hermes unreachable for model discovery: {e}')
+                    return [{'id': 'default', 'name': 'Hermes Agent', 'meta': self._HERMES_PIPE_META}]
+                return [
+                    {
+                        'id': m.get('id', 'default'),
+                        'name': m.get('id', 'Hermes Agent'),
+                        'meta': self._HERMES_PIPE_META,
+                    }
+                    for m in data
+                ]
+        except httpx.ConnectError as e:
+            log.error('Hermes unreachable for model discovery (%s) — is the server running? %s', url, e)
+            return []
+        except httpx.TimeoutException as e:
+            log.warning('Hermes model discovery timed out (%s): %s', url, e)
+            return []
+        except Exception as e:
+            log.warning('Hermes model discovery failed unexpectedly: %s', e)
             return []
 
     # ------------------------------------------------------------------
@@ -414,11 +454,41 @@ class Pipe:
         """Translate hermes.memory.recalled into Open WebUI status event.
 
         Called at most once per turn, before any content chunks arrive.
-        UI rendering of this event is deferred — the status event is
-        addressable via action="hermes_memory_recall" for future frontend work.
+        Forwards recalled_facts from the hermes SSE payload so the frontend
+        chip can show provenance and offer per-fact forget actions.
+
+        Each entry in recalled_facts must conform to:
+            {'id': str, 'content_preview': str, 'score': float | None}
+        Partial / malformed entries are sanitised defensively — missing keys
+        become safe defaults; content_preview is truncated to 200 chars.
         """
         if not emitter:
             return
+
+        _PREVIEW_LIMIT = 200
+
+        raw_facts = payload.get('recalled_facts', [])
+        recalled_facts: list[dict] = []
+        if isinstance(raw_facts, list):
+            for entry in raw_facts:
+                if not isinstance(entry, dict):
+                    continue
+                preview = str(entry.get('content_preview', ''))
+                if len(preview) > _PREVIEW_LIMIT:
+                    preview = preview[:_PREVIEW_LIMIT]
+                score = entry.get('score')
+                try:
+                    score = float(score) if score is not None else None
+                except (TypeError, ValueError):
+                    score = None
+                recalled_facts.append(
+                    {
+                        'id': str(entry.get('id', '')),
+                        'content_preview': preview,
+                        'score': score,
+                    }
+                )
+
         try:
             await emitter(
                 {
@@ -428,6 +498,7 @@ class Pipe:
                         'provider': payload.get('provider', 'unknown'),
                         'context_preview': payload.get('context_preview', ''),
                         'context_token_estimate': payload.get('context_token_estimate', 0),
+                        'recalled_facts': recalled_facts,
                         'done': False,
                     },
                 }
