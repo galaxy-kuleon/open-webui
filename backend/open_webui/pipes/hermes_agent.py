@@ -41,8 +41,14 @@ class Pipe:
             description='Hermes API server base URL (e.g. http://localhost:8642)',
         )
         hermes_api_key: str = Field(
-            default='',
-            description='Bearer token for hermes API (matches API_SERVER_KEY). Required for authenticated session continuity.',
+            ...,
+            min_length=1,
+            description=(
+                'Bearer token for the Hermes API server (must match API_SERVER_KEY on the '
+                'Hermes side). REQUIRED — without this key, every chat request omits the '
+                'X-Hermes-Session-Id header and session memory continuity is silently '
+                'disabled; the agent will appear forgetful across turns.'
+            ),
             json_schema_extra={'input': {'type': 'password'}},
         )
         request_timeout: int = Field(
@@ -55,15 +61,28 @@ class Pipe:
         )
 
         @model_validator(mode='after')
-        def _warn_if_key_absent(self) -> 'Pipe.Valves':
-            # An empty key is allowed — session continuity is silently disabled.
-            # Whitespace-only strings are normalised to empty to prevent subtle bugs.
-            if self.hermes_api_key and not self.hermes_api_key.strip():
-                object.__setattr__(self, 'hermes_api_key', '')
+        def _reject_whitespace_key(self) -> 'Pipe.Valves':
+            if not self.hermes_api_key.strip():
+                raise ValueError(
+                    'hermes_api_key must not be empty or whitespace-only — '
+                    'session memory continuity requires a valid Bearer token'
+                )
             return self
 
     def __init__(self):
-        self.valves = self.Valves()
+        import os
+
+        # hermes_api_key is required (Field(..., min_length=1)).
+        # Seed from the HERMES_API_KEY env var so a fresh install that sets the
+        # env var works without any UI interaction.  If the env var is also
+        # absent, Valves() raises pydantic.ValidationError — Open WebUI surfaces
+        # this as a configuration error in the Functions UI, which is exactly
+        # the intended behaviour: fail loud at config time, not silently later.
+        _env_key = os.environ.get('HERMES_API_KEY', '').strip()
+        if _env_key:
+            self.valves = self.Valves(hermes_api_key=_env_key)
+        else:
+            self.valves = self.Valves()  # type: ignore[call-arg]  # will raise ValidationError
 
     # ------------------------------------------------------------------
     # Manifold: expose hermes profiles as sub-models
