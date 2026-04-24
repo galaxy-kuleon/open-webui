@@ -79,8 +79,14 @@ class Pipe:
         # this as a configuration error in the Functions UI, which is exactly
         # the intended behaviour: fail loud at config time, not silently later.
         _env_key = os.environ.get('HERMES_API_KEY', '').strip()
+        _env_url = os.environ.get('HERMES_API_URL', '').strip()
+        kwargs: dict[str, str] = {}
         if _env_key:
-            self.valves = self.Valves(hermes_api_key=_env_key)
+            kwargs['hermes_api_key'] = _env_key
+        if _env_url:
+            kwargs['hermes_api_url'] = _env_url
+        if kwargs:
+            self.valves = self.Valves(**kwargs)
         else:
             self.valves = self.Valves()  # type: ignore[call-arg]  # will raise ValidationError
 
