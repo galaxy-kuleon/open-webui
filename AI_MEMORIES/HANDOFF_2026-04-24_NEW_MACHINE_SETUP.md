@@ -32,10 +32,10 @@ git clone https://github.com/galaxy-kuleon/hermes-agent.git
 git clone https://github.com/plasticlabs/honcho-deploy.git honcho-deploy
 
 cd open-webui
-git checkout fix/hermes-e2e-selectors
+git checkout main-kg
 
 cd ../hermes-agent
-git checkout feat/kuleon-openwebui-identity
+git checkout main-kg
 ```
 
 ## Step 2: Configure Secrets
@@ -115,14 +115,14 @@ docker compose -f docker-compose.stack.yml up -d --build
 
 This brings up **6 services**:
 
-| Service | Purpose | Exposed Port |
-|---------|---------|-------------|
-| `open-webui` | Web UI + API | `127.0.0.1:8059` |
-| `hermes` | Agent API server | `127.0.0.1:8642` |
-| `honcho-api` | Memory / context API | `127.0.0.1:8000` |
-| `honcho-deriver` | Background memory extraction | (internal) |
-| `honcho-db` | PostgreSQL + pgvector | `127.0.0.1:5432` |
-| `honcho-redis` | Cache | `127.0.0.1:6379` |
+| Service          | Purpose                      | Exposed Port     |
+| ---------------- | ---------------------------- | ---------------- |
+| `open-webui`     | Web UI + API                 | `127.0.0.1:8059` |
+| `hermes`         | Agent API server             | `127.0.0.1:8642` |
+| `honcho-api`     | Memory / context API         | `127.0.0.1:8000` |
+| `honcho-deriver` | Background memory extraction | (internal)       |
+| `honcho-db`      | PostgreSQL + pgvector        | `127.0.0.1:5432` |
+| `honcho-redis`   | Cache                        | `127.0.0.1:6379` |
 
 Wait for health checks (about 30–60 seconds):
 
@@ -142,6 +142,7 @@ curl -sf http://127.0.0.1:8000/health
 ```
 
 Expected:
+
 - Open WebUI: `{"status":true}`
 - Hermes: `{"status":"ok","platform":"hermes-agent"}`
 - Honcho: HTTP 200
@@ -212,6 +213,7 @@ Should stream SSE chunks starting with `data: {...}`. Assistant content should b
 **Observation**: On a completely fresh Open WebUI install (empty `openwebui-data` volume), the builtin `hermes_agent` pipe is **not registered until the first user exists**.
 
 Log evidence:
+
 ```
 INFO  | open_webui.utils.builtin_pipes:ensure_builtin_pipes:46 - No users exist yet — skipping builtin pipe registration
 ```
@@ -219,11 +221,13 @@ INFO  | open_webui.utils.builtin_pipes:ensure_builtin_pipes:46 - No users exist 
 **Impact**: Step 4.3 (model discovery) may return an empty Hermes model list on the very first API call.
 
 **Workaround**: After creating the first user (Step 5), restart the Open WebUI container:
+
 ```bash
 docker compose -f docker-compose.stack.yml up -d --build open-webui
 ```
 
 On restart you should see:
+
 ```
 INFO  | open_webui.utils.builtin_pipes:ensure_builtin_pipes:101 - Registered builtin pipe: hermes_agent
 ```
@@ -245,6 +249,7 @@ curl -X POST http://127.0.0.1:8059/api/v1/auths/signup \
 ```
 
 Then disable signup in `.env.stack` and restart:
+
 ```bash
 # Add to .env.stack
 ENABLE_SIGNUP=false
@@ -257,16 +262,21 @@ docker compose -f docker-compose.stack.yml up -d
 ## Architecture Notes
 
 ### Network
+
 All services communicate over the internal Docker bridge network `stack-net`. Service names resolve as hostnames:
+
 - `http://hermes:8642` from Open WebUI
 - `http://honcho-api:8000` from Hermes
 - `http://honcho-db:5432` from Honcho services
 
 ### File Uploads
+
 User-uploaded files land in the `uploads-data` named volume (mounted at `/app/backend/data/uploads` in Open WebUI). Hermes mounts this same volume **read-only** so the absolute paths injected by the Hermes pipe are valid inside the Hermes container.
 
 ### Delegated Orchestration
+
 When `hermes_agent.hermes-agent` is selected, Open WebUI middleware **skips**:
+
 - Local skill intercept
 - File context injection
 - Skip RAG injection
@@ -275,16 +285,18 @@ When `hermes_agent.hermes-agent` is selected, Open WebUI middleware **skips**:
 Hermes receives raw messages plus a system-message block containing file paths. Hermes handles its own skill routing, tool calling, memory recall, and file reading.
 
 ### Auth Separation
-| Key | Role | Location |
-|-----|------|----------|
-| `API_SERVER_KEY` | Hermes API server auth | `.env.stack` |
-| `HERMES_API_KEY` | Open WebUI → Hermes client auth | `.env.stack` (must match API_SERVER_KEY) |
-| `OPENCODE_GO_API_KEY` | Hermes → upstream LLM provider | `.env.stack` |
-| `LLM_OPENAI_API_KEY` | Honcho → LLM provider | `.env.stack` |
+
+| Key                   | Role                            | Location                                 |
+| --------------------- | ------------------------------- | ---------------------------------------- |
+| `API_SERVER_KEY`      | Hermes API server auth          | `.env.stack`                             |
+| `HERMES_API_KEY`      | Open WebUI → Hermes client auth | `.env.stack` (must match API_SERVER_KEY) |
+| `OPENCODE_GO_API_KEY` | Hermes → upstream LLM provider  | `.env.stack`                             |
+| `LLM_OPENAI_API_KEY`  | Honcho → LLM provider           | `.env.stack`                             |
 
 ## Docker Compose Override Files
 
 The main compose (`docker-compose.stack.yml`) is designed for **new machines** with no pre-existing state. It uses named volumes for all persistent data:
+
 - `openwebui-data` — Open WebUI SQLite DB and configs
 - `uploads-data` — User-uploaded files
 - `hermes-data` — Hermes config, skills, memories, state
@@ -305,6 +317,7 @@ services:
 ```
 
 Apply the override:
+
 ```bash
 docker compose -f docker-compose.stack.yml -f docker-compose.stack.override.yml up -d
 ```
@@ -314,26 +327,31 @@ docker compose -f docker-compose.stack.yml -f docker-compose.stack.override.yml 
 ## Troubleshooting
 
 ### Hermes returns 401 Unauthorized
+
 - Verify `API_SERVER_KEY` in `.env.stack` matches the key Hermes is using
 - Check Hermes logs: `docker compose -f docker-compose.stack.yml logs hermes`
 - Ensure `.hermes/.env` inside the Hermes volume has `API_SERVER_KEY` if env injection isn't working
 
 ### Open WebUI shows no Hermes models
+
 - Check that `HERMES_API_KEY` is set in `.env.stack`
 - Check Hermes health: `curl http://127.0.0.1:8642/health`
 - Check Open WebUI logs for pipe instantiation errors
 - **First-run quirk**: If the DB is empty (no users yet), builtin pipes are skipped. Create a user and restart Open WebUI (see Step 4.6).
 
 ### Streaming chat fails with "client has been closed"
+
 - This was a pre-existing bug where `httpx.AsyncClient` was closed before the streaming generator was consumed.
-- **Fixed in commit `06b852a8b`** on branch `fix/hermes-e2e-selectors`. Ensure you are on the latest commit.
+- **Fixed in commit `06b852a8b`** on branch `main-kg`. Ensure you are on the latest commit.
 
 ### File paths not resolving in Hermes
+
 - Ensure `uploads-data` volume is shared between `open-webui` and `hermes`
 - Hermes must mount it read-only at the same absolute path: `/app/backend/data/uploads`
 - Check that Open WebUI's `UPLOAD_DIR` matches the mount point
 
 ### Honcho API fails to start
+
 - Check DB health: `docker compose -f docker-compose.stack.yml logs honcho-db`
 - Ensure `DB_CONNECTION_URI` uses `postgresql+psycopg` prefix
 - Verify `.env.stack` is readable and contains required LLM keys
@@ -341,23 +359,27 @@ docker compose -f docker-compose.stack.yml -f docker-compose.stack.override.yml 
 ## Restart / Rebuild
 
 Rebuild Open WebUI after code changes:
+
 ```bash
 cd ~/workspace/open-webui
 docker compose -f docker-compose.stack.yml up -d --build open-webui
 ```
 
 Restart Hermes after config changes:
+
 ```bash
 docker compose -f docker-compose.stack.yml restart hermes
 ```
 
 Full teardown and recreate (preserves named volumes):
+
 ```bash
 docker compose -f docker-compose.stack.yml down
 docker compose -f docker-compose.stack.yml up -d --build
 ```
 
 Teardown including **data loss** (removes volumes):
+
 ```bash
 docker compose -f docker-compose.stack.yml down -v
 ```
@@ -368,15 +390,6 @@ docker compose -f docker-compose.stack.yml down -v
 - Compose file: `docker-compose.stack.yml`
 - Env template: `.env.stack.example`
 - Repos:
-  - Open WebUI: `https://github.com/galaxy-kuleon/open-webui.git` (branch `fix/hermes-e2e-selectors`)
-  - Hermes Agent: `https://github.com/galaxy-kuleon/hermes-agent.git` (branch `feat/kuleon-openwebui-identity`)
+  - Open WebUI: `https://github.com/galaxy-kuleon/open-webui.git` (branch `main-kg`)
+  - Hermes Agent: `https://github.com/galaxy-kuleon/hermes-agent.git` (branch `main-kg`)
   - Honcho Deploy: `https://github.com/plasticlabs/honcho-deploy.git`
-
-### Recent commits on `fix/hermes-e2e-selectors`
-
-| Commit | Message |
-|--------|---------|
-| `06b852a8b` | fix(hermes-pipe): bind httpx client lifetime to stream_response generator |
-| `a91d2b426` | fix(hermes-pipe): read HERMES_API_URL from env for Docker compose compatibility |
-| `556de3531` | feat(hermes): delegated orchestration + skip RAG hardening + unified stack compose |
-| `330ce3b40` | deploy(stack): relative paths + new-machine setup handoff |
