@@ -312,3 +312,6 @@ dist
 cypress/videos
 cypress/screenshots
 .vscode/settings.json
+
+/backend/open_webui/frontend
+/AI_MEMORIES/

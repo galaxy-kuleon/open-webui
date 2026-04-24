@@ -144,6 +144,9 @@ pytest-docker~=3.2.5
 ## LDAP
 ldap3==2.9.1
 
+## Sanitization (utils/sanitize.py — sanitize_filename CJK→ASCII fallback)
+anyascii==0.3.3
+
 ## Firecrawl
 firecrawl-py==4.18.0
 
