@@ -63,9 +63,9 @@ services:
   # ── Hermes Agent API ──────────────────────────────────────────────────────
   hermes:
     image: nousresearch/hermes-agent:latest
-    # If you prefer building from source:
+    # To build from source instead, uncomment below and comment out `image:`
     # build:
-    #   context: /root/hermes-agent
+    #   context: ../hermes-agent
     #   dockerfile: Dockerfile
     container_name: hermes-stack
     ports:
@@ -78,8 +78,10 @@ services:
       - API_SERVER_KEY=${API_SERVER_KEY}
     volumes:
       # Hermes config, skills, memories, state, logs, etc.
-      # NOTE: ensure /root/.hermes/config.yaml binds api_server to 0.0.0.0
-      - /root/.hermes:/opt/data
+      # On first run the entrypoint bootstraps default config files if empty.
+      # To preserve across recreates, use a named volume (as below) or
+      # bind-mount a host directory:  - ./hermes-data:/opt/data
+      - hermes-data:/opt/data
       # Read-only access to Open WebUI uploads so file-path injection works
       - uploads-data:/app/backend/data/uploads:ro
     command: ["gateway", "run"]
@@ -96,7 +98,7 @@ services:
   # ── Honcho API ────────────────────────────────────────────────────────────
   honcho-api:
     build:
-      context: /root/honcho-deploy
+      context: ../honcho-deploy
       dockerfile: Dockerfile
     container_name: honcho-api-stack
     entrypoint: ["sh", "docker/entrypoint.sh"]
@@ -132,7 +134,7 @@ services:
   # ── Honcho Deriver (background memory extraction) ─────────────────────────
   honcho-deriver:
     build:
-      context: /root/honcho-deploy
+      context: ../honcho-deploy
       dockerfile: Dockerfile
     container_name: honcho-deriver-stack
     entrypoint: ["/app/.venv/bin/python", "-m", "src.deriver"]
@@ -163,7 +165,7 @@ services:
       - PGDATA=/var/lib/postgresql/data/pgdata
     volumes:
       - honcho-pgdata:/var/lib/postgresql/data
-      - /root/honcho-deploy/database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ../honcho-deploy/database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 5s
@@ -191,6 +193,7 @@ services:
 volumes:
   openwebui-data:
   uploads-data:
+  hermes-data:
   honcho-pgdata:
   honcho-redis-data:
 
