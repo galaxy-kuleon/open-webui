@@ -93,6 +93,8 @@ from open_webui.routers import (
     groups,
     files,
     functions,
+    hermes_continuation,
+    hermes_health,
     hermes_memory,
     memories,
     models,
@@ -739,6 +741,15 @@ async def lifespan(app: FastAPI):
         await ensure_builtin_pipes()
     except Exception as e:
         log.warning(f'Failed to register builtin pipes at startup: {e}')
+
+    # Warn operators about groups that lack a hermes shared_memory opt-in.
+    # These groups silently lost group-scoped memory after commit ec71a53f9.
+    try:
+        from open_webui.hermes import warn_unflagged_hermes_groups
+
+        await warn_unflagged_hermes_groups()
+    except Exception as e:
+        log.warning(f'Hermes unflagged-groups diagnostic failed: {e}')
 
     # Mark application as ready to accept traffic from a startup perspective.
     app.state.startup_complete = True
@@ -1439,7 +1450,13 @@ app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
 app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
 
 app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
+app.include_router(hermes_health.router, prefix='/api/v1/hermes/health', tags=['hermes-health'])
 app.include_router(hermes_memory.router, prefix='/api/v1/hermes/memory', tags=['hermes-memory'])
+app.include_router(
+    hermes_continuation.router,
+    prefix='/api/v1/hermes/continuation',
+    tags=['hermes-continuation'],
+)
 app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
 app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
 app.include_router(files.router, prefix='/api/v1/files', tags=['files'])

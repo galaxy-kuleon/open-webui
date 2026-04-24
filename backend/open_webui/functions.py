@@ -1,3 +1,4 @@
+import copy
 import logging
 import sys
 import inspect
@@ -68,7 +69,10 @@ async def get_function_module_by_id(request: Request, pipe_id: str):
             except Exception as e:
                 log.exception(f'Error loading valves for function {pipe_id}: {e}')
                 raise e
-        else:
+        elif getattr(function_module, 'valves', None) is None:
+            # Preserve valves seeded by the pipe module itself (for example from
+            # environment variables). Only synthesize a default valves object
+            # when the module did not initialize one.
             function_module.valves = Valves()
 
     return function_module
@@ -114,17 +118,25 @@ async def get_function_models(request):
 
                     pipe_flag = {'type': pipe.type}
 
-                    pipe_models.append(
-                        {
-                            'id': sub_pipe_id,
-                            'name': sub_pipe_name,
-                            'object': 'model',
-                            'created': pipe.created_at,
-                            'owned_by': 'openai',
-                            'pipe': pipe_flag,
-                            'has_user_valves': has_user_valves,
-                        }
-                    )
+                    sub_pipe_entry = {
+                        'id': sub_pipe_id,
+                        'name': sub_pipe_name,
+                        'object': 'model',
+                        'created': pipe.created_at,
+                        'owned_by': 'openai',
+                        'pipe': pipe_flag,
+                        'has_user_valves': has_user_valves,
+                    }
+
+                    # Forward pipe-declared default meta (e.g. capabilities) so the pipe
+                    # can self-declare flags like delegated_orchestration without requiring
+                    # admin Models UI configuration. An admin override (Models DB row) still
+                    # wins because _merge_models_lists overwrites model['info'] from the
+                    # custom_model record.
+                    if isinstance(p.get('meta'), dict):
+                        sub_pipe_entry['info'] = {'meta': copy.deepcopy(p['meta'])}
+
+                    pipe_models.append(sub_pipe_entry)
             else:
                 pipe_flag = {'type': 'pipe'}
 

@@ -1,5 +1,4 @@
 import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +20,9 @@ class _FakeResponse:
     async def aread(self):
         return json.dumps(self._json_body).encode()
 
+    def json(self):
+        return self._json_body
+
     async def aiter_lines(self):
         for line in self._lines:
             yield line
@@ -38,7 +40,16 @@ class _FakeClient:
         return False
 
     def stream(self, method, url, headers=None, json=None):
+        self._recorder['request_kind'] = 'stream'
         self._recorder['method'] = method
+        self._recorder['url'] = url
+        self._recorder['headers'] = headers or {}
+        self._recorder['json'] = json or {}
+        return self._response
+
+    async def post(self, url, headers=None, json=None):
+        self._recorder['request_kind'] = 'post'
+        self._recorder['method'] = 'POST'
         self._recorder['url'] = url
         self._recorder['headers'] = headers or {}
         self._recorder['json'] = json or {}
@@ -59,11 +70,15 @@ def _client_factory(recorder, response):
         def stream(self, method, url, headers=None, json=None):
             return self._client.stream(method, url, headers=headers, json=json)
 
+        async def post(self, url, headers=None, json=None):
+            return await self._client.post(url, headers=headers, json=json)
+
     return _Factory
 
 
 def test_maybe_add_session_header_requires_api_key():
     pipe = Pipe()
+    pipe.valves.hermes_api_key = ''
     headers = {}
 
     assert pipe._maybe_add_session_header(headers, 'chat-123') is False
@@ -77,6 +92,7 @@ def test_maybe_add_session_header_requires_api_key():
 @pytest.mark.asyncio
 async def test_pipe_skips_session_header_without_api_key(monkeypatch):
     pipe = Pipe()
+    pipe.valves.hermes_api_key = ''
     recorder = {}
     response = _FakeResponse()
 
@@ -85,11 +101,13 @@ async def test_pipe_skips_session_header_without_api_key(monkeypatch):
         _client_factory(recorder, response),
     )
 
-    chunks = []
-    async for chunk in pipe.pipe(
+    stream = await pipe.pipe(
         {'model': 'hermes_agent.default', 'messages': [{'role': 'user', 'content': 'hello'}]},
         __chat_id__='chat-123',
-    ):
+    )
+
+    chunks = []
+    async for chunk in stream:
         chunks.append(chunk)
 
     assert chunks == ['data: [DONE]']
@@ -108,10 +126,12 @@ async def test_pipe_adds_session_header_with_api_key(monkeypatch):
         _client_factory(recorder, response),
     )
 
-    async for _ in pipe.pipe(
+    stream = await pipe.pipe(
         {'model': 'hermes_agent.default', 'messages': [{'role': 'user', 'content': 'hello'}]},
         __chat_id__='chat-123',
-    ):
+    )
+
+    async for _ in stream:
         pass
 
     assert recorder['headers']['Authorization'] == 'Bearer sk-test'
@@ -138,12 +158,14 @@ async def test_pipe_403_session_continuity_error_includes_hint(monkeypatch):
     async def _emit(event):
         emitted.append(event)
 
-    chunks = []
-    async for chunk in pipe.pipe(
+    stream = await pipe.pipe(
         {'model': 'hermes_agent.default', 'messages': [{'role': 'user', 'content': 'hello'}]},
         __chat_id__='chat-123',
         __event_emitter__=_emit,
-    ):
+    )
+
+    chunks = []
+    async for chunk in stream:
         chunks.append(chunk)
 
     assert chunks[0]['error']['detail'].endswith(
@@ -181,11 +203,13 @@ async def test_pipe_passes_through_reasoning_content_unchanged(monkeypatch):
     async def _emit(event):
         emitted.append(event)
 
-    chunks = []
-    async for chunk in pipe.pipe(
+    stream = await pipe.pipe(
         {'model': 'hermes_agent.default', 'messages': [{'role': 'user', 'content': 'hello'}]},
         __event_emitter__=_emit,
-    ):
+    )
+
+    chunks = []
+    async for chunk in stream:
         chunks.append(chunk)
 
     # First yielded chunk must be the parsed JSON with reasoning_content intact
@@ -195,3 +219,77 @@ async def test_pipe_passes_through_reasoning_content_unchanged(monkeypatch):
     # No emitter event should carry sub_action == 'thinking'
     thinking_events = [e for e in emitted if e.get('data', {}).get('sub_action') == 'thinking']
     assert thinking_events == []
+
+
+@pytest.mark.asyncio
+async def test_pipe_returns_json_for_non_stream_requests(monkeypatch):
+    pipe = Pipe()
+    recorder = {}
+    response = _FakeResponse(
+        json_body={
+            'id': 'chatcmpl-test',
+            'object': 'chat.completion',
+            'choices': [
+                {
+                    'index': 0,
+                    'message': {'role': 'assistant', 'content': 'hello back'},
+                    'finish_reason': 'stop',
+                }
+            ],
+        }
+    )
+
+    monkeypatch.setattr(
+        'open_webui.pipes.hermes_agent.httpx.AsyncClient',
+        _client_factory(recorder, response),
+    )
+
+    result = await pipe.pipe(
+        {
+            'model': 'hermes_agent.default',
+            'messages': [{'role': 'user', 'content': 'hello'}],
+            'stream': False,
+        }
+    )
+
+    assert result == response.json()
+    assert recorder['request_kind'] == 'post'
+    assert recorder['json']['stream'] is False
+
+
+@pytest.mark.asyncio
+async def test_pipe_returns_error_dict_for_non_stream_failures(monkeypatch):
+    pipe = Pipe()
+    pipe.valves.hermes_api_key = 'sk-test'
+    recorder = {}
+    response = _FakeResponse(
+        status_code=403,
+        json_body={'error': {'message': 'Session continuation requires API key authentication.'}},
+    )
+
+    monkeypatch.setattr(
+        'open_webui.pipes.hermes_agent.httpx.AsyncClient',
+        _client_factory(recorder, response),
+    )
+
+    emitted = []
+
+    async def _emit(event):
+        emitted.append(event)
+
+    result = await pipe.pipe(
+        {
+            'model': 'hermes_agent.default',
+            'messages': [{'role': 'user', 'content': 'hello'}],
+            'stream': False,
+        },
+        __chat_id__='chat-123',
+        __event_emitter__=_emit,
+    )
+
+    assert result['error']['detail'].endswith(
+        'Hermes session continuity requires API_SERVER_KEY on the Hermes server and a matching '
+        'hermes_api_key in this pipe.'
+    )
+    assert recorder['request_kind'] == 'post'
+    assert emitted[-1]['data']['sub_action'] == 'error'

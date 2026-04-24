@@ -90,10 +90,11 @@ async def test_pipes_returns_formatted_model_list(monkeypatch):
     pipe = Pipe()
     result = await pipe.pipes()
 
+    _meta = {'capabilities': {'delegated_orchestration': True}}
     assert result == [
-        {'id': 'default', 'name': 'default'},
-        {'id': 'research', 'name': 'research'},
-        {'id': 'coder', 'name': 'coder'},
+        {'id': 'default', 'name': 'default', 'meta': _meta},
+        {'id': 'research', 'name': 'research', 'meta': _meta},
+        {'id': 'coder', 'name': 'coder', 'meta': _meta},
     ]
 
 
@@ -110,7 +111,8 @@ async def test_pipes_empty_data_returns_default_entry(monkeypatch):
     pipe = Pipe()
     result = await pipe.pipes()
 
-    assert result == [{'id': 'default', 'name': 'Hermes Agent'}]
+    _meta = {'capabilities': {'delegated_orchestration': True}}
+    assert result == [{'id': 'default', 'name': 'Hermes Agent', 'meta': _meta}]
 
 
 # ---------------------------------------------------------------------------

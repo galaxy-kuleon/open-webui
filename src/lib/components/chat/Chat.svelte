@@ -102,6 +102,7 @@
 	import ChatControls from './ChatControls.svelte';
 	import EventConfirmDialog from '../common/ConfirmDialog.svelte';
 	import Placeholder from './Placeholder.svelte';
+	import HermesContinuationCard from './HermesContinuationCard.svelte';
 	import FilesOverlay from './MessageInput/FilesOverlay.svelte';
 	import NotificationToast from '../NotificationToast.svelte';
 	import Spinner from '../common/Spinner.svelte';
@@ -109,6 +110,7 @@
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
 	import { getBanners } from '$lib/apis/configs';
+	import { probeContinuation, type ContinuationProbeResult } from '$lib/apis/hermes/continuation';
 
 	export let chatIdProp = '';
 
@@ -157,6 +159,12 @@
 	let generating = false;
 	let dragged = false;
 	let generationController = null;
+
+	// ---------------------------------------------------------------------------
+	// Hermes proactive continuation probe — shown on new-chat landing page
+	// ---------------------------------------------------------------------------
+	let hermesContinuation: ContinuationProbeResult | null = null;
+	let hermesContinuationDismissed = false;
 
 	let chat = null;
 	let tags = [];
@@ -1311,6 +1319,25 @@
 
 		const chatInput = document.getElementById('chat-input');
 		setTimeout(() => chatInput?.focus(), 0);
+
+		// --- Hermes proactive continuation probe ---
+		// Reset on every new-chat so a stale card doesn't linger.
+		hermesContinuation = null;
+		hermesContinuationDismissed = false;
+
+		// Only probe when the user is authenticated. Fire-and-forget — the
+		// card appears whenever the response resolves; page load is unaffected.
+		if (localStorage.token) {
+			probeContinuation(localStorage.token).then((result) => {
+				// Deduplicate: if an SSE-driven card already rendered this turn
+				// (data-testid="hermes-continuation-card" is already in the DOM)
+				// skip the proactive card to avoid double-rendering.
+				const existingCard = document.querySelector('[data-testid="hermes-continuation-card"]');
+				if (!existingCard && result.suggested) {
+					hermesContinuation = result;
+				}
+			});
+		}
 	};
 
 	const loadChat = async () => {
@@ -3022,7 +3049,23 @@
 								</div>
 							</div>
 						{:else}
-							<div class="flex items-center h-full">
+							<div class="flex flex-col items-center h-full">
+								{#if hermesContinuation && hermesContinuation.suggested && !hermesContinuationDismissed}
+									<div class="w-full max-w-6xl px-2 @2xl:px-20 pt-6">
+										<HermesContinuationCard
+											taskSummary={hermesContinuation.task_summary ?? ''}
+											confidence={hermesContinuation.confidence}
+											lastSessionAgeHours={hermesContinuation.last_session_age_hours}
+											onResume={(summary) => {
+												messageInput?.setText(summary);
+												hermesContinuationDismissed = true;
+											}}
+											onDismiss={() => {
+												hermesContinuationDismissed = true;
+											}}
+										/>
+									</div>
+								{/if}
 								<Placeholder
 									{history}
 									{selectedModels}

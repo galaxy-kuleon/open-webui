@@ -99,8 +99,13 @@ def _make_user(uid='user1'):
     return u
 
 
-def _make_model(skip_rag=True):
-    """Minimal model dict that activates the skip_rag path."""
+def _make_model(skip_rag=True, delegated_orchestration=False):
+    """Minimal model dict that activates the skip_rag path.
+
+    When ``delegated_orchestration`` is True, middleware MUST NOT run the
+    agent-skill keyword intercept and MUST NOT inject skip_rag content —
+    the model (e.g. hermes_agent pipe) owns its own context.
+    """
     return {
         'id': 'test-model',
         'owned_by': 'local',
@@ -109,6 +114,7 @@ def _make_model(skip_rag=True):
                 'capabilities': {
                     'skip_rag': skip_rag,
                     'file_context': True,
+                    'delegated_orchestration': delegated_orchestration,
                 },
                 'knowledge': False,
             }
@@ -675,4 +681,137 @@ def test_skill_intercept_bypasses_skip_rag_injection():
     )
     assert metadata_out.get('__agent_skill_result__') == '{"output": "ok"}', (
         'skill intercept did not fire — __agent_skill_result__ missing'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests: delegated_orchestration capability flag
+# ---------------------------------------------------------------------------
+# Models with capabilities.delegated_orchestration=True (e.g. hermes_agent pipe)
+# handle their own skill routing, tool use and file context.  Middleware MUST
+# leave the prompt alone:
+#   - no skip_rag preamble or <<FILE BEGIN>> blocks
+#   - no agent-skill keyword intercept (matched_skill stays None)
+#   - no __agent_skill_result__ in metadata
+# These two tests pin that contract.
+
+
+def test_delegated_orchestration_bypasses_skip_rag_injection():
+    """delegated_orchestration=True + skip_rag=True + files attached →
+    no skip_rag preamble, no <<FILE BEGIN>>, no file content in prompt.
+    The pipe is expected to inject file paths itself."""
+    file_db = {
+        'doc1': _file_stub('doc1', 'Confidential payload that must NOT be injected.'),
+    }
+
+    metadata = _make_metadata([])
+    form_data = _make_form_data(
+        messages=[{'role': 'user', 'content': 'Summarize the documents.'}],
+        files=[{'id': 'doc1', 'name': 'doc.txt'}],
+        metadata=metadata,
+    )
+
+    model = _make_model(skip_rag=True, delegated_orchestration=True)
+    user = _make_user()
+    request = MagicMock()
+    request.app.state.MODELS = {'test-model': model}
+    request.app.state.config.TOOL_SERVER_CONNECTIONS = []
+    request.state.direct = False
+
+    emitter, _captured = _make_spy_emitter()
+    patches = _all_patches(file_db, emitter)
+
+    with _apply_patches(patches):
+        form_data_out, metadata_out, _events = asyncio.get_event_loop().run_until_complete(
+            process_chat_payload(request, form_data, user, metadata, model)
+        )
+
+    all_text = '\n'.join(
+        m.get('content', '') if isinstance(m.get('content'), str) else '' for m in form_data_out['messages']
+    )
+
+    assert _EXPECTED_PREAMBLE not in all_text, (
+        'skip_rag preamble was injected despite delegated_orchestration=True — gate failed'
+    )
+    assert '<<FILE file-doc1 BEGIN>>' not in all_text, (
+        'skip_rag delimiter was injected despite delegated_orchestration=True — gate failed'
+    )
+    assert 'Confidential payload that must NOT be injected.' not in all_text, (
+        'file content leaked into prompt despite delegated_orchestration=True — gate failed'
+    )
+    assert metadata_out.get('__agent_skill_result__') is None, (
+        'skill intercept fired despite delegated_orchestration=True — gate failed'
+    )
+
+
+def test_delegated_orchestration_bypasses_skill_intercept():
+    """delegated_orchestration=True + agent_skill name in user message →
+    matched_skill stays None, raw user message preserved, no
+    __agent_skill_result__ written."""
+    file_db = {}
+
+    model = _make_model(skip_rag=False, delegated_orchestration=True)
+    model['info']['meta']['skillIds'] = ['sk1']
+
+    skill_stub = SimpleNamespace(
+        id='sk1',
+        name='anything-to-docx-v2',
+        description='convert things to docx',
+        content='# skill body',
+        is_active=True,
+        meta=SimpleNamespace(
+            type='agent_skill',
+            work_dir=None,
+            model_dump=lambda: {'type': 'agent_skill', 'work_dir': None},
+        ),
+    )
+
+    metadata = _make_metadata([])
+    user_msg = 'please run anything-to-docx-v2 on this'
+    form_data = _make_form_data(
+        messages=[{'role': 'user', 'content': user_msg}],
+        files=[],
+        metadata=metadata,
+    )
+
+    user = _make_user()
+    request = MagicMock()
+    request.app.state.MODELS = {'test-model': model}
+    request.app.state.config.TOOL_SERVER_CONNECTIONS = []
+    request.state.direct = False
+
+    emitter, _captured = _make_spy_emitter()
+
+    # Note: we intentionally include run_agent_skill as a sentinel — if the
+    # gate breaks and the intercept fires, this mock will record the call.
+    run_skill_mock = AsyncMock(return_value='{"should_not_be_called": true}')
+
+    extra = [
+        ('open_webui.models.skills.Skills.get_skills_by_user_id', AsyncMock(return_value=[skill_stub])),
+        ('open_webui.models.skills.Skills.get_skill_by_id', AsyncMock(return_value=skill_stub)),
+        ('open_webui.tools.builtin.run_agent_skill', run_skill_mock),
+        ('open_webui.utils.skill_params.extract_skill_params', AsyncMock(return_value={})),
+        ('open_webui.utils.skill_params.build_enriched_skill_prompt', MagicMock(side_effect=lambda *a, **kw: a[2])),
+    ]
+
+    patches = _all_patches(file_db, emitter, extra)
+    with _apply_patches(patches):
+        form_data_out, metadata_out, _events = asyncio.get_event_loop().run_until_complete(
+            process_chat_payload(request, form_data, user, metadata, model)
+        )
+
+    assert metadata_out.get('__agent_skill_result__') is None, (
+        '__agent_skill_result__ was set despite delegated_orchestration=True — gate failed'
+    )
+    assert run_skill_mock.await_count == 0, (
+        f'run_agent_skill was invoked {run_skill_mock.await_count} time(s) despite '
+        'delegated_orchestration=True — gate failed'
+    )
+    last_user = next(
+        (m for m in reversed(form_data_out['messages']) if m.get('role') == 'user'),
+        None,
+    )
+    assert last_user is not None and last_user.get('content', '').strip().endswith(user_msg), (
+        f'raw user message was rewritten by middleware despite delegated_orchestration=True. '
+        f'Last user content: {last_user.get("content", "")!r}'
     )

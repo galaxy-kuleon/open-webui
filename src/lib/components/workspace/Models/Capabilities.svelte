@@ -25,6 +25,12 @@
 				'Skip all RAG processing (embedding, retrieval, knowledge base). Files are converted to Markdown and injected directly into the prompt.'
 			)
 		},
+		delegated_orchestration: {
+			label: $i18n.t('Delegated Orchestration'),
+			description: $i18n.t(
+				'Model handles its own skill routing, tool use and file context. Middleware will not run agent-skill keyword intercept and will not inject Skip RAG / RAG content for this model. Use for upstream agent pipes (e.g. Hermes) that already manage their own context.'
+			)
+		},
 		web_search: {
 			label: $i18n.t('Web Search'),
 			description: $i18n.t('Model can search the web for information')
@@ -78,6 +84,7 @@
 		status_updates?: boolean;
 		builtin_tools?: boolean;
 		skip_rag?: boolean;
+		delegated_orchestration?: boolean;
 	} = {};
 
 	// Hide file-dependent capabilities when file_upload is disabled
