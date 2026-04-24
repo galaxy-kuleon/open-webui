@@ -8,6 +8,8 @@ node_modules
 .env
 .env.*
 !.env.example
+!.env.stack.example
+.webui_secret_key
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 # Byte-compiled / optimized / DLL files
