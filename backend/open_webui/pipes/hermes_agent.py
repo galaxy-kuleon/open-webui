@@ -245,8 +245,8 @@ class Pipe:
                 write=10.0,
                 pool=10.0,
             )
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                if not stream:
+            if not stream:
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     response = await client.post(
                         f'{url}/v1/chat/completions',
                         headers=headers,
@@ -270,7 +270,8 @@ class Pipe:
                     await self._emit_status(__event_emitter__, 'complete', 'Hermes Agent completed', done=True)
                     return response.json()
 
-                async def stream_response():
+            async def stream_response():
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     async with client.stream(
                         'POST',
                         f'{url}/v1/chat/completions',
@@ -367,10 +368,10 @@ class Pipe:
 
                                 current_event_type = None
 
-                    # Stream completed normally
-                    await self._emit_status(__event_emitter__, 'complete', 'Hermes Agent completed', done=True)
+                        # Stream completed normally
+                        await self._emit_status(__event_emitter__, 'complete', 'Hermes Agent completed', done=True)
 
-                return stream_response()
+            return stream_response()
 
         except httpx.ConnectError as e:
             msg = f'Cannot connect to Hermes at {url}: {e}'
