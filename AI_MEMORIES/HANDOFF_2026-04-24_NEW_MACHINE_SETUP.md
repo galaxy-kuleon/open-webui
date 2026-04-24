@@ -205,7 +205,32 @@ curl -s -X POST http://127.0.0.1:8059/api/chat/completions \
   }'
 ```
 
-Should stream SSE chunks starting with `data: {...}`.
+Should stream SSE chunks starting with `data: {...}`. Assistant content should be a normal greeting.
+
+### 4.6 Known First-Run Quirk: Builtin Pipe Registration
+
+**Observation**: On a completely fresh Open WebUI install (empty `openwebui-data` volume), the builtin `hermes_agent` pipe is **not registered until the first user exists**.
+
+Log evidence:
+```
+INFO  | open_webui.utils.builtin_pipes:ensure_builtin_pipes:46 - No users exist yet — skipping builtin pipe registration
+```
+
+**Impact**: Step 4.3 (model discovery) may return an empty Hermes model list on the very first API call.
+
+**Workaround**: After creating the first user (Step 5), restart the Open WebUI container:
+```bash
+docker compose -f docker-compose.stack.yml up -d --build open-webui
+```
+
+On restart you should see:
+```
+INFO  | open_webui.utils.builtin_pipes:ensure_builtin_pipes:101 - Registered builtin pipe: hermes_agent
+```
+
+Then model discovery and chat will work normally.
+
+> **Note**: This only affects brand-new installs. Once the DB contains at least one user, subsequent restarts register the pipe immediately.
 
 ## Step 5: Register Admin User (First Run Only)
 
@@ -257,6 +282,35 @@ Hermes receives raw messages plus a system-message block containing file paths. 
 | `OPENCODE_GO_API_KEY` | Hermes → upstream LLM provider | `.env.stack` |
 | `LLM_OPENAI_API_KEY` | Honcho → LLM provider | `.env.stack` |
 
+## Docker Compose Override Files
+
+The main compose (`docker-compose.stack.yml`) is designed for **new machines** with no pre-existing state. It uses named volumes for all persistent data:
+- `openwebui-data` — Open WebUI SQLite DB and configs
+- `uploads-data` — User-uploaded files
+- `hermes-data` — Hermes config, skills, memories, state
+- `honcho-pgdata` — PostgreSQL data
+- `honcho-redis-data` — Redis data
+
+### Override for Existing Hermes Installations
+
+If you are migrating an **existing machine** that already has a populated `~/.hermes` directory, create an override file to bind-mount it instead of using a fresh named volume:
+
+```yaml
+# docker-compose.stack.override.yml
+services:
+  hermes:
+    volumes:
+      - /root/.hermes:/opt/data
+      - uploads-data:/app/backend/data/uploads:ro
+```
+
+Apply the override:
+```bash
+docker compose -f docker-compose.stack.yml -f docker-compose.stack.override.yml up -d
+```
+
+> **Do NOT commit the override file** — it contains host-specific paths and is not portable to new machines.
+
 ## Troubleshooting
 
 ### Hermes returns 401 Unauthorized
@@ -268,6 +322,11 @@ Hermes receives raw messages plus a system-message block containing file paths. 
 - Check that `HERMES_API_KEY` is set in `.env.stack`
 - Check Hermes health: `curl http://127.0.0.1:8642/health`
 - Check Open WebUI logs for pipe instantiation errors
+- **First-run quirk**: If the DB is empty (no users yet), builtin pipes are skipped. Create a user and restart Open WebUI (see Step 4.6).
+
+### Streaming chat fails with "client has been closed"
+- This was a pre-existing bug where `httpx.AsyncClient` was closed before the streaming generator was consumed.
+- **Fixed in commit `06b852a8b`** on branch `fix/hermes-e2e-selectors`. Ensure you are on the latest commit.
 
 ### File paths not resolving in Hermes
 - Ensure `uploads-data` volume is shared between `open-webui` and `hermes`
@@ -312,3 +371,12 @@ docker compose -f docker-compose.stack.yml down -v
   - Open WebUI: `https://github.com/galaxy-kuleon/open-webui.git` (branch `fix/hermes-e2e-selectors`)
   - Hermes Agent: `https://github.com/galaxy-kuleon/hermes-agent.git` (branch `feat/kuleon-openwebui-identity`)
   - Honcho Deploy: `https://github.com/plasticlabs/honcho-deploy.git`
+
+### Recent commits on `fix/hermes-e2e-selectors`
+
+| Commit | Message |
+|--------|---------|
+| `06b852a8b` | fix(hermes-pipe): bind httpx client lifetime to stream_response generator |
+| `a91d2b426` | fix(hermes-pipe): read HERMES_API_URL from env for Docker compose compatibility |
+| `556de3531` | feat(hermes): delegated orchestration + skip RAG hardening + unified stack compose |
+| `330ce3b40` | deploy(stack): relative paths + new-machine setup handoff |
