@@ -19,6 +19,18 @@
 			label: $i18n.t('File Context'),
 			description: $i18n.t('Inject file content into conversation context')
 		},
+		skip_rag: {
+			label: $i18n.t('Skip RAG'),
+			description: $i18n.t(
+				'Skip all RAG processing (embedding, retrieval, knowledge base). Files are converted to Markdown and injected directly into the prompt.'
+			)
+		},
+		delegated_orchestration: {
+			label: $i18n.t('Delegated Orchestration'),
+			description: $i18n.t(
+				'Model handles its own skill routing, tool use and file context. Middleware will not run agent-skill keyword intercept and will not inject Skip RAG / RAG content for this model. Use for upstream agent pipes (e.g. Hermes) that already manage their own context.'
+			)
+		},
 		web_search: {
 			label: $i18n.t('Web Search'),
 			description: $i18n.t('Model can search the web for information')
@@ -30,6 +42,12 @@
 		code_interpreter: {
 			label: $i18n.t('Code Interpreter'),
 			description: $i18n.t('Model can execute code and perform calculations')
+		},
+		terminal: {
+			label: $i18n.t('Terminal'),
+			description: $i18n.t(
+				'Model can access Open Terminal for command execution and file management'
+			)
 		},
 		usage: {
 			label: $i18n.t('Usage'),
@@ -60,15 +78,18 @@
 		web_search?: boolean;
 		image_generation?: boolean;
 		code_interpreter?: boolean;
+		terminal?: boolean;
 		usage?: boolean;
 		citations?: boolean;
 		status_updates?: boolean;
 		builtin_tools?: boolean;
+		skip_rag?: boolean;
+		delegated_orchestration?: boolean;
 	} = {};
 
-	// Hide file_context when file_upload is disabled
+	// Hide file-dependent capabilities when file_upload is disabled
 	$: visibleCapabilities = Object.keys(capabilityLabels).filter((cap) => {
-		if (cap === 'file_context' && !capabilities.file_upload) {
+		if ((cap === 'file_context' || cap === 'skip_rag') && !capabilities.file_upload) {
 			return false;
 		}
 		return true;

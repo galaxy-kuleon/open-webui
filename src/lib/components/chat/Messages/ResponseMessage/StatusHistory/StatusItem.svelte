@@ -3,6 +3,10 @@
 	const i18n = getContext('i18n');
 	import WebSearchResults from '../WebSearchResults.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
+	import AgentSkillStatus from './AgentSkillStatus.svelte';
+	// HERMES-HOOK-MEMORY-RECALL-UI-BEGIN
+	import HermesMemoryRecallStatus from './HermesMemoryRecallStatus.svelte';
+	// HERMES-HOOK-MEMORY-RECALL-UI-END
 	import { t } from 'i18next';
 
 	export let status = null;
@@ -122,6 +126,12 @@
 					{/if}
 				</div>
 			</div>
+		{:else if status?.action === 'agent_skill'}
+			<AgentSkillStatus {status} {done} />
+			<!-- HERMES-HOOK-MEMORY-RECALL-UI-BEGIN -->
+		{:else if status?.action === 'hermes_memory_recall'}
+			<HermesMemoryRecallStatus {status} {done} />
+			<!-- HERMES-HOOK-MEMORY-RECALL-UI-END -->
 		{:else}
 			<div class="flex flex-col justify-center -space-y-0.5">
 				<div

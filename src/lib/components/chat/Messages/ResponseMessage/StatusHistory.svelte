@@ -8,11 +8,16 @@
 
 	let showHistory = true;
 
-	$: if (expand) {
+	// HERMES-HOOK-MEMORY-RECALL-UI-BEGIN
+	// Auto-expand for agent skill events so users see the full timeline
+	$: hasAgentSkill = history.some((s) => s?.action === 'agent_skill');
+
+	$: if (expand || hasAgentSkill) {
 		showHistory = true;
 	} else {
 		showHistory = false;
 	}
+	// HERMES-HOOK-MEMORY-RECALL-UI-END
 
 	let history = [];
 	let status = null;
