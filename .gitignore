@@ -315,3 +315,4 @@ cypress/screenshots
 
 /backend/open_webui/frontend
 /AI_MEMORIES/
+.agent-team-waves/
