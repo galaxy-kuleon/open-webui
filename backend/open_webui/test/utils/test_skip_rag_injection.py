@@ -78,10 +78,13 @@ async def _call(
     if update_fn is None:
         update_fn = _noop_update
 
+    async def _async_get_file(file_id):
+        return file_db.get(file_id)
+
     return await build_skip_rag_context(
         files_list=files_list,
         messages=messages,
-        get_file_fn=file_db.get,
+        get_file_fn=_async_get_file,
         update_file_fn=update_fn,
         docling_convert_fn=docling_fn,
         storage_get_file_fn=storage_fn,

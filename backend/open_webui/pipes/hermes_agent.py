@@ -153,7 +153,7 @@ class Pipe:
         __files__: list | None = None,
         __metadata__: dict | None = None,
         **kwargs,
-    ) -> AsyncGenerator:
+    ) -> AsyncGenerator | dict:
         """Forward chat to hermes and stream the response.
 
         Yields OpenAI-format chunk dicts for content streaming.
@@ -213,10 +213,11 @@ class Pipe:
         if '.' in model_id:
             _, model_id = model_id.split('.', 1)
 
+        stream = body.get('stream', True)
         payload = {
             'model': model_id,
             'messages': messages,
-            'stream': True,
+            'stream': stream,
         }
         # Pass through optional params
         for key in ('temperature', 'max_tokens', 'top_p', 'frequency_penalty', 'presence_penalty'):
@@ -239,12 +240,12 @@ class Pipe:
                 pool=10.0,
             )
             async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(
-                    'POST',
-                    f'{url}/v1/chat/completions',
-                    headers=headers,
-                    json=payload,
-                ) as response:
+                if not stream:
+                    response = await client.post(
+                        f'{url}/v1/chat/completions',
+                        headers=headers,
+                        json=payload,
+                    )
                     if response.status_code != 200:
                         error_body = await response.aread()
                         error_msg = f'Hermes returned HTTP {response.status_code}'
@@ -258,103 +259,130 @@ class Pipe:
                                 'Hermes server and a matching hermes_api_key in this pipe.'
                             )
                         await self._emit_status(__event_emitter__, 'error', error_msg, done=True)
-                        yield {'error': {'detail': error_msg}}
-                        return
+                        return {'error': {'detail': error_msg}}
 
-                    # Parse mixed SSE stream
-                    current_event_type = None
-                    async for raw_line in response.aiter_lines():
-                        line = raw_line.strip()
+                    await self._emit_status(__event_emitter__, 'complete', 'Hermes Agent completed', done=True)
+                    return response.json()
 
-                        # Empty line = SSE event boundary
-                        if not line:
-                            current_event_type = None
-                            continue
-
-                        # Keepalive comment
-                        if line.startswith(':'):
-                            continue
-
-                        # Custom event type header
-                        if line.startswith('event:'):
-                            current_event_type = line[len('event:') :].strip()
-                            continue
-
-                        # Data line
-                        if line.startswith('data:'):
-                            data_str = line[len('data:') :].strip()
-
-                            # Stream terminator
-                            if data_str == '[DONE]':
-                                yield 'data: [DONE]'
-                                break
-
-                            # Hermes tool progress event
-                            if current_event_type == 'hermes.tool.progress':
-                                try:
-                                    payload_data = json.loads(data_str)
-                                    await self._emit_tool_progress(__event_emitter__, payload_data)
-                                except json.JSONDecodeError:
-                                    log.warning(f'Bad tool progress JSON: {data_str}')
-                                current_event_type = None
-                                continue
-
-                            # [HERMES-HOOK-MEMORY-RECALL-PIPE-BEGIN]
-                            # Hermes memory recall event — emitted once per turn when
-                            # the memory provider returned non-empty prefetch context.
-                            if current_event_type == 'hermes.memory.recalled':
-                                try:
-                                    payload_data = json.loads(data_str)
-                                    await self._emit_memory_recall(__event_emitter__, payload_data)
-                                except json.JSONDecodeError:
-                                    log.warning(f'Bad memory recall JSON: {data_str}')
-                                current_event_type = None
-                                continue
-                            # [HERMES-HOOK-MEMORY-RECALL-PIPE-END]
-
-                            # [HERMES-HOOK-CONTINUATION-PIPE-BEGIN]
-                            # Hermes proactive continuation event — emitted at most
-                            # once per session by run_agent's continuation probe when
-                            # a reasoning-capable provider reports an incomplete task.
-                            if current_event_type == 'hermes.continuation.suggested':
-                                try:
-                                    payload_data = json.loads(data_str)
-                                    await self._emit_continuation(__event_emitter__, payload_data)
-                                except json.JSONDecodeError:
-                                    log.warning(f'Bad continuation JSON: {data_str}')
-                                current_event_type = None
-                                continue
-                            # [HERMES-HOOK-CONTINUATION-PIPE-END]
-
-                            # Standard OpenAI chunk — yield as dict for process_line
+                async def stream_response():
+                    async with client.stream(
+                        'POST',
+                        f'{url}/v1/chat/completions',
+                        headers=headers,
+                        json=payload,
+                    ) as response:
+                        if response.status_code != 200:
+                            error_body = await response.aread()
+                            error_msg = f'Hermes returned HTTP {response.status_code}'
                             try:
-                                chunk = json.loads(data_str)
-                                yield chunk
-                            except json.JSONDecodeError:
-                                log.warning(f'Bad SSE JSON: {data_str}')
+                                error_msg = json.loads(error_body).get('error', {}).get('message', error_msg)
+                            except Exception:
+                                pass
+                            if response.status_code == 403 and session_continuity_enabled:
+                                error_msg = (
+                                    f'{error_msg}. Hermes session continuity requires API_SERVER_KEY on the '
+                                    'Hermes server and a matching hermes_api_key in this pipe.'
+                                )
+                            await self._emit_status(__event_emitter__, 'error', error_msg, done=True)
+                            yield {'error': {'detail': error_msg}}
+                            return
 
-                            current_event_type = None
+                        # Parse mixed SSE stream
+                        current_event_type = None
+                        async for raw_line in response.aiter_lines():
+                            line = raw_line.strip()
 
-            # Stream completed normally
-            await self._emit_status(__event_emitter__, 'complete', 'Hermes Agent completed', done=True)
+                            # Empty line = SSE event boundary
+                            if not line:
+                                current_event_type = None
+                                continue
+
+                            # Keepalive comment
+                            if line.startswith(':'):
+                                continue
+
+                            # Custom event type header
+                            if line.startswith('event:'):
+                                current_event_type = line[len('event:') :].strip()
+                                continue
+
+                            # Data line
+                            if line.startswith('data:'):
+                                data_str = line[len('data:') :].strip()
+
+                                # Stream terminator
+                                if data_str == '[DONE]':
+                                    yield 'data: [DONE]'
+                                    break
+
+                                # Hermes tool progress event
+                                if current_event_type == 'hermes.tool.progress':
+                                    try:
+                                        payload_data = json.loads(data_str)
+                                        await self._emit_tool_progress(__event_emitter__, payload_data)
+                                    except json.JSONDecodeError:
+                                        log.warning(f'Bad tool progress JSON: {data_str}')
+                                    current_event_type = None
+                                    continue
+
+                                # [HERMES-HOOK-MEMORY-RECALL-PIPE-BEGIN]
+                                # Hermes memory recall event — emitted once per turn when
+                                # the memory provider returned non-empty prefetch context.
+                                if current_event_type == 'hermes.memory.recalled':
+                                    try:
+                                        payload_data = json.loads(data_str)
+                                        await self._emit_memory_recall(__event_emitter__, payload_data)
+                                    except json.JSONDecodeError:
+                                        log.warning(f'Bad memory recall JSON: {data_str}')
+                                    current_event_type = None
+                                    continue
+                                # [HERMES-HOOK-MEMORY-RECALL-PIPE-END]
+
+                                # [HERMES-HOOK-CONTINUATION-PIPE-BEGIN]
+                                # Hermes proactive continuation event — emitted at most
+                                # once per session by run_agent's continuation probe when
+                                # a reasoning-capable provider reports an incomplete task.
+                                if current_event_type == 'hermes.continuation.suggested':
+                                    try:
+                                        payload_data = json.loads(data_str)
+                                        await self._emit_continuation(__event_emitter__, payload_data)
+                                    except json.JSONDecodeError:
+                                        log.warning(f'Bad continuation JSON: {data_str}')
+                                    current_event_type = None
+                                    continue
+                                # [HERMES-HOOK-CONTINUATION-PIPE-END]
+
+                                # Standard OpenAI chunk — yield as dict for process_line
+                                try:
+                                    chunk = json.loads(data_str)
+                                    yield chunk
+                                except json.JSONDecodeError:
+                                    log.warning(f'Bad SSE JSON: {data_str}')
+
+                                current_event_type = None
+
+                    # Stream completed normally
+                    await self._emit_status(__event_emitter__, 'complete', 'Hermes Agent completed', done=True)
+
+                return stream_response()
 
         except httpx.ConnectError as e:
             msg = f'Cannot connect to Hermes at {url}: {e}'
             log.error(msg)
             await self._emit_status(__event_emitter__, 'error', msg, done=True)
-            yield {'error': {'detail': msg}}
+            return {'error': {'detail': msg}}
 
         except httpx.ReadTimeout as e:
             msg = f'Hermes read timeout: {e}'
             log.error(msg)
             await self._emit_status(__event_emitter__, 'error', msg, done=True)
-            yield {'error': {'detail': msg}}
+            return {'error': {'detail': msg}}
 
         except Exception as e:
             msg = f'Hermes pipe error: {e}'
             log.exception(msg)
             await self._emit_status(__event_emitter__, 'error', msg, done=True)
-            yield {'error': {'detail': msg}}
+            return {'error': {'detail': msg}}
 
     # ------------------------------------------------------------------
     # Helpers

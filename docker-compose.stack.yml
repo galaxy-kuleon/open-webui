@@ -1,0 +1,199 @@
+# Stack Compose: Open WebUI + Hermes Agent API + Honcho
+# Usage:
+#   docker compose -f docker-compose.stack.yml up -d --build
+#   docker compose -f docker-compose.stack.yml logs -f
+#
+# Prerequisites:
+#   1. copy .env.stack.example -> .env.stack and fill in secrets
+#   2. ensure /root/.hermes/config.yaml has platforms.api_server.host=0.0.0.0
+#   3. for prod: change ports from 127.0.0.1 to 0.0.0.0 and add a reverse proxy + TLS
+
+services:
+  # ── Open WebUI (our fork with delegated_orchestration) ─────────────────────
+  open-webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_HASH: delegated-orchestration-stack
+    container_name: open-webui-stack
+    ports:
+      # Bind to localhost only by default; change to 0.0.0.0 for external access
+      - "127.0.0.1:8059:8080"
+    environment:
+      - PORT=8080
+      - HOST=0.0.0.0
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - WEBUI_AUTH=true
+      - ENABLE_SIGNUP=true
+      - DEFAULT_USER_ROLE=admin
+      - ENABLE_ADMIN_EXPORT=false
+      - ENABLE_COMMUNITY_SHARING=false
+      - ANONYMIZED_TELEMETRY=false
+      - DO_NOT_TRACK=true
+      - SCARF_NO_ANALYTICS=true
+      # Hermes pipe auto-configuration (env-seeded valves)
+      - HERMES_API_KEY=${HERMES_API_KEY}
+      - HERMES_API_URL=http://hermes:8642
+      # Optional external providers (adjust for your stack)
+      - OLLAMA_BASE_URL=http://127.0.0.1:11434
+      - OPENAI_API_BASE_URL=http://127.0.0.1:1234/v1
+      - OPENAI_API_KEY=lm-studio
+    volumes:
+      # Persistent Open WebUI data (DB, configs, etc.)
+      - openwebui-data:/app/backend/data
+      # Shared uploads volume — mounted *after* openwebui-data so uploads
+      # live in a separate named volume that Hermes can mount too.
+      - uploads-data:/app/backend/data/uploads
+    depends_on:
+      hermes:
+        condition: service_started
+      honcho-api:
+        condition: service_started
+    networks:
+      - stack-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── Hermes Agent API ──────────────────────────────────────────────────────
+  hermes:
+    image: nousresearch/hermes-agent:latest
+    # If you prefer building from source:
+    # build:
+    #   context: /root/hermes-agent
+    #   dockerfile: Dockerfile
+    container_name: hermes-stack
+    ports:
+      - "127.0.0.1:8642:8642"
+    environment:
+      - HERMES_HOME=/opt/data
+      # The upstream provider key (Hermes uses this to call LLMs)
+      - OPENCODE_GO_API_KEY=${OPENCODE_GO_API_KEY}
+      # The API server key (clients like Open WebUI must present this)
+      - API_SERVER_KEY=${API_SERVER_KEY}
+    volumes:
+      # Hermes config, skills, memories, state, logs, etc.
+      # NOTE: ensure /root/.hermes/config.yaml binds api_server to 0.0.0.0
+      - /root/.hermes:/opt/data
+      # Read-only access to Open WebUI uploads so file-path injection works
+      - uploads-data:/app/backend/data/uploads:ro
+    command: ["gateway", "run"]
+    networks:
+      - stack-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8642/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Honcho API ────────────────────────────────────────────────────────────
+  honcho-api:
+    build:
+      context: /root/honcho-deploy
+      dockerfile: Dockerfile
+    container_name: honcho-api-stack
+    entrypoint: ["sh", "docker/entrypoint.sh"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      # Override .env defaults to use compose-internal hostnames
+      - DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@honcho-db:5432/postgres
+      - CACHE_URL=redis://honcho-redis:6379/0?suppress=true
+      - CACHE_ENABLED=true
+      # Disable auth for same-host hermes-agent connectivity
+      # For prod: set AUTH_USE_AUTH=true and supply AUTH_JWT_SECRET
+      - AUTH_USE_AUTH=false
+      # Injected from .env.stack (LLM_OPENAI_API_KEY, DERIVER_* configs, etc.)
+    env_file:
+      - path: .env.stack
+        required: false
+    depends_on:
+      honcho-db:
+        condition: service_healthy
+      honcho-redis:
+        condition: service_healthy
+    networks:
+      - stack-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Honcho Deriver (background memory extraction) ─────────────────────────
+  honcho-deriver:
+    build:
+      context: /root/honcho-deploy
+      dockerfile: Dockerfile
+    container_name: honcho-deriver-stack
+    entrypoint: ["/app/.venv/bin/python", "-m", "src.deriver"]
+    environment:
+      - DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@honcho-db:5432/postgres
+      - CACHE_URL=redis://honcho-redis:6379/0?suppress=true
+      - CACHE_ENABLED=true
+    env_file:
+      - path: .env.stack
+        required: false
+    depends_on:
+      honcho-db:
+        condition: service_healthy
+      honcho-redis:
+        condition: service_healthy
+    networks:
+      - stack-net
+    restart: unless-stopped
+
+  # ── Honcho PostgreSQL (pgvector) ──────────────────────────────────────────
+  honcho-db:
+    image: pgvector/pgvector:pg15
+    container_name: honcho-db-stack
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - honcho-pgdata:/var/lib/postgresql/data
+      - /root/honcho-deploy/database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stack-net
+    restart: unless-stopped
+
+  # ── Honcho Redis ──────────────────────────────────────────────────────────
+  honcho-redis:
+    image: redis:8.2
+    container_name: honcho-redis-stack
+    volumes:
+      - honcho-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stack-net
+    restart: unless-stopped
+
+volumes:
+  openwebui-data:
+  uploads-data:
+  honcho-pgdata:
+  honcho-redis-data:
+
+networks:
+  stack-net:
+    driver: bridge

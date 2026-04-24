@@ -2885,6 +2885,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     # Check if this model should bypass all RAG processing (default False)
     skip_rag = (((model.get('info') or {}).get('meta') or {}).get('capabilities') or {}).get('skip_rag', False)
+    # delegated_orchestration: model handles its own skill routing, tool use and file context
+    # (e.g. hermes_agent pipe). When True, middleware MUST NOT run the agent-skill keyword
+    # intercept and MUST NOT inject skip_rag / RAG content — the pipe owns the prompt.
+    delegated_orchestration = (((model.get('info') or {}).get('meta') or {}).get('capabilities') or {}).get(
+        'delegated_orchestration', False
+    )
 
     # Load messages from DB when available — DB preserves structured 'output' items
     # which the frontend strips, causing tool calls to be merged into content.
@@ -3002,7 +3008,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     user_message = get_last_user_message(form_data['messages'])
     model_knowledge = model.get('info', {}).get('meta', {}).get('knowledge', False)
 
-    if model_knowledge and not skip_rag and metadata.get('params', {}).get('function_calling') != 'native':
+    if (
+        model_knowledge
+        and not skip_rag
+        and not delegated_orchestration
+        and metadata.get('params', {}).get('function_calling') != 'native'
+    ):
         await event_emitter(
             {
                 'type': 'status',
@@ -3462,8 +3473,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # We do the name match ONCE here and reuse the result as a gate for the RAG/skip_rag
     # branches and as the match for the execution block.  This is prediction-based
     # short-circuit, not post-hoc cleanup.
+    # delegated_orchestration models (e.g. hermes_agent pipe) opt out of the local skill
+    # intercept entirely — leave matched_skill None so the raw user message reaches the pipe.
     matched_skill = None
-    if available_skills and _pre_rag_last_user_msg:
+    if not delegated_orchestration and available_skills and _pre_rag_last_user_msg:
         _msg_lower = _pre_rag_last_user_msg.lower()
         for _sk in available_skills:
             _sk_meta_for_match = _sk.meta.model_dump() if hasattr(_sk.meta, 'model_dump') else _sk.meta
@@ -3474,7 +3487,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # Check if file context extraction is enabled for this model (default True)
     file_context_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('file_context', True)
 
-    if matched_skill:
+    if delegated_orchestration:
+        log.info(
+            '[delegated_orchestration] model owns its context — skipping skill intercept, '
+            'file_context injection and skip_rag injection'
+        )
+    elif matched_skill:
         log.info(
             f'[skill-intercept] predicted {matched_skill.name!r} will fire — '
             'bypassing RAG/skip_rag injection to avoid wasted work'

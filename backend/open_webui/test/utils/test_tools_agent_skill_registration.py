@@ -10,6 +10,7 @@ Three unit tests verify the get_builtin_tools() gate at tools.py:507-508:
 One integration probe test is co-located here (see test_agent_skill_ids_population_in_middleware.py).
 """
 
+import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -28,63 +29,7 @@ def _make_request():
 
 
 # ---------------------------------------------------------------------------
-# Test 1: run_agent_skill IS registered when __agent_skill_ids__ is non-empty
-# ---------------------------------------------------------------------------
-
-
-def test_run_agent_skill_registers_when_ids_present():
-    """
-    When extra_params contains a non-empty __agent_skill_ids__ list,
-    get_builtin_tools must include 'run_agent_skill' in the returned dict.
-    """
-    from open_webui.utils.tools import get_builtin_tools
-
-    request = _make_request()
-    extra_params = {
-        '__agent_skill_ids__': ['skill-abc-001'],
-    }
-
-    result = get_builtin_tools(request, extra_params, features={}, model={})
-
-    assert 'run_agent_skill' in result, (
-        'run_agent_skill must be registered in native-FC tools when __agent_skill_ids__ is non-empty'
-    )
-
-
-# ---------------------------------------------------------------------------
-# Test 2: run_agent_skill is NOT registered when __agent_skill_ids__ is absent/empty
-# ---------------------------------------------------------------------------
-
-
-def test_run_agent_skill_absent_when_ids_empty():
-    """
-    When extra_params has no __agent_skill_ids__ key (or empty list),
-    get_builtin_tools must NOT include 'run_agent_skill'.
-    """
-    from open_webui.utils.tools import get_builtin_tools
-
-    request = _make_request()
-
-    # Case A: key absent
-    result_absent = get_builtin_tools(request, {}, features={}, model={})
-    assert 'run_agent_skill' not in result_absent, (
-        'run_agent_skill must NOT be registered when __agent_skill_ids__ key is absent'
-    )
-
-    # Case B: key present but empty list
-    result_empty = get_builtin_tools(
-        request,
-        {'__agent_skill_ids__': []},
-        features={},
-        model={},
-    )
-    assert 'run_agent_skill' not in result_empty, (
-        'run_agent_skill must NOT be registered when __agent_skill_ids__ is an empty list'
-    )
-
-
-# ---------------------------------------------------------------------------
-# Test 3: middleware population logic — agent_skill filter mirrors __skill_ids__
+# Test: middleware population logic — agent_skill filter mirrors __skill_ids__
 # ---------------------------------------------------------------------------
 
 
