@@ -742,6 +742,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f'Failed to register builtin pipes at startup: {e}')
 
+    # Warn operators about groups that lack a hermes shared_memory opt-in.
+    # These groups silently lost group-scoped memory after commit ec71a53f9.
+    try:
+        from open_webui.hermes import warn_unflagged_hermes_groups
+
+        await warn_unflagged_hermes_groups()
+    except Exception as e:
+        log.warning(f'Hermes unflagged-groups diagnostic failed: {e}')
+
     # Mark application as ready to accept traffic from a startup perspective.
     app.state.startup_complete = True
 

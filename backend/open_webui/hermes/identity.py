@@ -73,10 +73,26 @@ def _resolve_tenant_id(user_id: str, groups: list) -> str:
 
     Tier 1 always beats Tier 2: if a group has both ``tenancy="acme"`` and
     ``shared_memory=True``, ``"acme"`` is returned.
+
+    When multiple groups have ``shared_memory: True``, the group with the
+    lexicographically smallest ``id`` wins, ensuring stability across admin
+    edits.  (``Groups.get_groups_by_member_id`` sorts by ``updated_at DESC``
+    — without an explicit re-sort here, an admin editing any group in the set
+    would silently change which group becomes the Tier-2 winner.)
+
+    Tier 1 order is also stabilised by the same sort; having two groups with
+    *different* tenancy strings is operator error and is left unhandled — the
+    first one (smallest id) wins consistently.
+
+    TODO: add a Groups admin-UI checkbox for ``meta.shared_memory`` so
+    operators don't have to edit raw JSON to opt in (no raw JSON editor in the
+    Groups admin page yet — tracked separately).
     """
     first_shared_memory_group_id: str | None = None
 
-    for group in groups:
+    # Sort by group.id so Tier-2 winner is deterministic regardless of
+    # updated_at ordering returned by the DB query.
+    for group in sorted(groups, key=lambda g: str(g.id)):
         meta: dict = group.meta or {}
 
         # Tier 1: explicit tenancy string — highest priority, return immediately

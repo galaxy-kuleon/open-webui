@@ -286,3 +286,145 @@ async def test_shared_memory_false_or_missing_does_not_opt_in():
     assert result['tenant_id'] == 'leo', (
         'shared_memory=False must not opt in; expected per-user tenant_id; got ' + repr(result['tenant_id'])
     )
+
+
+# ---------------------------------------------------------------------------
+# P1/P2 review tests for commit ec71a53f9
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_shared_memory_int_1_does_not_opt_in():
+    """Group meta {"shared_memory": 1} → tenant_id == user_id.
+
+    Strict ``is True`` check rejects truthy ints; admins must use bool.
+    P1/P2 review of ec71a53f9.
+    """
+    user = {'id': 'mia', 'name': 'Mia M', 'email': 'mia@test.com', 'role': 'user'}
+    group = SimpleNamespace(id='g-int-1', meta={'shared_memory': 1})
+    with patch(
+        'open_webui.hermes.identity.Groups.get_groups_by_member_id',
+        new=AsyncMock(return_value=[group]),
+    ):
+        result = await resolve_hermes_identity(user)
+    assert result is not None
+    assert result['tenant_id'] == 'mia', (
+        'shared_memory=1 (int) must not opt in; strict `is True` required; got ' + repr(result['tenant_id'])
+    )
+
+
+@pytest.mark.asyncio
+async def test_shared_memory_string_true_does_not_opt_in():
+    """Group meta {"shared_memory": "true"} → tenant_id == user_id.
+
+    Strict ``is True`` check rejects truthy strings; admins must use bool.
+    P1/P2 review of ec71a53f9.
+    """
+    user = {'id': 'noah', 'name': 'Noah N', 'email': 'noah@test.com', 'role': 'user'}
+    group = SimpleNamespace(id='g-str-true', meta={'shared_memory': 'true'})
+    with patch(
+        'open_webui.hermes.identity.Groups.get_groups_by_member_id',
+        new=AsyncMock(return_value=[group]),
+    ):
+        result = await resolve_hermes_identity(user)
+    assert result is not None
+    assert result['tenant_id'] == 'noah', (
+        'shared_memory="true" (string) must not opt in; strict `is True` required; got ' + repr(result['tenant_id'])
+    )
+
+
+@pytest.mark.asyncio
+async def test_shared_memory_none_in_meta_does_not_opt_in():
+    """Group meta {"shared_memory": None} → tenant_id == user_id.
+
+    None is falsy but also fails ``is True``; must fall to Tier 3.
+    P1/P2 review of ec71a53f9.
+    """
+    user = {'id': 'olivia', 'name': 'Olivia O', 'email': 'olivia@test.com', 'role': 'user'}
+    group = SimpleNamespace(id='g-none', meta={'shared_memory': None})
+    with patch(
+        'open_webui.hermes.identity.Groups.get_groups_by_member_id',
+        new=AsyncMock(return_value=[group]),
+    ):
+        result = await resolve_hermes_identity(user)
+    assert result is not None
+    assert result['tenant_id'] == 'olivia', 'shared_memory=None must not opt in; got ' + repr(result['tenant_id'])
+
+
+@pytest.mark.asyncio
+async def test_shared_memory_key_absent_does_not_opt_in():
+    """Group meta {"unrelated": "value"} → tenant_id == user_id.
+
+    Absent key is treated identically to None/False — no implicit opt-in.
+    P1/P2 review of ec71a53f9.
+    """
+    user = {'id': 'pete', 'name': 'Pete P', 'email': 'pete@test.com', 'role': 'user'}
+    group = SimpleNamespace(id='g-unrelated', meta={'unrelated': 'value'})
+    with patch(
+        'open_webui.hermes.identity.Groups.get_groups_by_member_id',
+        new=AsyncMock(return_value=[group]),
+    ):
+        result = await resolve_hermes_identity(user)
+    assert result is not None
+    assert result['tenant_id'] == 'pete', 'group without shared_memory key must not opt in; got ' + repr(
+        result['tenant_id']
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_shared_memory_groups_winner_is_lexicographically_smallest_id():
+    """User in 2 groups both with shared_memory=True → group with smallest id wins.
+
+    "zzz-second" was updated *yesterday* (would win under ``updated_at DESC``
+    — the DB default ordering), "aaa-first" was updated *today*.  The fix in
+    Task A of P1/P2 review ec71a53f9 sorts groups by id before picking the
+    Tier-2 winner, so "aaa-first" must win regardless of edit timestamps.
+
+    This test MUST fail before the Task A sort change and pass after.
+    P1/P2 review of ec71a53f9.
+    """
+    import time as _time
+
+    now = int(_time.time())
+    yesterday = now - 86400
+
+    # DB returns updated_at DESC: zzz-second (yesterday's edit, but higher
+    # updated_at simulation omitted — we control list order directly to
+    # replicate what the DB would return).
+    # zzz-second is listed first to simulate "most recently edited" ordering.
+    group_zzz = SimpleNamespace(id='zzz-second', meta={'shared_memory': True}, updated_at=yesterday)
+    group_aaa = SimpleNamespace(id='aaa-first', meta={'shared_memory': True}, updated_at=now)
+
+    user = {'id': 'quinn', 'name': 'Quinn Q', 'email': 'quinn@test.com', 'role': 'user'}
+    # Pass in DB order (zzz first — as if most recently edited).
+    with patch(
+        'open_webui.hermes.identity.Groups.get_groups_by_member_id',
+        new=AsyncMock(return_value=[group_zzz, group_aaa]),
+    ):
+        result = await resolve_hermes_identity(user)
+    assert result is not None
+    assert result['tenant_id'] == 'aaa-first', (
+        'Tier-2 winner must be the group with lexicographically smallest id; got ' + repr(result['tenant_id'])
+    )
+
+
+@pytest.mark.asyncio
+async def test_within_group_tenancy_wins_over_shared_memory():
+    """Single group with meta = {"tenancy": "acme", "shared_memory": True} → tenant_id == "acme".
+
+    Tier 1 (tenancy string) has unconditional priority over Tier 2
+    (shared_memory group-id).  Even when both flags are present on the same
+    group, the tenancy string is returned.
+    P1/P2 review of ec71a53f9.
+    """
+    user = {'id': 'rosa', 'name': 'Rosa R', 'email': 'rosa@test.com', 'role': 'user'}
+    group = SimpleNamespace(id='g-both', meta={'tenancy': 'acme', 'shared_memory': True})
+    with patch(
+        'open_webui.hermes.identity.Groups.get_groups_by_member_id',
+        new=AsyncMock(return_value=[group]),
+    ):
+        result = await resolve_hermes_identity(user)
+    assert result is not None
+    assert result['tenant_id'] == 'acme', 'within-group tenancy string must beat shared_memory flag; got ' + repr(
+        result['tenant_id']
+    )
