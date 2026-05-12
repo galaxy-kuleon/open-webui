@@ -11,7 +11,7 @@ import re
 import shutil
 import sys
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import uuid4
@@ -186,6 +186,13 @@ from open_webui.config import (
     ENABLE_LOGIN_FORM,
     ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER,
     ENABLE_MEMORIES,
+    HERMES_BRIDGE_ENABLED,
+    HERMES_MEMORY_BRIDGE_ENABLED,
+    HERMES_OUTBOX_DRAIN_ENABLED,
+    HERMES_DELETE_PURGE_ENABLED,
+    HERMES_BRIDGE_URL,
+    HERMES_BRIDGE_API_KEY,
+    HERMES_BRIDGE_TIMEOUT,
     ENABLE_MESSAGE_RATING,
     ENABLE_NOTES,
     # WebUI (OAuth)
@@ -676,6 +683,12 @@ async def lifespan(app: FastAPI):
     from open_webui.utils.automations import scheduler_worker_loop
 
     asyncio.create_task(scheduler_worker_loop(app))
+    from open_webui.utils.hermes_bridge import outbox_worker_enabled
+
+    if outbox_worker_enabled(app.state.config):
+        from open_webui.utils.hermes_outbox import feedback_outbox_worker_loop
+
+        app.state.hermes_outbox_worker_task = asyncio.create_task(feedback_outbox_worker_loop(app))
 
     if app.state.config.ENABLE_BASE_MODELS_CACHE:
         try:
@@ -744,6 +757,10 @@ async def lifespan(app: FastAPI):
 
     if hasattr(app.state, 'redis_task_command_listener'):
         app.state.redis_task_command_listener.cancel()
+    if hasattr(app.state, 'hermes_outbox_worker_task'):
+        app.state.hermes_outbox_worker_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await app.state.hermes_outbox_worker_task
 
 
 app = FastAPI(
@@ -1246,6 +1263,13 @@ app.state.config.IMAGE_GENERATION_ENGINE = IMAGE_GENERATION_ENGINE
 app.state.config.ENABLE_IMAGE_GENERATION = ENABLE_IMAGE_GENERATION
 app.state.config.ENABLE_IMAGE_PROMPT_GENERATION = ENABLE_IMAGE_PROMPT_GENERATION
 app.state.config.ENABLE_MEMORIES = ENABLE_MEMORIES
+app.state.config.HERMES_BRIDGE_ENABLED = HERMES_BRIDGE_ENABLED
+app.state.config.HERMES_MEMORY_BRIDGE_ENABLED = HERMES_MEMORY_BRIDGE_ENABLED
+app.state.config.HERMES_OUTBOX_DRAIN_ENABLED = HERMES_OUTBOX_DRAIN_ENABLED
+app.state.config.HERMES_DELETE_PURGE_ENABLED = HERMES_DELETE_PURGE_ENABLED
+app.state.config.HERMES_BRIDGE_URL = HERMES_BRIDGE_URL
+app.state.config.HERMES_BRIDGE_API_KEY = HERMES_BRIDGE_API_KEY
+app.state.config.HERMES_BRIDGE_TIMEOUT = HERMES_BRIDGE_TIMEOUT
 
 app.state.config.IMAGE_GENERATION_MODEL = IMAGE_GENERATION_MODEL
 app.state.config.IMAGE_SIZE = IMAGE_SIZE

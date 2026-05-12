@@ -76,6 +76,10 @@ from open_webui.utils.access_control import has_connection_access, has_permissio
 from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.code_interpreter import execute_code_jupyter
+from open_webui.utils.hermes_bridge import (
+    memory_bridge_misconfigured,
+    should_bypass_openwebui_memory_injection,
+)
 from open_webui.utils.files import (
     convert_markdown_base64_images,
     get_file_url_from_base64,
@@ -1457,6 +1461,12 @@ async def chat_completion_tools_handler(
 
 
 async def chat_memory_handler(request: Request, form_data: dict, extra_params: dict, user):
+    if memory_bridge_misconfigured(getattr(request.app.state, 'config', None)):
+        raise HTTPException(
+            status_code=503,
+            detail='Hermes memory bridge is enabled but HERMES_BRIDGE_URL or HERMES_BRIDGE_API_KEY is missing',
+        )
+
     try:
         results = await query_memory(
             request,
@@ -1473,13 +1483,16 @@ async def chat_memory_handler(request: Request, form_data: dict, extra_params: d
         results = None
 
     user_context = ''
-    if results and hasattr(results, 'documents'):
-        if results.documents and len(results.documents) > 0:
-            for doc_idx, doc in enumerate(results.documents[0]):
+    if results:
+        documents = results.get('documents') if isinstance(results, dict) else getattr(results, 'documents', None)
+        metadatas = results.get('metadatas') if isinstance(results, dict) else getattr(results, 'metadatas', None)
+        if documents and len(documents) > 0:
+            for doc_idx, doc in enumerate(documents[0]):
                 created_at_date = 'Unknown Date'
 
-                if results.metadatas[0][doc_idx].get('created_at'):
-                    created_at_timestamp = results.metadatas[0][doc_idx]['created_at']
+                metadata = metadatas[0][doc_idx] if metadatas and len(metadatas[0]) > doc_idx else {}
+                if metadata.get('created_at'):
+                    created_at_timestamp = metadata['created_at']
                     created_at_date = time.strftime('%Y-%m-%d', time.localtime(created_at_timestamp))
 
                 user_context += f'{doc_idx + 1}. [{created_at_date}] {doc}\n'
@@ -2563,7 +2576,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
         if 'memory' in features and features['memory']:
             # Skip forced memory injection when native FC is enabled - model can use memory tools
-            if metadata.get('params', {}).get('function_calling') != 'native':
+            if (
+                metadata.get('params', {}).get('function_calling') != 'native'
+                and not should_bypass_openwebui_memory_injection(request.app.state.config, form_data.get('model'))
+            ):
                 form_data = await chat_memory_handler(request, form_data, extra_params, user)
 
         if 'web_search' in features and features['web_search']:

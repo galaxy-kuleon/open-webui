@@ -6,7 +6,7 @@ from typing import Optional
 from open_webui.internal.db import Base, JSONField, get_async_db_context
 from open_webui.models.users import User, UserModel
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import JSON, BigInteger, Boolean, Column, Text, delete, func, select
+from sqlalchemy import JSON, BigInteger, Boolean, Column, Text, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -139,31 +139,46 @@ class ModelHistoryResponse(BaseModel):
 
 
 class FeedbackTable:
+    @staticmethod
+    def _form_update_values(form_data: FeedbackForm) -> dict:
+        values = {}
+        if form_data.data:
+            values['data'] = form_data.data.model_dump()
+        if form_data.meta:
+            values['meta'] = form_data.meta
+        if form_data.snapshot:
+            values['snapshot'] = form_data.snapshot.model_dump()
+        return values
+
+    async def insert_new_feedback_in_session(
+        self, user_id: str, form_data: FeedbackForm, db: AsyncSession
+    ) -> FeedbackModel:
+        id = str(uuid.uuid4())
+        now = int(time.time())
+        feedback = FeedbackModel(
+            **{
+                'id': id,
+                'user_id': user_id,
+                'version': 0,
+                **form_data.model_dump(),
+                'created_at': now,
+                'updated_at': now,
+            }
+        )
+        result = Feedback(**feedback.model_dump())
+        db.add(result)
+        await db.flush()
+        await db.refresh(result)
+        return FeedbackModel.model_validate(result)
+
     async def insert_new_feedback(
         self, user_id: str, form_data: FeedbackForm, db: Optional[AsyncSession] = None
     ) -> Optional[FeedbackModel]:
         async with get_async_db_context(db) as db:
-            id = str(uuid.uuid4())
-            # Spread form_data first so server-controlled fields win on duplicate keys.
-            feedback = FeedbackModel(
-                **{
-                    **form_data.model_dump(),
-                    'id': id,
-                    'user_id': user_id,
-                    'version': 0,
-                    'created_at': int(time.time()),
-                    'updated_at': int(time.time()),
-                }
-            )
             try:
-                result = Feedback(**feedback.model_dump())
-                db.add(result)
+                feedback = await self.insert_new_feedback_in_session(user_id, form_data, db)
                 await db.commit()
-                await db.refresh(result)
-                if result:
-                    return FeedbackModel.model_validate(result)
-                else:
-                    return None
+                return feedback
             except Exception as e:
                 log.exception(f'Error creating a new feedback: {e}')
                 return None
@@ -171,26 +186,51 @@ class FeedbackTable:
     async def get_feedback_by_id(self, id: str, db: Optional[AsyncSession] = None) -> Optional[FeedbackModel]:
         try:
             async with get_async_db_context(db) as db:
-                result = await db.execute(select(Feedback).filter_by(id=id))
-                feedback = result.scalars().first()
-                if not feedback:
-                    return None
-                return FeedbackModel.model_validate(feedback)
+                return await self.get_feedback_by_id_in_session(id=id, db=db)
         except Exception:
             return None
+
+    async def get_feedback_by_id_in_session(
+        self,
+        id: str,
+        db: AsyncSession,
+        *,
+        for_update: bool = False,
+    ) -> Optional[FeedbackModel]:
+        stmt = select(Feedback).filter_by(id=id)
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await db.execute(stmt)
+        feedback = result.scalars().first()
+        if not feedback:
+            return None
+        return FeedbackModel.model_validate(feedback)
 
     async def get_feedback_by_id_and_user_id(
         self, id: str, user_id: str, db: Optional[AsyncSession] = None
     ) -> Optional[FeedbackModel]:
         try:
             async with get_async_db_context(db) as db:
-                result = await db.execute(select(Feedback).filter_by(id=id, user_id=user_id))
-                feedback = result.scalars().first()
-                if not feedback:
-                    return None
-                return FeedbackModel.model_validate(feedback)
+                return await self.get_feedback_by_id_and_user_id_in_session(id=id, user_id=user_id, db=db)
         except Exception:
             return None
+
+    async def get_feedback_by_id_and_user_id_in_session(
+        self,
+        id: str,
+        user_id: str,
+        db: AsyncSession,
+        *,
+        for_update: bool = False,
+    ) -> Optional[FeedbackModel]:
+        stmt = select(Feedback).filter_by(id=id, user_id=user_id)
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await db.execute(stmt)
+        feedback = result.scalars().first()
+        if not feedback:
+            return None
+        return FeedbackModel.model_validate(feedback)
 
     async def get_feedbacks_by_chat_id(self, chat_id: str, db: Optional[AsyncSession] = None) -> list[FeedbackModel]:
         """Get all feedbacks for a specific chat."""
@@ -418,22 +458,28 @@ class FeedbackTable:
         self, id: str, form_data: FeedbackForm, db: Optional[AsyncSession] = None
     ) -> Optional[FeedbackModel]:
         async with get_async_db_context(db) as db:
-            result = await db.execute(select(Feedback).filter_by(id=id))
-            feedback = result.scalars().first()
-            if not feedback:
-                return None
-
-            if form_data.data:
-                feedback.data = form_data.data.model_dump()
-            if form_data.meta:
-                feedback.meta = form_data.meta
-            if form_data.snapshot:
-                feedback.snapshot = form_data.snapshot.model_dump()
-
-            feedback.updated_at = int(time.time())
-
+            feedback = await self.update_feedback_by_id_in_session(id=id, form_data=form_data, db=db)
             await db.commit()
-            return FeedbackModel.model_validate(feedback)
+            return feedback
+
+    async def update_feedback_by_id_in_session(
+        self, id: str, form_data: FeedbackForm, db: AsyncSession
+    ) -> Optional[FeedbackModel]:
+        result = await db.execute(
+            update(Feedback)
+            .where(Feedback.id == id)
+            .values(
+                **self._form_update_values(form_data),
+                version=func.coalesce(Feedback.version, 0) + 1,
+                updated_at=int(time.time()),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 0:
+            return None
+        result = await db.execute(select(Feedback).filter_by(id=id))
+        feedback = result.scalars().first()
+        return FeedbackModel.model_validate(feedback)
 
     async def update_feedback_by_id_and_user_id(
         self,
@@ -443,54 +489,106 @@ class FeedbackTable:
         db: Optional[AsyncSession] = None,
     ) -> Optional[FeedbackModel]:
         async with get_async_db_context(db) as db:
-            result = await db.execute(select(Feedback).filter_by(id=id, user_id=user_id))
-            feedback = result.scalars().first()
-            if not feedback:
-                return None
-
-            if form_data.data:
-                feedback.data = form_data.data.model_dump()
-            if form_data.meta:
-                feedback.meta = form_data.meta
-            if form_data.snapshot:
-                feedback.snapshot = form_data.snapshot.model_dump()
-
-            feedback.updated_at = int(time.time())
-
+            feedback = await self.update_feedback_by_id_and_user_id_in_session(
+                id=id, user_id=user_id, form_data=form_data, db=db
+            )
             await db.commit()
-            return FeedbackModel.model_validate(feedback)
+            return feedback
+
+    async def update_feedback_by_id_and_user_id_in_session(
+        self,
+        id: str,
+        user_id: str,
+        form_data: FeedbackForm,
+        db: AsyncSession,
+    ) -> Optional[FeedbackModel]:
+        result = await db.execute(
+            update(Feedback)
+            .where(Feedback.id == id, Feedback.user_id == user_id)
+            .values(
+                **self._form_update_values(form_data),
+                version=func.coalesce(Feedback.version, 0) + 1,
+                updated_at=int(time.time()),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 0:
+            return None
+        result = await db.execute(select(Feedback).filter_by(id=id, user_id=user_id))
+        feedback = result.scalars().first()
+        return FeedbackModel.model_validate(feedback)
 
     async def delete_feedback_by_id(self, id: str, db: Optional[AsyncSession] = None) -> bool:
         async with get_async_db_context(db) as db:
-            result = await db.execute(select(Feedback).filter_by(id=id))
-            feedback = result.scalars().first()
-            if not feedback:
-                return False
-            await db.delete(feedback)
+            feedback = await self.delete_feedback_by_id_in_session(id=id, db=db)
             await db.commit()
-            return True
+            return feedback is not None
+
+    async def delete_feedback_by_id_in_session(self, id: str, db: AsyncSession) -> Optional[FeedbackModel]:
+        result = await db.execute(select(Feedback).filter_by(id=id).with_for_update())
+        feedback = result.scalars().first()
+        if not feedback:
+            return None
+        snapshot = FeedbackModel.model_validate(feedback)
+        snapshot.version = int(snapshot.version or 0) + 1
+        await db.delete(feedback)
+        await db.flush()
+        return snapshot
 
     async def delete_feedback_by_id_and_user_id(self, id: str, user_id: str, db: Optional[AsyncSession] = None) -> bool:
         async with get_async_db_context(db) as db:
-            result = await db.execute(select(Feedback).filter_by(id=id, user_id=user_id))
-            feedback = result.scalars().first()
-            if not feedback:
-                return False
-            await db.delete(feedback)
+            feedback = await self.delete_feedback_by_id_and_user_id_in_session(id=id, user_id=user_id, db=db)
             await db.commit()
-            return True
+            return feedback is not None
+
+    async def delete_feedback_by_id_and_user_id_in_session(
+        self, id: str, user_id: str, db: AsyncSession
+    ) -> Optional[FeedbackModel]:
+        result = await db.execute(select(Feedback).filter_by(id=id, user_id=user_id).with_for_update())
+        feedback = result.scalars().first()
+        if not feedback:
+            return None
+        snapshot = FeedbackModel.model_validate(feedback)
+        snapshot.version = int(snapshot.version or 0) + 1
+        await db.delete(feedback)
+        await db.flush()
+        return snapshot
 
     async def delete_feedbacks_by_user_id(self, user_id: str, db: Optional[AsyncSession] = None) -> bool:
         async with get_async_db_context(db) as db:
-            result = await db.execute(delete(Feedback).filter_by(user_id=user_id))
+            deleted = await self.delete_feedbacks_by_user_id_in_session(user_id=user_id, db=db)
             await db.commit()
-            return result.rowcount > 0
+            return bool(deleted)
+
+    async def delete_feedbacks_by_user_id_in_session(self, user_id: str, db: AsyncSession) -> list[FeedbackModel]:
+        result = await db.execute(select(Feedback).filter_by(user_id=user_id).with_for_update())
+        feedbacks = list(result.scalars().all())
+        snapshots: list[FeedbackModel] = []
+        for feedback in feedbacks:
+            snapshot = FeedbackModel.model_validate(feedback)
+            snapshot.version = int(snapshot.version or 0) + 1
+            snapshots.append(snapshot)
+            await db.delete(feedback)
+        await db.flush()
+        return snapshots
 
     async def delete_all_feedbacks(self, db: Optional[AsyncSession] = None) -> bool:
         async with get_async_db_context(db) as db:
-            result = await db.execute(delete(Feedback))
+            deleted = await self.delete_all_feedbacks_in_session(db=db)
             await db.commit()
-            return result.rowcount > 0
+            return bool(deleted)
+
+    async def delete_all_feedbacks_in_session(self, db: AsyncSession) -> list[FeedbackModel]:
+        result = await db.execute(select(Feedback).with_for_update())
+        feedbacks = list(result.scalars().all())
+        snapshots: list[FeedbackModel] = []
+        for feedback in feedbacks:
+            snapshot = FeedbackModel.model_validate(feedback)
+            snapshot.version = int(snapshot.version or 0) + 1
+            snapshots.append(snapshot)
+            await db.delete(feedback)
+        await db.flush()
+        return snapshots
 
 
 Feedbacks = FeedbackTable()

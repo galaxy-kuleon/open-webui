@@ -66,6 +66,17 @@ async def async_save_to_db(data):
     await _state.persist_async(data)
 
 
+_TRUE_VALUES = {'1', 'true', 'yes', 'on'}
+
+
+def _env_bool(*names: str, default: bool = False) -> bool:
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None:
+            return value.strip().lower() in _TRUE_VALUES
+    return default
+
+
 def save_config(config):
     try:
         _state.persist(config)
@@ -525,6 +536,59 @@ ENABLE_MEMORIES = ConfigVar(
     'ENABLE_MEMORIES',
     'memories.enable',
     os.getenv('ENABLE_MEMORIES', 'True').lower() == 'true',
+)
+
+_HERMES_BRIDGE_ENABLED_DEFAULT = _env_bool(
+    'OPENWEBUI_HERMES_BRIDGE_ENABLED',
+    'HERMES_BRIDGE_ENABLED',
+    default=False,
+)
+HERMES_BRIDGE_ENABLED = ConfigVar(
+    'HERMES_BRIDGE_ENABLED',
+    'hermes.bridge.enabled',
+    _HERMES_BRIDGE_ENABLED_DEFAULT,
+)
+HERMES_MEMORY_BRIDGE_ENABLED = ConfigVar(
+    'HERMES_MEMORY_BRIDGE_ENABLED',
+    'hermes.bridge.memory_enabled',
+    _env_bool(
+        'OPENWEBUI_HERMES_MEMORY_BRIDGE_ENABLED',
+        'HERMES_MEMORY_BRIDGE_ENABLED',
+        default=False,
+    ),
+)
+HERMES_OUTBOX_DRAIN_ENABLED = ConfigVar(
+    'HERMES_OUTBOX_DRAIN_ENABLED',
+    'hermes.bridge.outbox_drain_enabled',
+    _env_bool(
+        'OPENWEBUI_HERMES_OUTBOX_DRAIN_ENABLED',
+        'HERMES_OUTBOX_DRAIN_ENABLED',
+        default=HERMES_BRIDGE_ENABLED.value,
+    ),
+)
+HERMES_DELETE_PURGE_ENABLED = ConfigVar(
+    'HERMES_DELETE_PURGE_ENABLED',
+    'hermes.bridge.delete_purge_enabled',
+    _env_bool(
+        'OPENWEBUI_HERMES_DELETE_PURGE_ENABLED',
+        'HERMES_DELETE_PURGE_ENABLED',
+        default=True,
+    ),
+)
+HERMES_BRIDGE_URL = ConfigVar(
+    'HERMES_BRIDGE_URL',
+    'hermes.bridge.url',
+    os.environ.get('OPENWEBUI_HERMES_BRIDGE_URL', os.environ.get('HERMES_BRIDGE_URL', 'http://hermes-gateway:8642')),
+)
+HERMES_BRIDGE_API_KEY = ConfigVar(
+    'HERMES_BRIDGE_API_KEY',
+    'hermes.bridge.api_key',
+    os.environ.get('OPENWEBUI_HERMES_BRIDGE_API_KEY', os.environ.get('HERMES_BRIDGE_API_KEY', '')),
+)
+HERMES_BRIDGE_TIMEOUT = ConfigVar(
+    'HERMES_BRIDGE_TIMEOUT',
+    'hermes.bridge.timeout',
+    float(os.environ.get('OPENWEBUI_HERMES_BRIDGE_TIMEOUT', os.environ.get('HERMES_BRIDGE_TIMEOUT', '10'))),
 )
 
 CODE_INTERPRETER_ENGINE = ConfigVar(
