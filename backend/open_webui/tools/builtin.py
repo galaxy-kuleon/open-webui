@@ -592,17 +592,22 @@ async def search_memories(
             user,
         )
 
-        if results and hasattr(results, 'documents') and results.documents:
+        documents = results.get('documents') if isinstance(results, dict) else getattr(results, 'documents', None)
+        ids = results.get('ids') if isinstance(results, dict) else getattr(results, 'ids', None)
+        metadatas = results.get('metadatas') if isinstance(results, dict) else getattr(results, 'metadatas', None)
+
+        if documents:
             memories = []
-            for doc_idx, doc in enumerate(results.documents[0]):
+            for doc_idx, doc in enumerate(documents[0]):
                 memory_id = None
-                if results.ids and results.ids[0]:
-                    memory_id = results.ids[0][doc_idx]
+                if ids and ids[0] and len(ids[0]) > doc_idx:
+                    memory_id = ids[0][doc_idx]
                 created_at = 'Unknown'
-                if results.metadatas and results.metadatas[0][doc_idx].get('created_at'):
+                metadata = metadatas[0][doc_idx] if metadatas and len(metadatas[0]) > doc_idx else {}
+                if metadata.get('created_at'):
                     created_at = time.strftime(
                         '%Y-%m-%d',
-                        time.localtime(results.metadatas[0][doc_idx]['created_at']),
+                        time.localtime(metadata['created_at']),
                     )
                 memories.append({'id': memory_id, 'date': created_at, 'content': doc})
             return json.dumps(memories, ensure_ascii=False)

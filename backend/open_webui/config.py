@@ -104,6 +104,17 @@ def save_to_db(data):
         db.commit()
 
 
+_TRUE_VALUES = {'1', 'true', 'yes', 'on'}
+
+
+def _env_bool(*names: str, default: bool = False) -> bool:
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None:
+            return value.strip().lower() in _TRUE_VALUES
+    return default
+
+
 async def async_save_to_db(data):
     """Async save — used for ALL runtime config persistence."""
     from sqlalchemy import select
@@ -2220,6 +2231,59 @@ ENABLE_MEMORIES = PersistentConfig(
     'ENABLE_MEMORIES',
     'memories.enable',
     os.environ.get('ENABLE_MEMORIES', 'True').lower() == 'true',
+)
+
+_HERMES_BRIDGE_ENABLED_DEFAULT = _env_bool(
+    'OPENWEBUI_HERMES_BRIDGE_ENABLED',
+    'HERMES_BRIDGE_ENABLED',
+    default=False,
+)
+HERMES_BRIDGE_ENABLED = PersistentConfig(
+    'HERMES_BRIDGE_ENABLED',
+    'hermes.bridge.enabled',
+    _HERMES_BRIDGE_ENABLED_DEFAULT,
+)
+HERMES_MEMORY_BRIDGE_ENABLED = PersistentConfig(
+    'HERMES_MEMORY_BRIDGE_ENABLED',
+    'hermes.bridge.memory_enabled',
+    _env_bool(
+        'OPENWEBUI_HERMES_MEMORY_BRIDGE_ENABLED',
+        'HERMES_MEMORY_BRIDGE_ENABLED',
+        default=False,
+    ),
+)
+HERMES_OUTBOX_DRAIN_ENABLED = PersistentConfig(
+    'HERMES_OUTBOX_DRAIN_ENABLED',
+    'hermes.bridge.outbox_drain_enabled',
+    _env_bool(
+        'OPENWEBUI_HERMES_OUTBOX_DRAIN_ENABLED',
+        'HERMES_OUTBOX_DRAIN_ENABLED',
+        default=HERMES_BRIDGE_ENABLED.value,
+    ),
+)
+HERMES_DELETE_PURGE_ENABLED = PersistentConfig(
+    'HERMES_DELETE_PURGE_ENABLED',
+    'hermes.bridge.delete_purge_enabled',
+    _env_bool(
+        'OPENWEBUI_HERMES_DELETE_PURGE_ENABLED',
+        'HERMES_DELETE_PURGE_ENABLED',
+        default=True,
+    ),
+)
+HERMES_BRIDGE_URL = PersistentConfig(
+    'HERMES_BRIDGE_URL',
+    'hermes.bridge.url',
+    os.environ.get('OPENWEBUI_HERMES_BRIDGE_URL', os.environ.get('HERMES_BRIDGE_URL', 'http://hermes-gateway:8642')),
+)
+HERMES_BRIDGE_API_KEY = PersistentConfig(
+    'HERMES_BRIDGE_API_KEY',
+    'hermes.bridge.api_key',
+    os.environ.get('OPENWEBUI_HERMES_BRIDGE_API_KEY', os.environ.get('HERMES_BRIDGE_API_KEY', '')),
+)
+HERMES_BRIDGE_TIMEOUT = PersistentConfig(
+    'HERMES_BRIDGE_TIMEOUT',
+    'hermes.bridge.timeout',
+    float(os.environ.get('OPENWEBUI_HERMES_BRIDGE_TIMEOUT', os.environ.get('HERMES_BRIDGE_TIMEOUT', '10'))),
 )
 
 CODE_INTERPRETER_ENGINE = PersistentConfig(

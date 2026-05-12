@@ -12,10 +12,68 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from open_webui.utils.access_control import has_permission
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.utils.hermes_bridge import (
+    HermesBridgeClient,
+    HermesMalformedMemoryResponseError,
+    build_memory_search_result,
+    get_bridge_config,
+    memory_bridge_enabled,
+    memory_bridge_misconfigured,
+    memory_model_from_bridge,
+)
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _bridge_config(request: Request):
+    return get_bridge_config(getattr(request.app.state, 'config', None))
+
+
+def _memory_bridge_enabled_or_raise(request: Request) -> bool:
+    config = getattr(request.app.state, 'config', None)
+    if memory_bridge_misconfigured(config):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Hermes memory bridge is enabled but HERMES_BRIDGE_URL or HERMES_BRIDGE_API_KEY is missing',
+        )
+    return memory_bridge_enabled(config)
+
+
+def _memory_model_from_bridge_or_raise(payload: dict) -> MemoryModel:
+    try:
+        return MemoryModel.model_validate(memory_model_from_bridge(payload))
+    except HermesMalformedMemoryResponseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def _best_effort_delete_local_memory(user_id: str, memory_id: str, db: Optional[AsyncSession] = None) -> None:
+    try:
+        result = await Memories.delete_memory_by_id_and_user_id(memory_id, user_id, db=db)
+        if result is False:
+            log.error('Failed to remove local OpenWebUI memory row after Hermes delete')
+    except Exception:
+        log.exception('Failed to remove local OpenWebUI memory row after Hermes delete')
+
+    try:
+        await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=f'user-memory-{user_id}', ids=[memory_id])
+    except Exception:
+        log.exception('Failed to remove local OpenWebUI memory vector after Hermes delete')
+
+
+async def _best_effort_delete_local_memory_collection(user_id: str, db: Optional[AsyncSession] = None) -> None:
+    try:
+        result = await Memories.delete_memories_by_user_id(user_id, db=db)
+        if result is False:
+            log.error('Failed to remove local OpenWebUI memory rows after Hermes bulk delete')
+    except Exception:
+        log.exception('Failed to remove local OpenWebUI memory rows after Hermes bulk delete')
+
+    try:
+        await ASYNC_VECTOR_DB_CLIENT.delete_collection(f'user-memory-{user_id}')
+    except Exception:
+        log.exception('Failed to remove local OpenWebUI memory vector collection after Hermes bulk delete')
 
 
 ############################
@@ -42,6 +100,15 @@ async def get_memories(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+    if _memory_bridge_enabled_or_raise(request):
+        async with HermesBridgeClient(_bridge_config(request)) as client:
+            memories = await client.list_memories(user_id=user.id)
+        return [
+            MemoryModel.model_validate(memory_model_from_bridge({**memory, 'user_id': user.id}))
+            for memory in memories
+            if memory.get('id') or memory.get('memory_id')
+        ]
 
     return await Memories.get_memories_by_user_id(user.id, db=db)
 
@@ -80,6 +147,11 @@ async def add_memory(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+    if _memory_bridge_enabled_or_raise(request):
+        async with HermesBridgeClient(_bridge_config(request)) as client:
+            memory = await client.create_memory(user_id=user.id, content=form_data.content)
+        return _memory_model_from_bridge_or_raise({**memory, 'user_id': user.id})
 
     memory = await Memories.insert_new_memory(user.id, form_data.content)
 
@@ -131,6 +203,13 @@ async def query_memory(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+    if _memory_bridge_enabled_or_raise(request):
+        async with HermesBridgeClient(_bridge_config(request)) as client:
+            memories = await client.list_memories(user_id=user.id, query=form_data.content, limit=form_data.k)
+        if not memories:
+            raise HTTPException(status_code=404, detail='No memories found for user')
+        return build_memory_search_result(memories, query=form_data.content)
 
     memories = await Memories.get_memories_by_user_id(user.id)
     if not memories:
@@ -207,6 +286,11 @@ async def reset_memory_from_vector_db(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
+    if _memory_bridge_enabled_or_raise(request):
+        # Hermes/OpenViking is authoritative in bridge mode; there is no local
+        # OpenWebUI vector collection to rebuild.
+        return True
+
     await ASYNC_VECTOR_DB_CLIENT.delete_collection(f'user-memory-{user.id}')
 
     memories = await Memories.get_memories_by_user_id(user.id)
@@ -258,6 +342,22 @@ async def delete_memory_by_user_id(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
+    if _memory_bridge_enabled_or_raise(request):
+        async with HermesBridgeClient(_bridge_config(request)) as client:
+            page = await client.list_memories_page(user_id=user.id)
+            if page.may_be_capped:
+                log.error('Refusing bridge bulk memory delete because Hermes memory list may be capped')
+                return False
+            results = []
+            for memory in page.memories:
+                memory_id = memory.get('id') or memory.get('memory_id')
+                if memory_id:
+                    results.append(await client.delete_memory(user_id=user.id, memory_id=str(memory_id)))
+        result = all(results)
+        if result:
+            await _best_effort_delete_local_memory_collection(user.id, db=db)
+        return result
+
     result = await Memories.delete_memories_by_user_id(user.id, db=db)
 
     if result:
@@ -297,6 +397,18 @@ async def update_memory_by_id(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+    if _memory_bridge_enabled_or_raise(request):
+        if form_data.content is None:
+            raise HTTPException(status_code=400, detail='content is required')
+        async with HermesBridgeClient(_bridge_config(request)) as client:
+            try:
+                memory = await client.update_memory(user_id=user.id, memory_id=memory_id, content=form_data.content)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if memory is None:
+            raise HTTPException(status_code=404, detail=ERROR_MESSAGES.NOT_FOUND)
+        return _memory_model_from_bridge_or_raise({**memory, 'user_id': user.id})
 
     memory = await Memories.update_memory_by_id_and_user_id(memory_id, user.id, form_data.content)
     if memory is None:
@@ -346,6 +458,13 @@ async def delete_memory_by_id(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+    if _memory_bridge_enabled_or_raise(request):
+        async with HermesBridgeClient(_bridge_config(request)) as client:
+            result = await client.delete_memory(user_id=user.id, memory_id=memory_id)
+        if result:
+            await _best_effort_delete_local_memory(user.id, memory_id, db=db)
+        return result
 
     result = await Memories.delete_memory_by_id_and_user_id(memory_id, user.id, db=db)
 

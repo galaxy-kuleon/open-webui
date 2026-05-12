@@ -17,9 +17,11 @@ from open_webui.models.feedbacks import (
     ModelHistoryResponse,
     Feedbacks,
 )
+from open_webui.models.feedback_outbox import FeedbackOutboxes, FeedbackOutboxStatus
 
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.hermes_bridge import feedback_delete_purge_enabled, feedback_outbox_capture_enabled
 from open_webui.internal.db import get_async_session
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +29,37 @@ log = logging.getLogger(__name__)
 
 
 router = APIRouter()
+
+
+async def _feedback_event_should_enqueue(request: Request, db: AsyncSession, event_type: str, feedback_id: str) -> bool:
+    config = getattr(request.app.state, 'config', None)
+    if feedback_outbox_capture_enabled(config):
+        return True
+    if event_type != 'deleted' or not feedback_delete_purge_enabled(config):
+        return False
+    return await FeedbackOutboxes.has_feedback_history(feedback_id, db=db)
+
+
+async def _enqueue_feedback_event_if_enabled(
+    request: Request,
+    db: AsyncSession,
+    *,
+    event_type: str,
+    feedback: FeedbackModel,
+    actor_user_id: str,
+    actor_role: str,
+    previous: Optional[FeedbackModel] = None,
+) -> None:
+    if not await _feedback_event_should_enqueue(request, db, event_type, feedback.id):
+        return
+    await FeedbackOutboxes.enqueue_feedback_event(
+        db,
+        event_type=event_type,
+        feedback=feedback,
+        actor_user_id=actor_user_id,
+        actor_role=actor_role,
+        previous=previous,
+    )
 
 
 # Leaderboard Elo Rating Computation
@@ -308,9 +341,28 @@ async def get_all_feedback_ids(user=Depends(get_admin_user), db: AsyncSession = 
 
 
 @router.delete('/feedbacks/all')
-async def delete_all_feedbacks(user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)):
-    success = await Feedbacks.delete_all_feedbacks(db=db)
-    return success
+async def delete_all_feedbacks(
+    request: Request,
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    async with db.begin():
+        feedbacks = await Feedbacks.delete_all_feedbacks_in_session(db=db)
+        for feedback in feedbacks:
+            await _enqueue_feedback_event_if_enabled(
+                request,
+                db,
+                event_type='deleted',
+                feedback=feedback,
+                actor_user_id=user.id,
+                actor_role=user.role,
+            )
+            await FeedbackOutboxes.redact_feedback_payloads(
+                db,
+                feedback_id=feedback.id,
+                reason='feedback_deleted',
+            )
+    return bool(feedbacks)
 
 
 @router.get('/feedbacks/all/export', response_model=list[FeedbackModel])
@@ -332,12 +384,36 @@ async def get_feedbacks(user=Depends(get_verified_user), db: AsyncSession = Depe
 
 
 @router.delete('/feedbacks', response_model=bool)
-async def delete_feedbacks(user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
-    success = await Feedbacks.delete_feedbacks_by_user_id(user.id, db=db)
-    return success
+async def delete_feedbacks(
+    request: Request,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    async with db.begin():
+        feedbacks = await Feedbacks.delete_feedbacks_by_user_id_in_session(user_id=user.id, db=db)
+        for feedback in feedbacks:
+            await _enqueue_feedback_event_if_enabled(
+                request,
+                db,
+                event_type='deleted',
+                feedback=feedback,
+                actor_user_id=user.id,
+                actor_role=user.role,
+            )
+            await FeedbackOutboxes.redact_feedback_payloads(
+                db,
+                feedback_id=feedback.id,
+                reason='feedback_deleted',
+            )
+    return bool(feedbacks)
 
 
 PAGE_ITEM_COUNT = 30
+
+
+@router.get('/feedbacks/outbox/status', response_model=FeedbackOutboxStatus)
+async def get_feedback_outbox_status(user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)):
+    return await FeedbackOutboxes.status_counts(db=db)
 
 
 @router.get('/feedbacks/list', response_model=FeedbackListResponse)
@@ -373,8 +449,19 @@ async def create_feedback(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    feedback = await Feedbacks.insert_new_feedback(user_id=user.id, form_data=form_data, db=db)
-    if not feedback:
+    try:
+        async with db.begin():
+            feedback = await Feedbacks.insert_new_feedback_in_session(user_id=user.id, form_data=form_data, db=db)
+            await _enqueue_feedback_event_if_enabled(
+                request,
+                db,
+                event_type='created',
+                feedback=feedback,
+                actor_user_id=user.id,
+                actor_role=user.role,
+            )
+    except Exception as e:
+        log.exception(f'Error creating feedback with outbox event: {e}')
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.DEFAULT(),
@@ -399,31 +486,70 @@ async def get_feedback_by_id(id: str, user=Depends(get_verified_user), db: Async
 @router.post('/feedback/{id}', response_model=FeedbackModel)
 async def update_feedback_by_id(
     id: str,
+    request: Request,
     form_data: FeedbackForm,
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    if user.role == 'admin':
-        feedback = await Feedbacks.update_feedback_by_id(id=id, form_data=form_data, db=db)
-    else:
-        feedback = await Feedbacks.update_feedback_by_id_and_user_id(id=id, user_id=user.id, form_data=form_data, db=db)
+    async with db.begin():
+        if user.role == 'admin':
+            previous = await Feedbacks.get_feedback_by_id_in_session(id=id, db=db, for_update=True)
+            feedback = await Feedbacks.update_feedback_by_id_in_session(id=id, form_data=form_data, db=db)
+        else:
+            previous = await Feedbacks.get_feedback_by_id_and_user_id_in_session(
+                id=id,
+                user_id=user.id,
+                db=db,
+                for_update=True,
+            )
+            feedback = await Feedbacks.update_feedback_by_id_and_user_id_in_session(
+                id=id, user_id=user.id, form_data=form_data, db=db
+            )
 
-    if not feedback:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+        if not feedback:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+
+        await _enqueue_feedback_event_if_enabled(
+            request,
+            db,
+            event_type='updated',
+            feedback=feedback,
+            actor_user_id=user.id,
+            actor_role=user.role,
+            previous=previous,
+        )
 
     return feedback
 
 
 @router.delete('/feedback/{id}')
 async def delete_feedback_by_id(
-    id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+    id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
 ):
-    if user.role == 'admin':
-        success = await Feedbacks.delete_feedback_by_id(id=id, db=db)
-    else:
-        success = await Feedbacks.delete_feedback_by_id_and_user_id(id=id, user_id=user.id, db=db)
+    async with db.begin():
+        if user.role == 'admin':
+            feedback = await Feedbacks.delete_feedback_by_id_in_session(id=id, db=db)
+        else:
+            feedback = await Feedbacks.delete_feedback_by_id_and_user_id_in_session(id=id, user_id=user.id, db=db)
 
-    if not success:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+        if not feedback:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
 
-    return success
+        await _enqueue_feedback_event_if_enabled(
+            request,
+            db,
+            event_type='deleted',
+            feedback=feedback,
+            actor_user_id=user.id,
+            actor_role=user.role,
+        )
+        await FeedbackOutboxes.redact_feedback_payloads(
+            db,
+            feedback_id=feedback.id,
+            reason='feedback_deleted',
+        )
+
+    return True
