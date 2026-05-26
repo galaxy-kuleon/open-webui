@@ -6,6 +6,7 @@ Public API
 convert_to_markdown(file_bytes_or_path, filename, request=None) -> str
     Convert a file to markdown.  Route:
       - .md / .txt           → read text directly (no docling)
+      - .eml                 → dedicated email parser (no docling)
       - legacy .doc/.xls/.ppt → POST soffice → modern bytes → docling
       - modern .docx/.xlsx/.pptx + .pdf + images → docling directly
     Cache: keyed by sha256(original bytes) + ext; stored under
@@ -60,6 +61,9 @@ DOCLING_DIRECT_EXTS: frozenset[str] = frozenset({
     'docx', 'xlsx', 'pptx', 'pdf',
     'png', 'jpg', 'jpeg', 'gif', 'tiff', 'webp', 'bmp',
 })
+
+# Extensions handled by the dedicated email parser before docling/fallback
+EMAIL_EXTS: frozenset[str] = frozenset({'eml'})
 
 # Extensions that are just plain text — read directly
 PLAINTEXT_EXTS: frozenset[str] = frozenset({'md', 'txt'})
@@ -255,7 +259,7 @@ def convert_to_markdown(
     # --- Conversion ---
     used_degraded_fallback = False
     try:
-        md = _convert_uncached(raw_bytes, filename, ext)
+        md = _convert_uncached(raw_bytes, filename, ext, request=request)
     except Exception as exc:
         log.warning('skip-rag: conversion failed for %s (%s), falling back to OWUI Loader: %s', filename, ext, exc)
         md = _fallback_loader(raw_bytes, filename, request)
@@ -274,12 +278,22 @@ def convert_to_markdown(
     return md
 
 
-def _convert_uncached(raw_bytes: bytes, filename: str, ext: str) -> str:
+def _convert_uncached(raw_bytes: bytes, filename: str, ext: str, request=None) -> str:
     """
     Internal: run the actual conversion pipeline without touching the cache.
     Raises on failure (caller handles).
     """
-    if ext in LEGACY_EXT_TO_TARGET:
+    if ext in EMAIL_EXTS:
+        from open_webui.skiprag.email import eml_to_markdown
+
+        return eml_to_markdown(
+            raw_bytes,
+            filename=filename,
+            request=request,
+            attachment_converter=convert_to_markdown,
+        )
+
+    elif ext in LEGACY_EXT_TO_TARGET:
         # Legacy → soffice → modern OOXML → docling
         target_ext = LEGACY_EXT_TO_TARGET[ext]
         log.info('skip-rag: converting legacy .%s → .%s via soffice then docling', ext, target_ext)
