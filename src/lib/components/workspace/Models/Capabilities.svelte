@@ -56,6 +56,12 @@
 			description: $i18n.t(
 				'Automatically inject system tools in native function calling mode (e.g., timestamps, memory, chat history, notes, etc.)'
 			)
+		},
+		skip_rag: {
+			label: $i18n.t('Skip RAG (full document context)'),
+			description: $i18n.t(
+				'Convert uploaded files to markdown and inject the full document text directly into the conversation context, bypassing RAG embedding entirely. For Hermes agent models the files are handed off via a shared volume instead.'
+			)
 		}
 	};
 
@@ -71,11 +77,12 @@
 		citations?: boolean;
 		status_updates?: boolean;
 		builtin_tools?: boolean;
+		skip_rag?: boolean;
 	} = {};
 
-	// Hide file_context when file_upload is disabled
+	// Hide file_context and skip_rag when file_upload is disabled
 	$: visibleCapabilities = Object.keys(capabilityLabels).filter((cap) => {
-		if (cap === 'file_context' && !capabilities.file_upload) {
+		if ((cap === 'file_context' || cap === 'skip_rag') && !capabilities.file_upload) {
 			return false;
 		}
 		return true;

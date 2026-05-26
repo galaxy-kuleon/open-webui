@@ -2899,13 +2899,76 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 except Exception as e:
                     log.exception(e)
 
-    # Check if file context extraction is enabled for this model (default True)
-    file_context_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('file_context', True)
+    # --- 3-way file-handling gate (Phase 3 / Phase 5) ---
+    #
+    # Branch 1 — Path B / Hermes handoff (Phase 5):
+    #   Model id ∈ OPENWEBUI_HERMES_BRIDGE_MODEL_IDS → write original +
+    #   converted .md into the shared hermes-handoff volume, inject a <files>
+    #   block into the outgoing user message.  NO embedding, NO big-context
+    #   injection.  Gating note: Path B fires for ANY Hermes bridge model with
+    #   files, regardless of the skip_rag capability flag (that flag is a
+    #   Path A concern only — see hermes_handoff.py design assumptions).
+    #
+    # Branch 2 — Path A / skip-rag full-context injection (Phase 3):
+    #   Model has skip_rag capability AND is NOT a Hermes bridge model →
+    #   convert to md, remove file items from metadata.files, inject md
+    #   transiently into the last user message.  NO embedding.
+    #   S1 safety: on unexpected exception, suppress embedding rather than
+    #   falling back to chat_completion_files_handler.
+    #
+    # Branch 3 — Normal RAG / file_context path:
+    #   All other models: standard OWUI chat_completion_files_handler.
+    #
+    # The three branches are MUTUALLY EXCLUSIVE.  Hermes-handoff is checked
+    # first so Hermes models never enter Path A or the normal RAG path.
+    _is_hermes_handoff = False
+    _is_skip_rag = False
+    try:
+        from open_webui.skiprag.hermes_handoff import is_hermes_handoff
+        from open_webui.skiprag.inject import is_skip_rag_model, run_skip_rag_path_a
+        _is_hermes_handoff = is_hermes_handoff(model)
+        if not _is_hermes_handoff:
+            _is_skip_rag = is_skip_rag_model(model)
+    except Exception as e:
+        log.exception('skip-rag: failed to import or evaluate file-handling gate: %s', e)
 
-    if file_context_enabled:
+    if _is_hermes_handoff:
+        # Branch 1 — Path B: Hermes handoff
         try:
-            form_data, flags = await chat_completion_files_handler(request, form_data, extra_params, user)
+            log.info('hermes-handoff: Path B activated for model %s', model.get('id'))
+            from open_webui.skiprag.hermes_handoff import run_hermes_handoff
+            form_data = await run_hermes_handoff(request, form_data, extra_params, user)
+            # Path B produces no RAG sources (Hermes reads files directly)
+        except Exception as e:
+            # On failure: do NOT embed — log and continue without file context.
+            log.exception(
+                'hermes-handoff: run_hermes_handoff raised unexpectedly for model %s — '
+                'no file context injected (embedding suppressed): %s',
+                model.get('id'), e,
+            )
+    elif _is_skip_rag:
+        # Branch 2 — Path A: skip-rag full-context injection
+        try:
+            log.info('skip-rag: Path A activated for model %s', model.get('id'))
+            form_data, flags = await run_skip_rag_path_a(request, form_data, extra_params, user)
             sources.extend(flags.get('sources', []))
+        except Exception as e:
+            # S1: conversion failure — do NOT fall back to embedding for a skip_rag model.
+            # The convert_to_markdown fallback loader is already inside run_skip_rag_path_a;
+            # if we reach here, something truly unexpected happened.  Log and continue
+            # with no file context rather than embedding.
+            log.exception(
+                'skip-rag: run_skip_rag_path_a raised unexpectedly for model %s — '
+                'no file context injected (embedding suppressed): %s',
+                model.get('id'), e,
+            )
+    else:
+        # Branch 3 — Normal RAG / file_context path
+        try:
+            file_context_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('file_context', True)
+            if file_context_enabled:
+                form_data, flags = await chat_completion_files_handler(request, form_data, extra_params, user)
+                sources.extend(flags.get('sources', []))
         except Exception as e:
             log.exception(e)
 
