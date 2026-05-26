@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WHITESPACE_RE = re.compile(r"[ \t\r\n]+")
+_MARKDOWN_LINK_CHARS_RE = re.compile(r"[\[\]()]")
 _MAX_DISPLAY_CHARS = 300
 
 
@@ -38,6 +39,17 @@ def _safe_filename(filename: str) -> str:
     cleaned = _sanitize_display(filename, fallback="email.eml")
     cleaned = cleaned.replace("\\", "/").split("/")[-1].strip()
     return _sanitize_display(cleaned, fallback="email.eml")
+
+
+def _safe_attachment_filename(filename: str | None, index: int) -> str:
+    """Sanitize attachment display names and provide a stable fallback."""
+    fallback = f"attachment-{index}.bin"
+    cleaned = _sanitize_display(filename, fallback=fallback)
+    cleaned = _MARKDOWN_LINK_CHARS_RE.sub("", cleaned)
+    if "://" in cleaned:
+        cleaned = cleaned.replace("://", "").replace("/", "")
+    cleaned = cleaned.replace("\\", "/").split("/")[-1].strip()
+    return _sanitize_display(cleaned, fallback=fallback)
 
 
 def _message_header(msg: Message, name: str) -> str:
@@ -98,21 +110,34 @@ def _html_to_text(html: str) -> str:
     return _normalize_body("\n".join(compact_lines))
 
 
+def _part_filename(part: Message) -> str | None:
+    try:
+        return part.get_filename()
+    except Exception:  # pragma: no cover - defensive against malformed parts
+        return None
+
+
+def _is_body_part(part: Message, content_type: str) -> bool:
+    if part.is_multipart():
+        return False
+    if part.get_content_disposition() == "attachment":
+        return False
+    if _part_filename(part):
+        return False
+    return part.get_content_type() == content_type
+
+
 def _extract_plain_text_body(msg: Message) -> str:
     """Extract the preferred plain text body from an email message."""
     plain_parts: list[str] = []
 
     if msg.is_multipart():
         for part in msg.walk():
-            if part.is_multipart():
-                continue
-            if part.get_content_disposition() == "attachment":
-                continue
-            if part.get_content_type() == "text/plain":
+            if _is_body_part(part, "text/plain"):
                 text = _normalize_body(_part_text(part))
                 if text:
                     plain_parts.append(text)
-    elif msg.get_content_type() == "text/plain":
+    elif _is_body_part(msg, "text/plain"):
         text = _normalize_body(_part_text(msg))
         if text:
             plain_parts.append(text)
@@ -128,15 +153,11 @@ def _extract_html_body(msg: Message) -> str:
 
     if msg.is_multipart():
         for part in msg.walk():
-            if part.is_multipart():
-                continue
-            if part.get_content_disposition() == "attachment":
-                continue
-            if part.get_content_type() == "text/html":
+            if _is_body_part(part, "text/html"):
                 text = _html_to_text(_part_text(part))
                 if text:
                     html_parts.append(text)
-    elif msg.get_content_type() == "text/html":
+    elif _is_body_part(msg, "text/html"):
         text = _html_to_text(_part_text(msg))
         if text:
             html_parts.append(text)
@@ -144,6 +165,53 @@ def _extract_html_body(msg: Message) -> str:
     if html_parts:
         return "\n\n".join(html_parts)
     return ""
+
+
+def _decoded_payload_size(part: Message) -> int:
+    payload = part.get_payload(decode=True) or b""
+    return len(cast(bytes, payload))
+
+
+def _is_attachment_part(part: Message) -> bool:
+    if part.is_multipart():
+        return False
+    disposition = part.get_content_disposition()
+    return disposition == "attachment" or bool(_part_filename(part))
+
+
+def _extract_attachment_metadata(msg: Message, warnings: list[str]) -> list[list[str]]:
+    """Return Markdown lines for metadata-only attachment entries."""
+    attachment_lines: list[list[str]] = []
+    parts = msg.walk() if msg.is_multipart() else [msg]
+
+    for part in parts:
+        if not _is_attachment_part(part):
+            continue
+
+        index = len(attachment_lines) + 1
+        filename = _safe_attachment_filename(_part_filename(part), index)
+        content_type = _sanitize_display(
+            part.get_content_type(), fallback="application/octet-stream"
+        )
+        disposition = _sanitize_display(part.get_content_disposition(), fallback="unspecified")
+
+        try:
+            size = _decoded_payload_size(part)
+        except Exception as exc:  # noqa: BLE001 - keep malformed attachments fail-closed
+            size = 0
+            reason = _sanitize_display(exc, fallback=exc.__class__.__name__)
+            warnings.append(f"Failed to decode attachment payload for {filename}: {reason}")
+
+        attachment_lines.append([
+            f"### Attachment {index}: {filename}",
+            "",
+            f"- Content-Type: {content_type}",
+            f"- Size: {size} bytes",
+            f"- Disposition: {disposition}",
+            "- Status: metadata-only",
+        ])
+
+    return attachment_lines
 
 
 def _minimal_failure_markdown(filename: str, error: Exception) -> str:
@@ -212,6 +280,14 @@ def eml_to_markdown(
             "",
             body,
         ])
+
+        attachments = _extract_attachment_metadata(msg, warnings)
+        if attachments:
+            lines.extend(["", "## Attachments", ""])
+            for attachment in attachments:
+                lines.extend(attachment)
+                lines.append("")
+            lines.pop()
 
         if warnings:
             lines.extend(["", "## Parse Warnings", ""])
