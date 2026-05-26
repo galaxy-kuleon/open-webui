@@ -500,6 +500,23 @@
 		(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.terminal ?? true
 	);
 
+	// Models that have skip_rag enabled (default OFF, unlike most caps).
+	// When ALL selected models have skip_rag, uploaded files must NOT be embedded at upload
+	// time — the chat path converts bytes via docling instead.  shouldProcessUpload gates this.
+	let skipRagModels = [];
+	$: skipRagModels = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels).filter(
+		(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.skip_rag ?? false
+	);
+
+	// true  → normal models: embed at upload time (pass ?process=true, the default)
+	// false → every selected model has skip_rag: skip embedding (?process=false)
+	let shouldProcessUpload = true;
+	$: {
+		const activeModelIds = atSelectedModel?.id ? [atSelectedModel.id] : selectedModels;
+		shouldProcessUpload =
+			activeModelIds.length === 0 || skipRagModels.length < activeModelIds.length;
+	}
+
 	let toggleFilters = [];
 	$: toggleFilters = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
 		.map((id) => ($models.find((model) => model.id === id) || {})?.filters ?? [])
@@ -801,7 +818,7 @@
 
 				reader.readAsDataURL(file['type'] === 'image/heic' ? await convertHeicToJpeg(file) : file);
 			} else {
-				uploadFileHandler(file);
+				uploadFileHandler(file, shouldProcessUpload);
 			}
 		});
 	};
@@ -1586,7 +1603,7 @@
 																				}
 																			);
 
-																			await uploadFileHandler(file, true, { context: 'full' });
+																			await uploadFileHandler(file, shouldProcessUpload, { context: 'full' });
 																		}
 																	}
 																} else {
@@ -1624,7 +1641,7 @@
 													const file = new File([fileData.blob], fileData.name, {
 														type: fileData.blob.type
 													});
-													await uploadFileHandler(file);
+													await uploadFileHandler(file, shouldProcessUpload);
 												} else {
 													console.log('No file was selected from Google Drive');
 												}
@@ -1644,7 +1661,7 @@
 													const file = new File([fileData.blob], fileData.name, {
 														type: fileData.blob.type || 'application/octet-stream'
 													});
-													await uploadFileHandler(file);
+													await uploadFileHandler(file, shouldProcessUpload);
 												} else {
 													console.log('No file was selected from OneDrive');
 												}
