@@ -14,11 +14,9 @@ from email.message import EmailMessage, Message
 from email.parser import BytesParser
 from typing import cast
 
-from bs4 import BeautifulSoup  # type: ignore[import-untyped]
-
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WHITESPACE_RE = re.compile(r"[ \t\r\n]+")
-_MARKDOWN_LINK_CHARS_RE = re.compile(r"[\[\]()]")
+_MARKDOWN_LINK_CHARS_RE = re.compile(r"[\[\]()<>]")
 _MAX_DISPLAY_CHARS = 300
 
 
@@ -92,6 +90,8 @@ def _normalize_body(text: str) -> str:
 
 def _html_to_text(html: str) -> str:
     """Convert an HTML email body to plain text without executable/noisy tags."""
+    from bs4 import BeautifulSoup  # type: ignore[import-untyped]
+
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()

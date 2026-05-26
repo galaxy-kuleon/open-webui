@@ -112,3 +112,34 @@ def test_convert_to_markdown_routes_uppercase_eml_to_email_parser(monkeypatch):
 
     assert md == "# Uppercase email parser output\n"
     assert calls == ["SAMPLE.EML"]
+
+
+def test_convert_to_markdown_uses_cache_for_repeated_eml_bytes(monkeypatch):
+    calls = []
+
+    def fake_eml_to_markdown(
+        raw_bytes,
+        filename,
+        request=None,
+        attachment_converter=None,
+    ):
+        calls.append((raw_bytes, filename))
+        return "# Cached email parser output\n"
+
+    monkeypatch.setattr(
+        "open_webui.skiprag.email.eml_to_markdown",
+        fake_eml_to_markdown,
+    )
+
+    first = convert_module.convert_to_markdown(
+        b"Subject: Hi\r\n\r\nBody",
+        "sample.eml",
+    )
+    second = convert_module.convert_to_markdown(
+        b"Subject: Hi\r\n\r\nBody",
+        "sample.eml",
+    )
+
+    assert first == "# Cached email parser output\n"
+    assert second == "# Cached email parser output\n"
+    assert calls == [(b"Subject: Hi\r\n\r\nBody", "sample.eml")]
