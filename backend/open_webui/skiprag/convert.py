@@ -281,6 +281,7 @@ def convert_to_markdown(
 def _convert_uncached(raw_bytes: bytes, filename: str, ext: str, request=None) -> str:
     """
     Internal: run the actual conversion pipeline without touching the cache.
+    Dedicated `.eml` parsing has priority over Docling and fallback loaders.
     Raises on failure (caller handles).
     """
     if ext in EMAIL_EXTS:

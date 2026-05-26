@@ -1,5 +1,11 @@
+import builtins
+import importlib
+import sys
+
 import pytest
 
+import open_webui.skiprag as skiprag_pkg
+from open_webui.skiprag import email as email_module
 from open_webui.skiprag.email import eml_to_markdown
 
 
@@ -210,6 +216,150 @@ def test_eml_to_markdown_sanitizes_attachment_markdown_link_filename():
     assert "evil" in attachment_heading
     assert "bad.com" in attachment_heading
     assert ".pdf" in attachment_heading
+
+
+def test_eml_to_markdown_sanitizes_attachment_autolink_filename():
+    raw = (
+        b"From: Alice <alice@example.com>\r\n"
+        b"To: Bob <bob@example.com>\r\n"
+        b"Subject: Autolink filename\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b"Content-Type: multipart/mixed; boundary=MIXED\r\n"
+        b"\r\n"
+        b"--MIXED\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        b"Plain body.\r\n"
+        b"--MIXED\r\n"
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment;\r\n"
+        b" filename*=utf-8''%3Chttp%3A%2F%2Fevil.example%2Fevil.pdf%3E\r\n"
+        b"Content-Transfer-Encoding: base64\r\n"
+        b"\r\n"
+        b"ZmlsZQ==\r\n"
+        b"--MIXED--\r\n"
+    )
+
+    md = eml_to_markdown(raw, filename="autolink-filename.eml")
+    attachment_heading = next(
+        line for line in md.splitlines() if line.startswith("### Attachment 1:")
+    )
+
+    assert "<http://evil.example/evil.pdf>" not in md
+    assert "<" not in attachment_heading
+    assert ">" not in attachment_heading
+    assert "evil.example" in attachment_heading
+    assert "evil.pdf" in attachment_heading
+    safe_name = email_module._safe_attachment_filename(
+        "<http://evil.example/evil.pdf>",
+        1,
+    )
+    assert "<" not in safe_name
+    assert ">" not in safe_name
+
+
+def test_eml_to_markdown_indexes_multiple_attachments():
+    raw = (
+        b"From: Alice <alice@example.com>\r\n"
+        b"To: Bob <bob@example.com>\r\n"
+        b"Subject: Multiple attachments\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b"Content-Type: multipart/mixed; boundary=MIXED\r\n"
+        b"\r\n"
+        b"--MIXED\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        b"Plain body.\r\n"
+        b"--MIXED\r\n"
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename=\"one.pdf\"\r\n"
+        b"Content-Transfer-Encoding: base64\r\n"
+        b"\r\n"
+        b"b25l\r\n"
+        b"--MIXED\r\n"
+        b"Content-Type: text/csv\r\n"
+        b"Content-Disposition: attachment; filename=\"two.csv\"\r\n"
+        b"Content-Transfer-Encoding: base64\r\n"
+        b"\r\n"
+        b"dHdv\r\n"
+        b"--MIXED--\r\n"
+    )
+
+    md = eml_to_markdown(raw, filename="multiple-attachments.eml")
+
+    assert "### Attachment 1: one.pdf" in md
+    assert "### Attachment 2: two.csv" in md
+    assert md.index("### Attachment 1: one.pdf") < md.index(
+        "### Attachment 2: two.csv"
+    )
+
+
+def test_eml_to_markdown_uses_fallback_name_for_attachment_without_filename():
+    raw = (
+        b"From: Alice <alice@example.com>\r\n"
+        b"To: Bob <bob@example.com>\r\n"
+        b"Subject: Nameless attachment\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b"Content-Type: multipart/mixed; boundary=MIXED\r\n"
+        b"\r\n"
+        b"--MIXED\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        b"Plain body.\r\n"
+        b"--MIXED\r\n"
+        b"Content-Type: application/octet-stream\r\n"
+        b"Content-Disposition: attachment\r\n"
+        b"Content-Transfer-Encoding: base64\r\n"
+        b"\r\n"
+        b"ZmlsZQ==\r\n"
+        b"--MIXED--\r\n"
+    )
+
+    md = eml_to_markdown(raw, filename="nameless-attachment.eml")
+
+    assert "### Attachment 1: attachment-1.bin" in md
+
+
+def test_email_module_import_does_not_require_beautifulsoup(monkeypatch):
+    original_import = builtins.__import__
+    original_module = sys.modules.pop("open_webui.skiprag.email", None)
+    original_package_attr = getattr(skiprag_pkg, "email", None)
+
+    def fail_bs4_import(name, *args, **kwargs):
+        if name == "bs4" or name.startswith("bs4."):
+            raise ImportError("bs4 unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_bs4_import)
+
+    try:
+        imported = importlib.import_module("open_webui.skiprag.email")
+        plain_md = imported.eml_to_markdown(
+            b"Subject: Plain\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"\r\n"
+            b"Plain body.",
+            filename="plain.eml",
+        )
+        html_md = imported.eml_to_markdown(
+            b"Subject: HTML\r\n"
+            b"Content-Type: text/html; charset=utf-8\r\n"
+            b"\r\n"
+            b"<p>HTML body.</p>",
+            filename="html.eml",
+        )
+    finally:
+        sys.modules.pop("open_webui.skiprag.email", None)
+        if original_module is not None:
+            sys.modules["open_webui.skiprag.email"] = original_module
+        if original_package_attr is not None:
+            setattr(skiprag_pkg, "email", original_package_attr)
+
+    assert callable(imported.eml_to_markdown)
+    assert "Plain body." in plain_md
+    assert html_md
+    assert "## Parse Warnings" in html_md
+    assert "bs4 unavailable" in html_md
 
 
 def test_eml_to_markdown_ignores_inline_image_without_filename():
