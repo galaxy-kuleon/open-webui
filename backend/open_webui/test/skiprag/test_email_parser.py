@@ -60,3 +60,48 @@ def test_eml_to_markdown_malformed_input_returns_non_empty_warning(monkeypatch):
     assert "[No body extracted]" in md
     assert "## Parse Warnings" in md
     assert "parser exploded" in md
+
+
+def test_eml_to_markdown_converts_html_body_when_plain_text_missing():
+    raw = (
+        b"From: Alice <alice@example.com>\r\n"
+        b"To: Bob <bob@example.com>\r\n"
+        b"Subject: HTML only\r\n"
+        b"Content-Type: text/html; charset=utf-8\r\n"
+        b"\r\n"
+        b"<html><body><h1>Hello</h1><p>HTML body</p><script>bad()</script></body></html>"
+    )
+
+    md = eml_to_markdown(raw, filename="html.eml")
+
+    assert "Hello" in md
+    assert "HTML body" in md
+    assert "bad()" not in md
+    assert "<script>" not in md
+    assert "HTML body converted to text because text/plain was missing." in md
+
+
+def test_eml_to_markdown_prefers_plain_text_over_html_alternative():
+    raw = (
+        b"From: Alice <alice@example.com>\r\n"
+        b"To: Bob <bob@example.com>\r\n"
+        b"Subject: Alternative\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b"Content-Type: multipart/alternative; boundary=ALT\r\n"
+        b"\r\n"
+        b"--ALT\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        b"Plain body wins.\r\n"
+        b"--ALT\r\n"
+        b"Content-Type: text/html; charset=utf-8\r\n"
+        b"\r\n"
+        b"<p>HTML body should not appear.</p>\r\n"
+        b"--ALT--\r\n"
+    )
+
+    md = eml_to_markdown(raw, filename="alternative.eml")
+
+    assert "Plain body wins." in md
+    assert "HTML body should not appear." not in md
+    assert "HTML body converted to text because text/plain was missing." not in md

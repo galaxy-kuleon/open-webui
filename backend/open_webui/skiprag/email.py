@@ -14,6 +14,8 @@ from email.message import EmailMessage, Message
 from email.parser import BytesParser
 from typing import cast
 
+from bs4 import BeautifulSoup  # type: ignore[import-untyped]
+
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WHITESPACE_RE = re.compile(r"[ \t\r\n]+")
 _MAX_DISPLAY_CHARS = 300
@@ -76,7 +78,27 @@ def _normalize_body(text: str) -> str:
     return text.strip()
 
 
-def _extract_plain_text_body(msg: Message, warnings: list[str]) -> str:
+def _html_to_text(html: str) -> str:
+    """Convert an HTML email body to plain text without executable/noisy tags."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    text = soup.get_text("\n")
+    lines = [line.strip() for line in text.splitlines()]
+    compact_lines: list[str] = []
+    previous_blank = False
+    for line in lines:
+        if not line:
+            if not previous_blank:
+                compact_lines.append("")
+            previous_blank = True
+            continue
+        compact_lines.append(line)
+        previous_blank = False
+    return _normalize_body("\n".join(compact_lines))
+
+
+def _extract_plain_text_body(msg: Message) -> str:
     """Extract the preferred plain text body from an email message."""
     plain_parts: list[str] = []
 
@@ -97,8 +119,30 @@ def _extract_plain_text_body(msg: Message, warnings: list[str]) -> str:
 
     if plain_parts:
         return "\n\n".join(plain_parts)
+    return ""
 
-    warnings.append("No text/plain body found.")
+
+def _extract_html_body(msg: Message) -> str:
+    """Extract and sanitize HTML body text when no plain text body exists."""
+    html_parts: list[str] = []
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.is_multipart():
+                continue
+            if part.get_content_disposition() == "attachment":
+                continue
+            if part.get_content_type() == "text/html":
+                text = _html_to_text(_part_text(part))
+                if text:
+                    html_parts.append(text)
+    elif msg.get_content_type() == "text/html":
+        text = _html_to_text(_part_text(msg))
+        if text:
+            html_parts.append(text)
+
+    if html_parts:
+        return "\n\n".join(html_parts)
     return ""
 
 
@@ -134,7 +178,14 @@ def eml_to_markdown(
 
         safe_name = _safe_filename(filename)
         subject = _message_header(msg, "Subject") or safe_name
-        body = _extract_plain_text_body(msg, warnings) or "[No body extracted]"
+        body = _extract_plain_text_body(msg)
+        if not body:
+            body = _extract_html_body(msg)
+            if body:
+                warnings.append("HTML body converted to text because text/plain was missing.")
+            else:
+                warnings.append("No text/plain or text/html body found.")
+                body = "[No body extracted]"
 
         metadata_fields = [
             ("From", _message_header(msg, "From")),
