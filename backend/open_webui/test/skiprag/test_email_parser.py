@@ -1,4 +1,5 @@
 import builtins
+import io
 import importlib
 import sys
 from email.message import EmailMessage
@@ -8,6 +9,13 @@ import pytest
 import open_webui.skiprag as skiprag_pkg
 from open_webui.skiprag import email as email_module
 from open_webui.skiprag.email import eml_to_markdown
+
+try:
+    from PIL import Image
+
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
 
 
 def _eml_with_attachments(attachments):
@@ -30,6 +38,20 @@ def _eml_with_attachments(attachments):
 
 def _fake_converter(file_bytes=None, filename="", request=None):
     return f"[Converted: {filename}]"
+
+
+@pytest.mark.skipif(
+    not _PIL_AVAILABLE,
+    reason="PIL not installed",
+)
+def test_first_gif_frame_as_png_returns_valid_png():
+    gif_buf = io.BytesIO()
+    img = Image.new("RGB", (1, 1), (255, 0, 0))
+    img.save(gif_buf, format="GIF")
+
+    png_bytes = email_module._first_gif_frame_as_png(gif_buf.getvalue())
+
+    assert png_bytes[:4] == b"\x89PNG"
 
 
 def test_eml_to_markdown_extracts_metadata_and_plain_text_body():
@@ -230,9 +252,7 @@ def test_eml_to_markdown_sanitizes_attachment_markdown_link_filename():
     )
 
     md = eml_to_markdown(raw, filename="link-filename.eml")
-    attachment_heading = next(
-        line for line in md.splitlines() if line.startswith("### Attachment 1:")
-    )
+    attachment_heading = next(line for line in md.splitlines() if line.startswith("### Attachment 1:"))
 
     assert "[evil](http://bad.com).pdf" not in md
     assert "[" not in attachment_heading
@@ -266,9 +286,7 @@ def test_eml_to_markdown_sanitizes_attachment_autolink_filename():
     )
 
     md = eml_to_markdown(raw, filename="autolink-filename.eml")
-    attachment_heading = next(
-        line for line in md.splitlines() if line.startswith("### Attachment 1:")
-    )
+    attachment_heading = next(line for line in md.splitlines() if line.startswith("### Attachment 1:"))
 
     assert "<http://evil.example/evil.pdf>" not in md
     assert "<" not in attachment_heading
@@ -314,9 +332,7 @@ def test_eml_to_markdown_indexes_multiple_attachments():
 
     assert "### Attachment 1: one.pdf" in md
     assert "### Attachment 2: two.csv" in md
-    assert md.index("### Attachment 1: one.pdf") < md.index(
-        "### Attachment 2: two.csv"
-    )
+    assert md.index("### Attachment 1: one.pdf") < md.index("### Attachment 2: two.csv")
 
 
 def test_eml_to_markdown_uses_fallback_name_for_attachment_without_filename():
@@ -391,7 +407,7 @@ def test_eml_to_markdown_extracts_image_attachments(monkeypatch, filename, subty
 
     def fake_image_extractor(file_bytes, safe_filename):
         calls.append((file_bytes, safe_filename))
-        return "Image description here"
+        return True, "Image description here"
 
     monkeypatch.setattr(
         email_module,
@@ -612,17 +628,11 @@ def test_email_module_import_does_not_require_beautifulsoup(monkeypatch):
     try:
         imported = importlib.import_module("open_webui.skiprag.email")
         plain_md = imported.eml_to_markdown(
-            b"Subject: Plain\r\n"
-            b"Content-Type: text/plain; charset=utf-8\r\n"
-            b"\r\n"
-            b"Plain body.",
+            b"Subject: Plain\r\n" b"Content-Type: text/plain; charset=utf-8\r\n" b"\r\n" b"Plain body.",
             filename="plain.eml",
         )
         html_md = imported.eml_to_markdown(
-            b"Subject: HTML\r\n"
-            b"Content-Type: text/html; charset=utf-8\r\n"
-            b"\r\n"
-            b"<p>HTML body.</p>",
+            b"Subject: HTML\r\n" b"Content-Type: text/html; charset=utf-8\r\n" b"\r\n" b"<p>HTML body.</p>",
             filename="html.eml",
         )
     finally:
@@ -672,10 +682,7 @@ def test_eml_to_markdown_lists_inline_image_with_filename_as_attachment_metadata
     monkeypatch.setattr(
         email_module,
         "_extract_image_via_task_model",
-        lambda fb, fn: (
-            "- Status: extraction-failed\n"
-            "- Warning: task model image extraction failed: unavailable"
-        ),
+        lambda fb, fn: (False, "Warning: task model image extraction failed: unavailable"),
     )
 
     raw = (
