@@ -1,12 +1,35 @@
 import builtins
 import importlib
 import sys
+from email.message import EmailMessage
 
 import pytest
 
 import open_webui.skiprag as skiprag_pkg
 from open_webui.skiprag import email as email_module
 from open_webui.skiprag.email import eml_to_markdown
+
+
+def _eml_with_attachments(attachments):
+    msg = EmailMessage()
+    msg["From"] = "Alice <alice@example.com>"
+    msg["To"] = "Bob <bob@example.com>"
+    msg["Subject"] = "Attachment test"
+    msg.set_content("Plain body.")
+
+    for filename, payload, maintype, subtype in attachments:
+        msg.add_attachment(
+            payload,
+            maintype=maintype,
+            subtype=subtype,
+            filename=filename,
+        )
+
+    return msg.as_bytes()
+
+
+def _fake_converter(file_bytes=None, filename="", request=None):
+    return f"[Converted: {filename}]"
 
 
 def test_eml_to_markdown_extracts_metadata_and_plain_text_body():
@@ -144,7 +167,9 @@ def test_eml_to_markdown_lists_attachment_metadata_only():
     assert "- Content-Type: application/pdf" in md
     assert f"- Size: {len(attachment)} bytes" in md
     assert "- Disposition: attachment" in md
-    assert "- Status: metadata-only" in md
+    assert "- Status: extraction-failed" in md
+    assert "- Extractor: skip-rag-convert" in md
+    assert "attachment converter unavailable" in md
 
 
 @pytest.mark.parametrize(
@@ -320,6 +345,258 @@ def test_eml_to_markdown_uses_fallback_name_for_attachment_without_filename():
     assert "### Attachment 1: attachment-1.bin" in md
 
 
+@pytest.mark.parametrize(
+    ("filename", "maintype", "subtype"),
+    [
+        ("invoice.pdf", "application", "pdf"),
+        (
+            "proposal.docx",
+            "application",
+            "vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+        ("notes.txt", "text", "plain"),
+        ("readme.md", "text", "markdown"),
+    ],
+)
+def test_eml_to_markdown_extracts_convertible_attachments(filename, maintype, subtype):
+    raw = _eml_with_attachments(
+        [
+            (filename, b"attachment bytes", maintype, subtype),
+        ]
+    )
+
+    md = eml_to_markdown(
+        raw,
+        filename="convertible.eml",
+        attachment_converter=_fake_converter,
+    )
+
+    assert f"### Attachment 1: {filename}" in md
+    assert "- Status: extracted" in md
+    assert "- Extractor: skip-rag-convert" in md
+    assert "#### Extracted Content" in md
+    assert f"[Converted: {filename}]" in md
+
+
+@pytest.mark.parametrize(
+    ("filename", "subtype"),
+    [
+        ("screenshot.png", "png"),
+        ("photo.jpg", "jpeg"),
+        ("animation.gif", "gif"),
+    ],
+)
+def test_eml_to_markdown_extracts_image_attachments(monkeypatch, filename, subtype):
+    calls = []
+
+    def fake_image_extractor(file_bytes, safe_filename):
+        calls.append((file_bytes, safe_filename))
+        return "Image description here"
+
+    monkeypatch.setattr(
+        email_module,
+        "_extract_image_via_task_model",
+        fake_image_extractor,
+    )
+    raw = _eml_with_attachments(
+        [
+            (filename, b"image bytes", "image", subtype),
+        ]
+    )
+
+    md = eml_to_markdown(raw, filename="image.eml")
+
+    assert f"### Attachment 1: {filename}" in md
+    assert "- Status: extracted" in md
+    assert "- Extractor: task-model-vision" in md
+    assert "#### Image OCR / Description" in md
+    assert "Image description here" in md
+    assert calls == [(b"image bytes", filename)]
+
+
+@pytest.mark.parametrize("filename", ["malware.exe", "archive.zip", "weird.xyz"])
+def test_eml_to_markdown_marks_unsupported_attachments(filename):
+    raw = _eml_with_attachments(
+        [
+            (filename, b"unsupported bytes", "application", "octet-stream"),
+        ]
+    )
+
+    md = eml_to_markdown(
+        raw,
+        filename="unsupported.eml",
+        attachment_converter=_fake_converter,
+    )
+
+    assert f"### Attachment 1: {filename}" in md
+    assert "- Status: unsupported-type" in md
+    assert "#### Extracted Content" not in md
+    assert "[Converted:" not in md
+
+
+def test_eml_to_markdown_skips_oversized_attachment(monkeypatch):
+    monkeypatch.setenv("SKIP_RAG_EMAIL_MAX_ATTACHMENT_BYTES", "100")
+    raw = _eml_with_attachments(
+        [
+            ("large.txt", b"x" * 101, "text", "plain"),
+        ]
+    )
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("oversized attachment should not be converted")
+
+    md = eml_to_markdown(
+        raw,
+        filename="oversized.eml",
+        attachment_converter=fail_if_called,
+    )
+
+    assert "### Attachment 1: large.txt" in md
+    assert "- Size: 101 bytes" in md
+    assert "- Status: skipped-oversized" in md
+    assert "exceeds 100 byte limit" in md
+
+
+def test_eml_to_markdown_stops_at_max_attachment_count(monkeypatch):
+    monkeypatch.setenv("SKIP_RAG_EMAIL_MAX_ATTACHMENTS", "2")
+    raw = _eml_with_attachments(
+        [
+            ("one.txt", b"one", "text", "plain"),
+            ("two.txt", b"two", "text", "plain"),
+            ("three.txt", b"three", "text", "plain"),
+            ("four.txt", b"four", "text", "plain"),
+        ]
+    )
+
+    md = eml_to_markdown(
+        raw,
+        filename="max-count.eml",
+        attachment_converter=_fake_converter,
+    )
+
+    assert "### Attachment 1: one.txt" in md
+    assert "### Attachment 2: two.txt" in md
+    assert "### Attachment 3: three.txt" not in md
+    assert "### Attachment 4: four.txt" not in md
+    assert "Skipped 2 remaining attachments: exceeded limit." in md
+
+
+def test_eml_to_markdown_truncates_attachment_content(monkeypatch):
+    monkeypatch.setenv("SKIP_RAG_EMAIL_MAX_ATTACHMENT_CHARS", "50")
+    raw = _eml_with_attachments(
+        [
+            ("long.txt", b"long", "text", "plain"),
+        ]
+    )
+
+    def long_converter(**kwargs):
+        return "x" * 80
+
+    md = eml_to_markdown(
+        raw,
+        filename="truncate.eml",
+        attachment_converter=long_converter,
+    )
+
+    assert "- Status: extracted" in md
+    assert ("x" * 50) in md
+    assert ("x" * 51) not in md
+    assert "attachment content exceeded 50 characters" in md
+
+
+def test_eml_to_markdown_respects_total_attachment_character_limit(monkeypatch):
+    monkeypatch.setenv("SKIP_RAG_EMAIL_MAX_TOTAL_ATTACHMENT_CHARS", "100")
+    raw = _eml_with_attachments(
+        [
+            ("one.txt", b"one", "text", "plain"),
+            ("two.txt", b"two", "text", "plain"),
+            ("three.txt", b"three", "text", "plain"),
+        ]
+    )
+
+    def eighty_chars_converter(file_bytes=None, filename="", request=None):
+        return filename[:1] * 80
+
+    md = eml_to_markdown(
+        raw,
+        filename="total-chars.eml",
+        attachment_converter=eighty_chars_converter,
+    )
+
+    assert "### Attachment 1: one.txt" in md
+    assert "### Attachment 2: two.txt" in md
+    assert "### Attachment 3: three.txt" not in md
+    assert ("o" * 80) in md
+    assert ("t" * 20) in md
+    assert ("t" * 21) not in md
+    assert "total email attachment extraction limit exceeded 20 remaining characters" in md
+    assert "Skipped 1 remaining attachments: exceeded limit." in md
+
+
+def test_eml_to_markdown_respects_total_attachment_bytes_limit(monkeypatch):
+    monkeypatch.setenv("SKIP_RAG_EMAIL_MAX_TOTAL_ATTACHMENT_BYTES", "200")
+    raw = _eml_with_attachments(
+        [
+            ("one.txt", b"1" * 80, "text", "plain"),
+            ("two.txt", b"2" * 80, "text", "plain"),
+            ("three.txt", b"3" * 80, "text", "plain"),
+        ]
+    )
+
+    md = eml_to_markdown(
+        raw,
+        filename="total-bytes.eml",
+        attachment_converter=_fake_converter,
+    )
+
+    assert "### Attachment 1: one.txt" in md
+    assert "### Attachment 2: two.txt" in md
+    assert "### Attachment 3: three.txt" not in md
+    assert "Skipped 1 remaining attachments: exceeded limit." in md
+
+
+def test_eml_to_markdown_converter_failure_is_fail_closed():
+    raw = _eml_with_attachments(
+        [
+            ("invoice.pdf", b"%PDF-1.4\nfake\n%%EOF", "application", "pdf"),
+        ]
+    )
+
+    def boom_converter(**kwargs):
+        raise RuntimeError("converter crashed")
+
+    md = eml_to_markdown(
+        raw,
+        filename="converter-failure.eml",
+        attachment_converter=boom_converter,
+    )
+
+    assert "# Email: Attachment test" in md
+    assert "### Attachment 1: invoice.pdf" in md
+    assert "- Status: extraction-failed" in md
+    assert "- Extractor: skip-rag-convert" in md
+    assert "attachment extraction failed: converter crashed" in md
+
+
+def test_eml_to_markdown_image_extraction_failure_is_fail_closed(monkeypatch):
+    def boom_post(*args, **kwargs):
+        raise ConnectionError("model unavailable")
+
+    monkeypatch.setattr(email_module.requests, "post", boom_post)
+    raw = _eml_with_attachments(
+        [
+            ("screenshot.png", b"image bytes", "image", "png"),
+        ]
+    )
+
+    md = eml_to_markdown(raw, filename="image-failure.eml")
+
+    assert "# Email: Attachment test" in md
+    assert "### Attachment 1: screenshot.png" in md
+    assert "- Status: extraction-failed" in md
+    assert "model unavailable" in md
+
+
 def test_email_module_import_does_not_require_beautifulsoup(monkeypatch):
     original_import = builtins.__import__
     original_module = sys.modules.pop("open_webui.skiprag.email", None)
@@ -391,7 +668,16 @@ def test_eml_to_markdown_ignores_inline_image_without_filename():
     assert "image/png" not in md
 
 
-def test_eml_to_markdown_lists_inline_image_with_filename_as_attachment_metadata():
+def test_eml_to_markdown_lists_inline_image_with_filename_as_attachment_metadata(monkeypatch):
+    monkeypatch.setattr(
+        email_module,
+        "_extract_image_via_task_model",
+        lambda fb, fn: (
+            "- Status: extraction-failed\n"
+            "- Warning: task model image extraction failed: unavailable"
+        ),
+    )
+
     raw = (
         b"From: Alice <alice@example.com>\r\n"
         b"To: Bob <bob@example.com>\r\n"
@@ -420,7 +706,9 @@ def test_eml_to_markdown_lists_inline_image_with_filename_as_attachment_metadata
     assert "### Attachment 1: logo.png" in md
     assert "- Content-Type: image/png" in md
     assert "- Disposition: inline" in md
-    assert "- Status: metadata-only" in md
+    assert "- Status: extraction-failed" in md
+    assert "- Extractor: task-model-vision" in md
+    assert "task model image extraction failed: unavailable" in md
 
 
 def test_eml_to_markdown_attachment_decode_failure_is_metadata_only(monkeypatch):
@@ -447,13 +735,13 @@ def test_eml_to_markdown_attachment_decode_failure_is_metadata_only(monkeypatch)
     def boom(_part):
         raise ValueError("payload decode failed")
 
-    monkeypatch.setattr("open_webui.skiprag.email._decoded_payload_size", boom)
+    monkeypatch.setattr("open_webui.skiprag.email._decoded_attachment_bytes", boom)
 
     md = eml_to_markdown(raw, filename="broken-attachment.eml")
 
     assert md
     assert "### Attachment 1: broken.bin" in md
     assert "- Size: 0 bytes" in md
-    assert "- Status: metadata-only" in md
+    assert "- Status: extraction-failed" in md
     assert "## Parse Warnings" in md
     assert "payload decode failed" in md
