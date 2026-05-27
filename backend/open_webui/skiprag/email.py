@@ -59,7 +59,6 @@ _IMAGE_MIME_BY_EXT = {
     "tif": "image/tiff",
     "tiff": "image/tiff",
 }
-_IMAGE_EXTRACTION_FAILED_PREFIX = "- Status: extraction-failed"
 
 _DEFAULT_MAX_ATTACHMENTS = 10
 _DEFAULT_MAX_ATTACHMENT_BYTES = 25_000_000
@@ -351,7 +350,8 @@ def _image_payload_and_mime(file_bytes: bytes, filename: str) -> tuple[bytes, st
     return file_bytes, _IMAGE_MIME_BY_EXT.get(ext, "application/octet-stream")
 
 
-def _extract_image_via_task_model(file_bytes: bytes, filename: str) -> str:
+def _extract_image_via_task_model(file_bytes: bytes, filename: str) -> tuple[bool, str]:
+    """Return (success, extracted content or warning) for an image attachment."""
     try:
         api_base = os.environ.get(
             "SKIP_RAG_EXTRACTOR_API_BASE",
@@ -401,11 +401,11 @@ def _extract_image_via_task_model(file_bytes: bytes, filename: str) -> str:
         result = resp.json()
         content = result["choices"][0]["message"]["content"]
         if isinstance(content, str) and content.strip():
-            return content.strip()
-        return "unreadable"
+            return True, content.strip()
+        return True, "unreadable"
     except Exception as exc:  # noqa: BLE001 - image extraction must fail closed
         reason = _sanitize_display(exc, fallback=exc.__class__.__name__)
-        return f"{_IMAGE_EXTRACTION_FAILED_PREFIX}\n" f"- Warning: task model image extraction failed: {reason}"
+        return False, f"Warning: task model image extraction failed: {reason}"
 
 
 def _convert_attachment_to_markdown(
@@ -414,9 +414,10 @@ def _convert_attachment_to_markdown(
     filename: str,
     request,
     attachment_converter,
-) -> str:
+) -> tuple[bool, str]:
+    """Return (success, extracted markdown or warning) for a document attachment."""
     if attachment_converter is None:
-        return "- Status: extraction-failed\n- Warning: attachment converter unavailable"
+        return False, "Warning: attachment converter unavailable"
 
     try:
         extracted = attachment_converter(
@@ -425,11 +426,11 @@ def _convert_attachment_to_markdown(
             request=request,
         )
         if isinstance(extracted, str):
-            return extracted
-        return str(extracted or "")
+            return True, extracted
+        return True, str(extracted or "")
     except Exception as exc:  # noqa: BLE001 - attachment conversion must fail closed
         reason = _sanitize_display(exc, fallback=exc.__class__.__name__)
-        return f"- Status: extraction-failed\n- Warning: attachment extraction failed: {reason}"
+        return False, f"Warning: attachment extraction failed: {reason}"
 
 
 def _attachment_part_lines(
@@ -479,10 +480,14 @@ def _attachment_part_lines(
             0,
         )
 
+    # Note: Degraded/failed extraction results are intentionally NOT cached.
+    # This ensures that a transient sidecar/model outage does not permanently
+    # poison future skip-rag turns for the same .eml file. The cache write
+    # happens at the convert.py level for the entire .eml output, which only
+    # occurs when the full conversion succeeds without degraded fallback.
     if ext in _IMAGE_ATTACHMENT_EXTS:
-        extracted = _extract_image_via_task_model(part_bytes, filename)
-        extraction_failed = extracted.startswith(_IMAGE_EXTRACTION_FAILED_PREFIX)
-        status = "extraction-failed" if extraction_failed else "extracted"
+        success, extracted = _extract_image_via_task_model(part_bytes, filename)
+        status = "extracted" if success else "extraction-failed"
         lines = _attachment_metadata_lines(
             **base_kwargs,
             status=status,
@@ -490,14 +495,13 @@ def _attachment_part_lines(
         )
         lines.extend(["", "#### Image OCR / Description", ""])
     else:
-        extracted = _convert_attachment_to_markdown(
+        success, extracted = _convert_attachment_to_markdown(
             part_bytes=part_bytes,
             filename=filename,
             request=request,
             attachment_converter=attachment_converter,
         )
-        extraction_failed = extracted.startswith("- Status: extraction-failed")
-        status = "extraction-failed" if extraction_failed else "extracted"
+        status = "extracted" if success else "extraction-failed"
         lines = _attachment_metadata_lines(
             **base_kwargs,
             status=status,
