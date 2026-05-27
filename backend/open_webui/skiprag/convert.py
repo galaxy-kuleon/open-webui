@@ -30,7 +30,6 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Union
 
 import requests
 import tiktoken
@@ -72,13 +71,14 @@ PLAINTEXT_EXTS: frozenset[str] = frozenset({'md', 'txt'})
 # ---------------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------------
-
 def _ensure_cache_dir() -> None:
     os.makedirs(CACHE_DIR, exist_ok=True)
 
 
 def _cache_key(raw_bytes: bytes, ext: str) -> str:
     digest = hashlib.sha256(raw_bytes).hexdigest()
+    if ext == 'eml':
+        return f'{digest}.{ext}.attach-v1.md'
     return f'{digest}.{ext}.md'
 
 
@@ -104,7 +104,6 @@ def _cache_write(key: str, text: str) -> None:
 # ---------------------------------------------------------------------------
 # Soffice conversion
 # ---------------------------------------------------------------------------
-
 def _soffice_convert(file_bytes: bytes, filename: str, target_ext: str) -> bytes:
     """
     POST file bytes to the soffice sidecar and return the converted OOXML bytes.
@@ -123,12 +122,13 @@ def _soffice_convert(file_bytes: bytes, filename: str, target_ext: str) -> bytes
 # ---------------------------------------------------------------------------
 # Docling conversion
 # ---------------------------------------------------------------------------
-
 def _count_pdf_pages(file_bytes: bytes) -> int:
     """Return page count for a PDF given its bytes; 1 on any error."""
     try:
         import io
+
         from pypdf import PdfReader
+
         reader = PdfReader(io.BytesIO(file_bytes))
         return max(1, len(reader.pages))
     except Exception:
@@ -167,7 +167,6 @@ def _docling_convert(file_bytes: bytes, filename: str, ext: str) -> str:
 # ---------------------------------------------------------------------------
 # Fallback via OWUI Loader chain
 # ---------------------------------------------------------------------------
-
 def _fallback_loader(file_bytes: bytes, filename: str, request=None) -> str:
     """
     Use OWUI's existing Loader chain to extract text when soffice/docling fails.
@@ -205,11 +204,25 @@ def _fallback_loader(file_bytes: bytes, filename: str, request=None) -> str:
 # ---------------------------------------------------------------------------
 # Main conversion entry point
 # ---------------------------------------------------------------------------
+def _resolve_file_input(
+    file_bytes_or_path: bytes | str | os.PathLike | None,
+    file_bytes: bytes | None,
+    filename: str,
+) -> bytes | str | os.PathLike:
+    if file_bytes is not None:
+        return file_bytes
+    if file_bytes_or_path is None:
+        log.error('skip-rag: no file bytes or path provided for %s', filename)
+        return b''
+    return file_bytes_or_path
+
 
 def convert_to_markdown(
-    file_bytes_or_path: Union[bytes, str, os.PathLike],
-    filename: str,
+    file_bytes_or_path: bytes | str | os.PathLike | None = None,
+    filename: str = '',
     request=None,
+    *,
+    file_bytes: bytes | None = None,
 ) -> str:
     """
     Convert a file to markdown.
@@ -218,6 +231,8 @@ def convert_to_markdown(
     ----------
     file_bytes_or_path:
         Either raw file bytes or a filesystem path to the file.
+    file_bytes:
+        Keyword alias for raw file bytes, used by `.eml` attachment extraction.
     filename:
         Original filename (used for extension routing and cache key).
     request:
@@ -229,6 +244,8 @@ def convert_to_markdown(
     str
         Markdown text.  Never raises; on total failure returns ''.
     """
+    file_bytes_or_path = _resolve_file_input(file_bytes_or_path, file_bytes, filename)
+
     # Resolve to bytes
     if isinstance(file_bytes_or_path, (str, os.PathLike)):
         try:

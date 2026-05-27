@@ -8,16 +8,64 @@ an empty string.
 
 from __future__ import annotations
 
+import base64
+import io
+import os
 import re
 from email import policy
 from email.message import EmailMessage, Message
 from email.parser import BytesParser
 from typing import cast
 
+import requests
+
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WHITESPACE_RE = re.compile(r"[ \t\r\n]+")
 _MARKDOWN_LINK_CHARS_RE = re.compile(r"[\[\]()<>]")
 _MAX_DISPLAY_CHARS = 300
+
+_CONVERTIBLE_ATTACHMENT_EXTS = frozenset(
+    {
+        "pdf",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+        "txt",
+        "md",
+    }
+)
+_IMAGE_ATTACHMENT_EXTS = frozenset(
+    {
+        "png",
+        "jpg",
+        "jpeg",
+        "webp",
+        "gif",
+        "bmp",
+        "tif",
+        "tiff",
+    }
+)
+_IMAGE_MIME_BY_EXT = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "gif": "image/gif",
+    "bmp": "image/bmp",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+}
+_IMAGE_EXTRACTION_FAILED_PREFIX = "- Status: extraction-failed"
+
+_DEFAULT_MAX_ATTACHMENTS = 10
+_DEFAULT_MAX_ATTACHMENT_BYTES = 25_000_000
+_DEFAULT_MAX_TOTAL_ATTACHMENT_BYTES = 50_000_000
+_DEFAULT_MAX_ATTACHMENT_CHARS = 50_000
+_DEFAULT_MAX_TOTAL_ATTACHMENT_CHARS = 150_000
 
 
 def _sanitize_display(value: object, *, fallback: str = "") -> str:
@@ -48,6 +96,42 @@ def _safe_attachment_filename(filename: str | None, index: int) -> str:
         cleaned = cleaned.replace("://", "").replace("/", "")
     cleaned = cleaned.replace("\\", "/").split("/")[-1].strip()
     return _sanitize_display(cleaned, fallback=fallback)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, value)
+
+
+def _attachment_limits() -> dict[str, int]:
+    return {
+        "max_attachments": _env_int(
+            "SKIP_RAG_EMAIL_MAX_ATTACHMENTS",
+            _DEFAULT_MAX_ATTACHMENTS,
+        ),
+        "max_attachment_bytes": _env_int(
+            "SKIP_RAG_EMAIL_MAX_ATTACHMENT_BYTES",
+            _DEFAULT_MAX_ATTACHMENT_BYTES,
+        ),
+        "max_total_attachment_bytes": _env_int(
+            "SKIP_RAG_EMAIL_MAX_TOTAL_ATTACHMENT_BYTES",
+            _DEFAULT_MAX_TOTAL_ATTACHMENT_BYTES,
+        ),
+        "max_attachment_chars": _env_int(
+            "SKIP_RAG_EMAIL_MAX_ATTACHMENT_CHARS",
+            _DEFAULT_MAX_ATTACHMENT_CHARS,
+        ),
+        "max_total_attachment_chars": _env_int(
+            "SKIP_RAG_EMAIL_MAX_TOTAL_ATTACHMENT_CHARS",
+            _DEFAULT_MAX_TOTAL_ATTACHMENT_CHARS,
+        ),
+    }
 
 
 def _message_header(msg: Message, name: str) -> str:
@@ -167,9 +251,16 @@ def _extract_html_body(msg: Message) -> str:
     return ""
 
 
-def _decoded_payload_size(part: Message) -> int:
-    payload = part.get_payload(decode=True) or b""
-    return len(cast(bytes, payload))
+def _decoded_attachment_bytes(part: Message) -> bytes:
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        raw_payload = part.get_payload()
+        if isinstance(raw_payload, str):
+            return raw_payload.encode("utf-8", errors="replace")
+        return b""
+    if isinstance(payload, bytes):
+        return payload
+    return bytes(cast(bytearray, payload))
 
 
 def _is_attachment_part(part: Message) -> bool:
@@ -179,37 +270,319 @@ def _is_attachment_part(part: Message) -> bool:
     return disposition == "attachment" or bool(_part_filename(part))
 
 
-def _extract_attachment_metadata(msg: Message, warnings: list[str]) -> list[list[str]]:
-    """Return Markdown lines for metadata-only attachment entries."""
-    attachment_lines: list[list[str]] = []
-    parts = msg.walk() if msg.is_multipart() else [msg]
+def _attachment_ext(filename: str) -> str:
+    return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
-    for part in parts:
-        if not _is_attachment_part(part):
-            continue
+
+def _attachment_metadata_lines(
+    *,
+    index: int,
+    filename: str,
+    content_type: str,
+    size: int,
+    disposition: str,
+    status: str,
+    extractor: str | None = None,
+    warning: str | None = None,
+) -> list[str]:
+    lines = [
+        f"### Attachment {index}: {filename}",
+        "",
+        f"- Content-Type: {content_type}",
+        f"- Size: {size} bytes",
+        f"- Disposition: {disposition}",
+        f"- Status: {status}",
+    ]
+    if extractor:
+        lines.append(f"- Extractor: {extractor}")
+    if warning:
+        lines.append(f"- Warning: {_sanitize_display(warning)}")
+    return lines
+
+
+def _truncate_extracted_content(
+    text: str,
+    *,
+    per_attachment_limit: int,
+    total_remaining: int,
+) -> tuple[str, int]:
+    if not text:
+        return "", 0
+
+    limit = min(per_attachment_limit, total_remaining)
+    if limit <= 0:
+        return (
+            "[...truncated: total email attachment extraction limit reached...]",
+            0,
+        )
+
+    original_length = len(text)
+    truncated = text[:limit]
+    notices: list[str] = []
+    if original_length > per_attachment_limit and limit == per_attachment_limit:
+        notices.append(f"[...truncated: attachment content exceeded {per_attachment_limit} characters...]")
+    if original_length > total_remaining:
+        notices.append(
+            f"[...truncated: total email attachment extraction limit exceeded "
+            f"{total_remaining} remaining characters...]"
+        )
+
+    if notices:
+        truncated = truncated.rstrip() + "\n\n" + "\n".join(notices)
+
+    return truncated, min(original_length, limit)
+
+
+def _first_gif_frame_as_png(file_bytes: bytes) -> bytes:
+    from PIL import Image  # type: ignore[import-untyped]
+
+    with Image.open(io.BytesIO(file_bytes)) as image:
+        image.seek(0)
+        frame = image.convert("RGBA")
+        output = io.BytesIO()
+        frame.save(output, format="PNG")
+        return output.getvalue()
+
+
+def _image_payload_and_mime(file_bytes: bytes, filename: str) -> tuple[bytes, str]:
+    ext = _attachment_ext(filename)
+    if ext == "gif":
+        return _first_gif_frame_as_png(file_bytes), "image/png"
+    return file_bytes, _IMAGE_MIME_BY_EXT.get(ext, "application/octet-stream")
+
+
+def _extract_image_via_task_model(file_bytes: bytes, filename: str) -> str:
+    try:
+        api_base = os.environ.get(
+            "SKIP_RAG_EXTRACTOR_API_BASE",
+            "http://host.docker.internal:11234/v1",
+        ).rstrip("/")
+        model = os.environ.get("TASK_MODEL", "qwen3.5-4b")
+
+        image_bytes, mime = _image_payload_and_mime(file_bytes, filename)
+        b64 = base64.b64encode(image_bytes).decode()
+
+        system_prompt = (
+            "You are analyzing an email attachment image for skip-RAG context. "
+            "First transcribe any visible text exactly (OCR). "
+            "Then describe tables, receipts, charts, UI screenshots, stamps, "
+            "signatures, and important visual details. "
+            "Do not invent fields that are not visible. "
+            "If unreadable, say unreadable."
+        )
+
+        resp = requests.post(
+            f"{api_base}/chat/completions",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": ("Analyze this email attachment image: " f"{_sanitize_display(filename)}"),
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime};base64,{b64}",
+                                },
+                            },
+                        ],
+                    },
+                ],
+                "max_tokens": 2000,
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        content = result["choices"][0]["message"]["content"]
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        return "unreadable"
+    except Exception as exc:  # noqa: BLE001 - image extraction must fail closed
+        reason = _sanitize_display(exc, fallback=exc.__class__.__name__)
+        return f"{_IMAGE_EXTRACTION_FAILED_PREFIX}\n" f"- Warning: task model image extraction failed: {reason}"
+
+
+def _convert_attachment_to_markdown(
+    *,
+    part_bytes: bytes,
+    filename: str,
+    request,
+    attachment_converter,
+) -> str:
+    if attachment_converter is None:
+        return "- Status: extraction-failed\n- Warning: attachment converter unavailable"
+
+    try:
+        extracted = attachment_converter(
+            file_bytes=part_bytes,
+            filename=filename,
+            request=request,
+        )
+        if isinstance(extracted, str):
+            return extracted
+        return str(extracted or "")
+    except Exception as exc:  # noqa: BLE001 - attachment conversion must fail closed
+        reason = _sanitize_display(exc, fallback=exc.__class__.__name__)
+        return f"- Status: extraction-failed\n- Warning: attachment extraction failed: {reason}"
+
+
+def _attachment_part_lines(
+    *,
+    index: int,
+    part: Message,
+    part_bytes: bytes,
+    request,
+    attachment_converter,
+    total_chars_used: int,
+    limits: dict[str, int],
+) -> tuple[list[str], int]:
+    filename = _safe_attachment_filename(_part_filename(part), index)
+    content_type = _sanitize_display(
+        part.get_content_type(),
+        fallback="application/octet-stream",
+    )
+    disposition = _sanitize_display(
+        part.get_content_disposition(),
+        fallback="unspecified",
+    )
+    size = len(part_bytes)
+
+    base_kwargs = {
+        "index": index,
+        "filename": filename,
+        "content_type": content_type,
+        "size": size,
+        "disposition": disposition,
+    }
+
+    if size > limits["max_attachment_bytes"]:
+        warning = f"attachment size {size} bytes exceeds " f"{limits['max_attachment_bytes']} byte limit"
+        return (
+            _attachment_metadata_lines(
+                **base_kwargs,
+                status="skipped-oversized",
+                warning=warning,
+            ),
+            0,
+        )
+
+    ext = _attachment_ext(filename)
+    if ext not in _CONVERTIBLE_ATTACHMENT_EXTS and ext not in _IMAGE_ATTACHMENT_EXTS:
+        return (
+            _attachment_metadata_lines(**base_kwargs, status="unsupported-type"),
+            0,
+        )
+
+    if ext in _IMAGE_ATTACHMENT_EXTS:
+        extracted = _extract_image_via_task_model(part_bytes, filename)
+        extraction_failed = extracted.startswith(_IMAGE_EXTRACTION_FAILED_PREFIX)
+        status = "extraction-failed" if extraction_failed else "extracted"
+        lines = _attachment_metadata_lines(
+            **base_kwargs,
+            status=status,
+            extractor="task-model-vision",
+        )
+        lines.extend(["", "#### Image OCR / Description", ""])
+    else:
+        extracted = _convert_attachment_to_markdown(
+            part_bytes=part_bytes,
+            filename=filename,
+            request=request,
+            attachment_converter=attachment_converter,
+        )
+        extraction_failed = extracted.startswith("- Status: extraction-failed")
+        status = "extraction-failed" if extraction_failed else "extracted"
+        lines = _attachment_metadata_lines(
+            **base_kwargs,
+            status=status,
+            extractor="skip-rag-convert",
+        )
+        lines.extend(["", "#### Extracted Content", ""])
+
+    content, chars_used = _truncate_extracted_content(
+        extracted,
+        per_attachment_limit=limits["max_attachment_chars"],
+        total_remaining=limits["max_total_attachment_chars"] - total_chars_used,
+    )
+    lines.append(content or "[No attachment content extracted]")
+    return lines, chars_used
+
+
+def _extract_attachments(
+    msg: Message,
+    warnings: list[str],
+    *,
+    request,
+    attachment_converter,
+) -> list[list[str]]:
+    """Return Markdown lines for attachment entries with safe extraction."""
+    parts = [part for part in (msg.walk() if msg.is_multipart() else [msg]) if _is_attachment_part(part)]
+    attachment_lines: list[list[str]] = []
+    limits = _attachment_limits()
+    total_bytes = 0
+    total_chars = 0
+
+    for raw_index, part in enumerate(parts, start=1):
+        if len(attachment_lines) >= limits["max_attachments"]:
+            remaining = len(parts) - len(attachment_lines)
+            warnings.append(f"Skipped {remaining} remaining attachments: exceeded limit.")
+            break
+
+        if total_chars >= limits["max_total_attachment_chars"]:
+            remaining = len(parts) - len(attachment_lines)
+            warnings.append(f"Skipped {remaining} remaining attachments: exceeded limit.")
+            break
 
         index = len(attachment_lines) + 1
         filename = _safe_attachment_filename(_part_filename(part), index)
-        content_type = _sanitize_display(
-            part.get_content_type(), fallback="application/octet-stream"
-        )
-        disposition = _sanitize_display(part.get_content_disposition(), fallback="unspecified")
-
         try:
-            size = _decoded_payload_size(part)
+            part_bytes = _decoded_attachment_bytes(part)
         except Exception as exc:  # noqa: BLE001 - keep malformed attachments fail-closed
-            size = 0
             reason = _sanitize_display(exc, fallback=exc.__class__.__name__)
             warnings.append(f"Failed to decode attachment payload for {filename}: {reason}")
+            attachment_lines.append(
+                _attachment_metadata_lines(
+                    index=index,
+                    filename=filename,
+                    content_type=_sanitize_display(
+                        part.get_content_type(),
+                        fallback="application/octet-stream",
+                    ),
+                    size=0,
+                    disposition=_sanitize_display(
+                        part.get_content_disposition(),
+                        fallback="unspecified",
+                    ),
+                    status="extraction-failed",
+                    warning=f"failed to decode attachment payload: {reason}",
+                )
+            )
+            continue
 
-        attachment_lines.append([
-            f"### Attachment {index}: {filename}",
-            "",
-            f"- Content-Type: {content_type}",
-            f"- Size: {size} bytes",
-            f"- Disposition: {disposition}",
-            "- Status: metadata-only",
-        ])
+        size = len(part_bytes)
+        if total_bytes + size > limits["max_total_attachment_bytes"]:
+            remaining = len(parts) - raw_index + 1
+            warnings.append(f"Skipped {remaining} remaining attachments: exceeded limit.")
+            break
+
+        total_bytes += size
+        lines, chars_used = _attachment_part_lines(
+            index=index,
+            part=part,
+            part_bytes=part_bytes,
+            request=request,
+            attachment_converter=attachment_converter,
+            total_chars_used=total_chars,
+            limits=limits,
+        )
+        total_chars += chars_used
+        attachment_lines.append(lines)
 
     return attachment_lines
 
@@ -234,12 +607,9 @@ def eml_to_markdown(
 ) -> str:
     """Convert a single `.eml` message to Markdown for skip-rag injection.
 
-    `request` and `attachment_converter` are accepted for the later attachment
-    extraction phase.  They are intentionally unused in the basic metadata/body
-    parser implemented here.
+    `attachment_converter` is expected to be skip-rag's convert_to_markdown
+    entry point and is used for supported document/text attachments.
     """
-    del request, attachment_converter
-
     try:
         msg = BytesParser(policy=policy.default).parsebytes(raw_bytes)
         warnings: list[str] = []
@@ -274,14 +644,21 @@ def eml_to_markdown(
             if value:
                 lines.append(f"- {label}: {value}")
 
-        lines.extend([
-            "",
-            "## Body",
-            "",
-            body,
-        ])
+        lines.extend(
+            [
+                "",
+                "## Body",
+                "",
+                body,
+            ]
+        )
 
-        attachments = _extract_attachment_metadata(msg, warnings)
+        attachments = _extract_attachments(
+            msg,
+            warnings,
+            request=request,
+            attachment_converter=attachment_converter,
+        )
         if attachments:
             lines.extend(["", "## Attachments", ""])
             for attachment in attachments:
