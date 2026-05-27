@@ -1,3 +1,5 @@
+from email.message import EmailMessage
+
 import pytest
 
 from open_webui.skiprag import convert as convert_module
@@ -5,6 +7,21 @@ from open_webui.skiprag import convert as convert_module
 
 def _fail_wrong_branch(*args, **kwargs):
     raise AssertionError(".eml conversion must not use docling or fallback loader")
+
+
+def _eml_with_text_attachment():
+    msg = EmailMessage()
+    msg["From"] = "Alice <alice@example.com>"
+    msg["To"] = "Bob <bob@example.com>"
+    msg["Subject"] = "Cached attachment"
+    msg.set_content("Plain body.")
+    msg.add_attachment(
+        b"attachment text",
+        maintype="text",
+        subtype="plain",
+        filename="note.txt",
+    )
+    return msg.as_bytes()
 
 
 @pytest.fixture(autouse=True)
@@ -143,3 +160,42 @@ def test_convert_to_markdown_uses_cache_for_repeated_eml_bytes(monkeypatch):
     assert first == "# Cached email parser output\n"
     assert second == "# Cached email parser output\n"
     assert calls == [(b"Subject: Hi\r\n\r\nBody", "sample.eml")]
+
+
+def test_eml_cache_key_uses_attach_v1_variant():
+    key = convert_module._cache_key(b"test content", "eml")
+
+    assert key.endswith(".eml.attach-v1.md")
+    assert not key.endswith(".eml.md")
+
+
+def test_non_eml_cache_key_unchanged():
+    key = convert_module._cache_key(b"test content", "pdf")
+
+    assert key.endswith(".pdf.md")
+    assert "attach-v1" not in key
+
+
+def test_eml_conversion_caches_with_attach_v1_suffix(monkeypatch, tmp_path):
+    monkeypatch.setattr(convert_module, "CACHE_DIR", str(tmp_path))
+    raw = _eml_with_text_attachment()
+
+    first = convert_module.convert_to_markdown(raw, "cached.eml")
+    cache_files = list(tmp_path.iterdir())
+
+    assert "### Attachment 1: note.txt" in first
+    assert "attachment text" in first
+    assert len(cache_files) == 1
+    assert cache_files[0].name.endswith(".eml.attach-v1.md")
+
+    def fail_if_reparsed(*args, **kwargs):
+        raise AssertionError("second conversion should hit the .eml attach-v1 cache")
+
+    monkeypatch.setattr(
+        "open_webui.skiprag.email.eml_to_markdown",
+        fail_if_reparsed,
+    )
+
+    second = convert_module.convert_to_markdown(raw, "cached.eml")
+
+    assert second == first
