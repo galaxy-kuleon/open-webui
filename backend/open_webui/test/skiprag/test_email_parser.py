@@ -99,6 +99,40 @@ def test_eml_to_markdown_sanitizes_header_control_characters():
     assert "# Email: Safe subject with control chars" in md
 
 
+def test_eml_to_markdown_strips_bidi_chars_from_subject():
+    raw = (
+        b"From: Mallory <mallory@example.com>\r\n"
+        b"To: Bob <bob@example.com>\r\n"
+        b"Subject: Quarterly\xe2\x80\xaeexe.\xe2\x80\xacpdf\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        b"Hello.\r\n"
+    )
+
+    md = eml_to_markdown(raw, filename="subject-bidi.eml")
+
+    assert "\u202e" not in md
+    assert "\u202c" not in md
+    assert "# Email: Quarterlyexe.pdf" in md
+
+
+def test_eml_to_markdown_strips_bidi_chars_from_body():
+    raw = (
+        b"From: Mallory <mallory@example.com>\r\n"
+        b"To: Bob <bob@example.com>\r\n"
+        b"Subject: Body Bidi\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        b"Open report\xe2\x80\xaeexe.\xe2\x80\xacpdf now.\r\n"
+    )
+
+    md = eml_to_markdown(raw, filename="body-bidi.eml")
+
+    assert "\u202e" not in md
+    assert "\u202c" not in md
+    assert "Open reportexe.pdf now." in md
+
+
 def test_eml_to_markdown_malformed_input_returns_non_empty_warning(monkeypatch):
     def boom(*args, **kwargs):
         raise ValueError("parser exploded")

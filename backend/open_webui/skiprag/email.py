@@ -168,6 +168,7 @@ def _part_text(part: Message) -> str:
 
 def _normalize_body(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _BIDI_RE.sub("", text)
     text = _CONTROL_CHARS_RE.sub("", text)
     return text.strip()
 
