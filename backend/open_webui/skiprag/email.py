@@ -20,6 +20,7 @@ from typing import cast
 import requests
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_BIDI_RE = re.compile(r"[\u202a-\u202e\u2066-\u2069\u200f\u061c]")
 _WHITESPACE_RE = re.compile(r"[ \t\r\n]+")
 _MARKDOWN_LINK_CHARS_RE = re.compile(r"[\[\]()<>]")
 _MAX_DISPLAY_CHARS = 300
@@ -70,10 +71,10 @@ _DEFAULT_MAX_TOTAL_ATTACHMENT_CHARS = 150_000
 def _sanitize_display(value: object, *, fallback: str = "") -> str:
     """Return a single-line, bounded string safe for Markdown metadata."""
     text = str(value or "")
+    text = _BIDI_RE.sub("", text)
     text = _CONTROL_CHARS_RE.sub("", text)
     text = _WHITESPACE_RE.sub(" ", text).strip()
-    # Avoid accidentally opening/closing Markdown fences in metadata.
-    text = text.replace("```", "''' ")
+    text = text.replace("`", "")
     if len(text) > _MAX_DISPLAY_CHARS:
         text = text[: _MAX_DISPLAY_CHARS - 1].rstrip() + "…"
     return text or fallback

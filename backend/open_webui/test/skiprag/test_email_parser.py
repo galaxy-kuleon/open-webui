@@ -229,6 +229,34 @@ def test_eml_to_markdown_sanitizes_attachment_path_filename(filename, unsafe_fra
     assert unsafe_fragment not in md
 
 
+def test_eml_to_markdown_strips_bidi_override_chars():
+    raw = (
+        b"From: Alice <alice@example.com>\r\n"
+        b"To: Bob <bob@example.com>\r\n"
+        b"Subject: Bidi test\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b"Content-Type: multipart/mixed; boundary=MIXED\r\n"
+        b"\r\n"
+        b"--MIXED\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        b"Body.\r\n"
+        b"--MIXED\r\n"
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename=\"safe\xe2\x80\xaexe.\xe2\x80\xacpdf\"\r\n"
+        b"Content-Transfer-Encoding: base64\r\n"
+        b"\r\n"
+        b"ZmlsZQ==\r\n"
+        b"--MIXED--\r\n"
+    )
+
+    md = eml_to_markdown(raw, filename="bidi.eml")
+
+    assert "\u202e" not in md
+    assert "\u202c" not in md
+    assert "### Attachment 1: safexe.pdf" in md
+
+
 def test_eml_to_markdown_sanitizes_attachment_markdown_link_filename():
     raw = (
         b"From: Alice <alice@example.com>\r\n"
