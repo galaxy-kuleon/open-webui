@@ -12,6 +12,7 @@ import shutil
 import sys
 import time
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import uuid4
@@ -3028,6 +3029,36 @@ async def serve_cache_file(
     if not inline_safe:
         headers['Content-Disposition'] = f'attachment; filename="{os.path.basename(file_path)}"'
     return FileResponse(file_path, headers=headers)
+
+
+@app.get('/exports/{path:path}')
+async def serve_export_file(
+    path: str,
+    user=Depends(get_verified_user),
+):
+    """Serve files from /handoff/exports/ for download.
+    
+    This route allows the hermes agent to place any file (docx, pdf, zip, md, etc.)
+    in /handoff/exports/ and provide relative download links in chat responses.
+    Example: [Download file.docx](/exports/user_hash/artifact_id/file.docx)
+    """
+    # /handoff/exports is a shared volume between hermes and owui containers
+    exports_dir = Path('/handoff/exports')
+    file_path = (exports_dir / path).resolve()
+    
+    # prevent path traversal
+    if not str(file_path).startswith(str(exports_dir.resolve())):
+        raise HTTPException(status_code=404, detail='File not found')
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail='File not found')
+
+    mime, _ = mimetypes.guess_type(str(file_path))
+    # PDF can be viewed inline in browser; other types force download
+    inline_safe = mime in {'application/pdf'} or (mime and mime.split('/', 1)[0] in {'image', 'audio', 'video'})
+    headers = {'X-Content-Type-Options': 'nosniff'}
+    if not inline_safe:
+        headers['Content-Disposition'] = f'attachment; filename="{file_path.name}"'
+    return FileResponse(file_path, headers=headers, media_type=mime or 'application/octet-stream')
 
 
 def swagger_ui_html(*args, **kwargs):
