@@ -2949,7 +2949,7 @@ async def serve_cache_file(
     return FileResponse(file_path, headers=headers)
 
 
-@app.get('/exports/{path:path}')
+@app.get('/api/exports/{path:path}')
 async def serve_export_file(
     path: str,
     user=Depends(get_verified_user),
@@ -2958,7 +2958,7 @@ async def serve_export_file(
     
     This route allows the hermes agent to place any file (docx, pdf, zip, md, etc.)
     in /handoff/exports/ and provide relative download links in chat responses.
-    Example: [Download file.docx](/exports/user_hash/artifact_id/file.docx)
+    Example: [Download file.docx](/api/exports/user_hash/artifact_id/file.docx)
     """
     # /handoff/exports is a shared volume between hermes and owui containers
     exports_dir = Path('/handoff/exports')
