@@ -1,11 +1,17 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 
-	import { createEventDispatcher, onMount, getContext } from 'svelte';
+	import { createEventDispatcher, onDestroy, onMount, getContext } from 'svelte';
 	import { config, models, tags as _tags } from '$lib/stores';
 	import Tags from '$lib/components/common/Tags.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
 	import ChevronRight from '$lib/components/icons/ChevronRight.svelte';
+	import {
+		getFeedbackDialogState,
+		LEGAL_QUALITY_FEEDBACK_CATEGORIES,
+		PRODUCT_FEEDBACK_CATEGORIES
+	} from '$lib/utils/feedback';
+	import type { FeedbackDialogState } from '$lib/utils/feedback';
 
 	const i18n = getContext('i18n');
 
@@ -13,53 +19,31 @@
 
 	export let message;
 	export let show = false;
-
-	let LIKE_REASONS = [
-		'accurate_information',
-		'followed_instructions_perfectly',
-		'showcased_creativity',
-		'positive_attitude',
-		'attention_to_detail',
-		'thorough_explanation',
-		'other'
-	];
-	let DISLIKE_REASONS = [
-		'dont_like_the_style',
-		'too_verbose',
-		'not_helpful',
-		'not_factually_correct',
-		'didnt_fully_follow_instructions',
-		'refused_when_it_shouldnt_have',
-		'being_lazy',
-		'other'
-	];
+	export let saving = false;
+	export let error = '';
 
 	let tags = [];
 
-	let reasons = [];
-	let selectedReason = null;
 	let comment = '';
+	let selectedCategories: string[] = [];
 
 	let detailedRating = null;
 	let selectedModel = null;
-
-	$: if (message?.annotation?.rating === 1) {
-		reasons = LIKE_REASONS;
-	} else if (message?.annotation?.rating === -1) {
-		reasons = DISLIKE_REASONS;
-	}
+	let submitted = false;
+	let feedbackState: FeedbackDialogState = 'idle';
+	let closeTimer: number | null = null;
 
 	$: if (message) {
 		init();
 	}
 
 	const init = () => {
-		if (!selectedReason) {
-			selectedReason = message?.annotation?.reason ?? '';
-		}
-
 		if (!comment) {
 			comment = message?.annotation?.comment ?? '';
+		}
+
+		if (selectedCategories.length === 0) {
+			selectedCategories = [...(message?.annotation?.categories ?? [])];
 		}
 
 		tags = (message?.annotation?.tags ?? []).map((tag) => ({
@@ -70,6 +54,31 @@
 			detailedRating = message?.annotation?.details?.rating ?? null;
 		}
 	};
+
+	$: if (submitted) {
+		const nextFeedbackState = getFeedbackDialogState({
+			submitted,
+			saving,
+			error,
+			currentState: feedbackState
+		});
+
+		if (nextFeedbackState === 'success' && feedbackState !== 'success') {
+			feedbackState = 'success';
+			toast.success($i18n.t('Thanks for your feedback!'));
+			closeTimer = window.setTimeout(() => {
+				show = false;
+			}, 800);
+		} else {
+			feedbackState = nextFeedbackState;
+		}
+	}
+
+	onDestroy(() => {
+		if (closeTimer) {
+			window.clearTimeout(closeTimer);
+		}
+	});
 
 	onMount(() => {
 		if (message?.arena) {
@@ -84,22 +93,27 @@
 
 	const saveHandler = () => {
 		console.log('saveHandler');
-		// if (!selectedReason) {
-		// 	toast.error($i18n.t('Please select a reason'));
-		// 	return;
-		// }
+		submitted = true;
+		feedbackState = 'submitting';
 
 		dispatch('save', {
-			reason: selectedReason,
+			reason: selectedCategories[0] ?? '',
 			comment: comment,
+			free_text: comment,
+			categories: selectedCategories,
 			tags: tags.map((tag) => tag.name),
 			details: {
 				rating: detailedRating
 			}
 		});
+	};
 
-		toast.success($i18n.t('Thanks for your feedback!'));
-		show = false;
+	const toggleCategory = (category: string) => {
+		if (selectedCategories.includes(category)) {
+			selectedCategories = selectedCategories.filter((item) => item !== category);
+		} else {
+			selectedCategories = [...selectedCategories, category];
+		}
 	};
 </script>
 
@@ -163,57 +177,59 @@
 		</div>
 	</div>
 
-	<div>
-		{#if reasons.length > 0}
-			<div class="text-sm mt-1.5 font-medium">{$i18n.t('Why?')}</div>
+	<div class="mt-3">
+		<div class="text-sm font-medium">{$i18n.t('What should we improve?')}</div>
 
-			<div class="flex flex-wrap gap-1.5 text-sm mt-1.5">
-				{#each reasons as reason}
-					<button
-						class="px-3 py-0.5 border border-gray-100/30 dark:border-gray-850/30 hover:bg-gray-50 dark:hover:bg-gray-850 {selectedReason ===
-						reason
-							? 'bg-gray-100 dark:bg-gray-800'
-							: ''} transition rounded-xl"
-						on:click={() => {
-							selectedReason = reason;
-						}}
-					>
-						{#if reason === 'accurate_information'}
-							{$i18n.t('Accurate information')}
-						{:else if reason === 'followed_instructions_perfectly'}
-							{$i18n.t('Followed instructions perfectly')}
-						{:else if reason === 'showcased_creativity'}
-							{$i18n.t('Showcased creativity')}
-						{:else if reason === 'positive_attitude'}
-							{$i18n.t('Positive attitude')}
-						{:else if reason === 'attention_to_detail'}
-							{$i18n.t('Attention to detail')}
-						{:else if reason === 'thorough_explanation'}
-							{$i18n.t('Thorough explanation')}
-						{:else if reason === 'dont_like_the_style'}
-							{$i18n.t("Don't like the style")}
-						{:else if reason === 'too_verbose'}
-							{$i18n.t('Too verbose')}
-						{:else if reason === 'not_helpful'}
-							{$i18n.t('Not helpful')}
-						{:else if reason === 'not_factually_correct'}
-							{$i18n.t('Not factually correct')}
-						{:else if reason === 'didnt_fully_follow_instructions'}
-							{$i18n.t("Didn't fully follow instructions")}
-						{:else if reason === 'refused_when_it_shouldnt_have'}
-							{$i18n.t("Refused when it shouldn't have")}
-						{:else if reason === 'being_lazy'}
-							{$i18n.t('Being lazy')}
-						{:else if reason === 'other'}
-							{$i18n.t('Other')}
-						{:else}
-							{reason}
-						{/if}
-					</button>
-				{/each}
-			</div>
-		{/if}
+		<div class="text-xs text-gray-500 mt-2">{$i18n.t('Product experience')}</div>
+		<div class="flex flex-wrap gap-1.5 text-sm mt-1.5">
+			{#each PRODUCT_FEEDBACK_CATEGORIES as category}
+				<button
+					type="button"
+					class="px-3 py-0.5 border border-gray-100/30 dark:border-gray-850/30 hover:bg-gray-50 dark:hover:bg-gray-850 {selectedCategories.includes(
+						category.key
+					)
+						? 'bg-gray-100 dark:bg-gray-800'
+						: ''} transition rounded-xl"
+					aria-pressed={selectedCategories.includes(category.key)}
+					on:click={() => {
+						toggleCategory(category.key);
+					}}
+				>
+					{$i18n.t(category.label)}
+				</button>
+			{/each}
+		</div>
+
+		<div class="text-xs text-gray-500 mt-2.5">{$i18n.t('Work-product quality')}</div>
+		<div class="flex flex-wrap gap-1.5 text-sm mt-1.5">
+			{#each LEGAL_QUALITY_FEEDBACK_CATEGORIES as category}
+				<button
+					type="button"
+					class="px-3 py-0.5 border border-gray-100/30 dark:border-gray-850/30 hover:bg-gray-50 dark:hover:bg-gray-850 {selectedCategories.includes(
+						category.key
+					)
+						? 'bg-gray-100 dark:bg-gray-800'
+						: ''} transition rounded-xl"
+					aria-pressed={selectedCategories.includes(category.key)}
+					on:click={() => {
+						toggleCategory(category.key);
+					}}
+				>
+					{$i18n.t(category.label)}
+				</button>
+			{/each}
+		</div>
 	</div>
+
+	{#if feedbackState === 'success'}
+		<div class="mt-2 text-xs text-green-600 dark:text-green-400">
+			{$i18n.t('Thanks for your feedback!')}
+		</div>
+	{:else if feedbackState === 'error' && error}
+		<div class="mt-2 text-xs text-red-600 dark:text-red-400">
+			{error}
+		</div>
+	{/if}
 
 	<div class="mt-2">
 		<textarea
@@ -243,14 +259,29 @@
 			/>
 		</div>
 
-		<button
-			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
-			on:click={() => {
-				saveHandler();
-			}}
-		>
-			{$i18n.t('Save')}
-		</button>
+		<div class="flex gap-1.5">
+			<button
+				class="px-3.5 py-1.5 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-850 transition rounded-full disabled:opacity-60"
+				type="button"
+				disabled={saving}
+				on:click={() => {
+					show = false;
+				}}
+			>
+				{$i18n.t('Cancel')}
+			</button>
+
+			<button
+				class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full disabled:cursor-progress disabled:opacity-60"
+				type="button"
+				disabled={saving}
+				on:click={() => {
+					saveHandler();
+				}}
+			>
+				{saving ? $i18n.t('Saving...') : $i18n.t('Save')}
+			</button>
+		</div>
 	</div>
 
 	{#if $config?.features.enable_community_sharing && message?.model}
