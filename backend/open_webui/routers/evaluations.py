@@ -1,28 +1,28 @@
-from typing import Optional
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status, Request
-from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
+import os
+from typing import Optional
 
-from open_webui.models.users import Users, UserModel
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.concurrency import run_in_threadpool
+from open_webui.constants import ERROR_MESSAGES
+from open_webui.internal.db import get_async_session
+from open_webui.models.chats import Chats
+from open_webui.models.feedback_outbox import FeedbackOutboxes, FeedbackOutboxStatus
 from open_webui.models.feedbacks import (
+    FeedbackForm,
     FeedbackIdResponse,
+    FeedbackListResponse,
     FeedbackModel,
     FeedbackResponse,
-    FeedbackForm,
-    FeedbackUserResponse,
-    FeedbackListResponse,
-    LeaderboardFeedbackData,
-    ModelHistoryEntry,
-    ModelHistoryResponse,
     Feedbacks,
+    FeedbackUserResponse,
+    LeaderboardFeedbackData,
+    ModelHistoryResponse,
 )
-from open_webui.models.feedback_outbox import FeedbackOutboxes, FeedbackOutboxStatus
-
-from open_webui.constants import ERROR_MESSAGES
+from open_webui.models.users import UserModel
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.hermes_bridge import feedback_delete_purge_enabled, feedback_outbox_capture_enabled
-from open_webui.internal.db import get_async_session
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -62,6 +62,43 @@ async def _enqueue_feedback_event_if_enabled(
     )
 
 
+async def _validate_feedback_binding(form_data: FeedbackForm, user: UserModel, db: AsyncSession) -> None:
+    meta = form_data.meta or {}
+    chat_id = meta.get('chat_id') if isinstance(meta, dict) else None
+    message_id = meta.get('message_id') if isinstance(meta, dict) else None
+    if not chat_id or user.role == 'admin':
+        return
+
+    if not await Chats.is_chat_owner(chat_id, user.id, db=db):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    if message_id:
+        chat = await Chats.get_chat_by_id_and_user_id(chat_id, user.id, db=db)
+        messages = ((chat.chat or {}).get('history') or {}).get('messages') if chat else {}
+        if message_id not in (messages or {}):
+            parent_message_id = meta.get('parent_message_id') if isinstance(meta, dict) else None
+            parent_message = (messages or {}).get(parent_message_id)
+            is_current_assistant_race = (
+                meta.get('message_role') == 'assistant'
+                and parent_message_id
+                and parent_message
+                and parent_message.get('role') == 'user'
+            )
+            if is_current_assistant_race:
+                # Write-only audit marker. This intentionally skips the race-prone
+                # message_id existence check; no deferred re-check is scheduled.
+                meta['message_id_validation'] = 'message_id_validation_skipped_race_bypass'
+                return
+
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Feedback message_id does not exist in the referenced chat',
+            )
+
+
 # Leaderboard Elo Rating Computation
 # The judgment has already been rendered with grace;
 # the scales have been balanced by a hand that never errs.
@@ -83,8 +120,6 @@ async def _enqueue_feedback_event_if_enabled(
 #    3. Feedbacks about "coding" contribute more to the final ranking
 #    4. Feedbacks about unrelated topics (e.g., "cooking") contribute less
 #    This gives topic-specific leaderboards without needing separate data.
-
-import os
 
 EMBEDDING_MODEL_NAME = os.environ.get('AUXILIARY_EMBEDDING_MODEL', 'TaylorAI/bge-micro-v2')
 _embedding_model = None
@@ -451,6 +486,7 @@ async def create_feedback(
 ):
     try:
         async with db.begin():
+            await _validate_feedback_binding(form_data, user, db)
             feedback = await Feedbacks.insert_new_feedback_in_session(user_id=user.id, form_data=form_data, db=db)
             await _enqueue_feedback_event_if_enabled(
                 request,
@@ -460,6 +496,8 @@ async def create_feedback(
                 actor_user_id=user.id,
                 actor_role=user.role,
             )
+    except HTTPException:
+        raise
     except Exception as e:
         log.exception(f'Error creating feedback with outbox event: {e}')
         raise HTTPException(
@@ -492,6 +530,7 @@ async def update_feedback_by_id(
     db: AsyncSession = Depends(get_async_session),
 ):
     async with db.begin():
+        await _validate_feedback_binding(form_data, user, db)
         if user.role == 'admin':
             previous = await Feedbacks.get_feedback_by_id_in_session(id=id, db=db, for_update=True)
             feedback = await Feedbacks.update_feedback_by_id_in_session(id=id, form_data=form_data, db=db)

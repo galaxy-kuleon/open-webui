@@ -36,6 +36,7 @@
 		removeDetails,
 		removeAllDetails
 	} from '$lib/utils';
+	import { extractFeedbackArtifacts, getFeedbackRequestErrorMessage } from '$lib/utils/feedback';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import equal from 'fast-deep-equal';
 
@@ -69,7 +70,15 @@
 		id: string;
 		model: string;
 		content: string;
-		files?: { type: string; url: string }[];
+		files?: {
+			id?: string;
+			file_id?: string;
+			name?: string;
+			type: string;
+			url: string;
+			content_type?: string;
+			size?: number;
+		}[];
 		timestamp: number;
 		role: string;
 		statusHistory?: {
@@ -97,7 +106,7 @@
 			result?: {
 				error?: string;
 				output?: string;
-				files?: { name: string; url: string }[];
+				files?: { id?: string; file_id?: string; name: string; type?: string; url: string }[];
 			};
 		}[];
 		info?: {
@@ -113,7 +122,21 @@
 			load_duration?: number;
 			usage?: unknown;
 		};
-		annotation?: { type: string; rating: number };
+		selectedModelId?: string;
+		feedbackId?: string;
+		arena?: boolean;
+		parentId?: string;
+		annotation?: {
+			type?: string;
+			rating?: number;
+			rating_signal?: string;
+			reason?: string;
+			comment?: string;
+			free_text?: string;
+			categories?: string[];
+			tags?: string[];
+			details?: { rating?: number };
+		};
 	}
 
 	export let chatId = '';
@@ -446,9 +469,12 @@
 	};
 
 	let feedbackLoading = false;
+	let feedbackError = '';
 
 	const feedbackHandler = async (rating: number | null = null, details: object | null = null) => {
 		feedbackLoading = true;
+		feedbackError = '';
+		const feedbackRequestFailedMessage = $i18n.t('Feedback request failed');
 		console.log('Feedback', rating, details);
 
 		const updatedMessage = {
@@ -461,20 +487,30 @@
 		};
 
 		const chat = await getChatById(localStorage.token, chatId).catch((error) => {
-			toast.error(`${error}`);
+			feedbackError = getFeedbackRequestErrorMessage(error, feedbackRequestFailedMessage);
+			toast.error(feedbackError);
+			return null;
 		});
 		if (!chat) {
-			return;
+			feedbackError = getFeedbackRequestErrorMessage(feedbackError, feedbackRequestFailedMessage);
+			feedbackLoading = false;
+			return false;
 		}
 
 		const messages = createMessagesList(history, message.id);
+		const artifacts = extractFeedbackArtifacts(updatedMessage);
+		const ratingValue = rating ?? updatedMessage.annotation?.rating ?? null;
 
 		let feedbackItem = {
 			type: 'rating',
 			data: {
 				...(updatedMessage?.annotation ? updatedMessage.annotation : {}),
+				...(ratingValue !== null
+					? { rating_signal: ratingValue === 1 ? 'positive' : 'negative' }
+					: {}),
 				model_id: message?.selectedModelId ?? message.model,
-				...(history.messages[message.parentId].childrenIds.length > 1
+				...(artifacts.length > 0 ? { artifacts } : {}),
+				...(message.parentId && history.messages[message.parentId]?.childrenIds?.length > 1
 					? {
 							sibling_model_ids: history.messages[message.parentId].childrenIds
 								.filter((id) => id !== message.id)
@@ -486,8 +522,11 @@
 				arena: message ? message.arena : false,
 				model_id: message.model,
 				message_id: message.id,
+				parent_message_id: message.parentId,
+				message_role: message.role,
 				message_index: messages.length,
-				chat_id: chatId
+				chat_id: chatId,
+				artifact_count: artifacts.length
 			},
 			snapshot: {
 				chat: chat
@@ -516,16 +555,26 @@
 				message.feedbackId,
 				feedbackItem
 			).catch((error) => {
-				toast.error(`${error}`);
+				feedbackError = getFeedbackRequestErrorMessage(error, feedbackRequestFailedMessage);
+				toast.error(feedbackError);
+				return null;
 			});
 		} else {
 			feedback = await createNewFeedback(localStorage.token, feedbackItem).catch((error) => {
-				toast.error(`${error}`);
+				feedbackError = getFeedbackRequestErrorMessage(error, feedbackRequestFailedMessage);
+				toast.error(feedbackError);
+				return null;
 			});
 
 			if (feedback) {
 				updatedMessage.feedbackId = feedback.id;
 			}
+		}
+
+		if (!feedback) {
+			feedbackError = getFeedbackRequestErrorMessage(feedbackError, feedbackRequestFailedMessage);
+			feedbackLoading = false;
+			return false;
 		}
 
 		console.log(updatedMessage);
@@ -563,6 +612,7 @@
 		}
 
 		feedbackLoading = false;
+		return true;
 	};
 
 	const deleteMessageHandler = async () => {
@@ -1490,6 +1540,8 @@
 						<RateComment
 							bind:message
 							bind:show={showRateComment}
+							saving={feedbackLoading}
+							error={feedbackError}
 							on:save={async (e) => {
 								await feedbackHandler(null, {
 									...e.detail

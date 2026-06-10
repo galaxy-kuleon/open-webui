@@ -117,6 +117,34 @@
 							</div>
 						</div>
 
+						{#if selectedFeedback?.data?.categories && selectedFeedback?.data?.categories.length}
+							<div class="mb-2">
+								<div class="mb-1 text-xs text-gray-500">{$i18n.t('Categories')}</div>
+								<div class="flex flex-wrap gap-1 mt-1">
+									{#each selectedFeedback?.data?.categories as category}
+										<span class="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-[9px]"
+											>{category}</span
+										>
+									{/each}
+								</div>
+							</div>
+						{/if}
+
+						{#if selectedFeedback?.data?.artifacts && selectedFeedback?.data?.artifacts.length}
+							<div class="flex flex-col w-full mb-2">
+								<div class="mb-1 text-xs text-gray-500">{$i18n.t('Artifacts')}</div>
+								<div class="flex-1 text-xs break-words space-y-1">
+									{#each selectedFeedback?.data?.artifacts as artifact}
+										<div>
+											<span
+												>{artifact?.label || artifact?.name || artifact?.url || artifact?.id}</span
+											>
+										</div>
+									{/each}
+								</div>
+							</div>
+						{/if}
+
 						{#if selectedFeedback?.data?.tags && selectedFeedback?.data?.tags.length}
 							<div class="mb-2 -mx-1">
 								<div class="flex flex-wrap gap-1 mt-1">
