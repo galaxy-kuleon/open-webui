@@ -3,13 +3,35 @@ import time
 import uuid
 from typing import Optional
 
-from open_webui.internal.db import Base, JSONField, get_async_db_context
-from open_webui.models.users import User, UserModel
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import JSON, BigInteger, Boolean, Column, Text, delete, func, select, update
+from open_webui.internal.db import Base, get_async_db_context
+from open_webui.models.users import User
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import JSON, BigInteger, Column, Text, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
+
+
+PRODUCT_EXPERIENCE_FEEDBACK_CATEGORIES = (
+    'speed_too_slow',
+    'stuck_or_incomplete',
+    'download_or_export_failed',
+    'formatting_or_layout_problem',
+    'ui_friction',
+    'other_product_issue',
+)
+
+LEGAL_QUALITY_FEEDBACK_CATEGORIES = (
+    'missing_important_facts',
+    'wrong_or_weak_jurisdiction_terminology',
+    'risk_framing_insufficient',
+    'not_client_ready',
+    'legal_advice_boundary_problem',
+    'other_quality_issue',
+)
+
+FEEDBACK_CATEGORY_KEYS = PRODUCT_EXPERIENCE_FEEDBACK_CATEGORIES + LEGAL_QUALITY_FEEDBACK_CATEGORIES
+FEEDBACK_CATEGORY_KEY_SET = set(FEEDBACK_CATEGORY_KEYS)
 
 
 ####################
@@ -76,11 +98,40 @@ class LeaderboardFeedbackData(BaseModel):
 
 class RatingData(BaseModel):
     rating: Optional[str | int] = None
+    rating_signal: Optional[str] = None
     model_id: Optional[str] = None
     sibling_model_ids: Optional[list[str]] = None
     reason: Optional[str] = None
-    comment: Optional[str] = None
+    comment: Optional[str] = Field(default=None, max_length=4000)
+    free_text: Optional[str] = Field(default=None, max_length=4000)
+    categories: Optional[list[str]] = None
+    artifacts: Optional[list[dict]] = None
     model_config = ConfigDict(extra='allow', protected_namespaces=())
+
+    @field_validator('rating_signal')
+    @classmethod
+    def validate_rating_signal(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        if value not in {'positive', 'negative'}:
+            raise ValueError('rating_signal must be positive or negative')
+        return value
+
+    @field_validator('categories')
+    @classmethod
+    def validate_categories(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is None:
+            return value
+
+        invalid = [category for category in value if category not in FEEDBACK_CATEGORY_KEY_SET]
+        if invalid:
+            raise ValueError(f'unsupported feedback categories: {", ".join(invalid)}')
+
+        deduped = []
+        for category in value:
+            if category not in deduped:
+                deduped.append(category)
+        return deduped
 
 
 class MetaData(BaseModel):
