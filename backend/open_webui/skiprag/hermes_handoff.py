@@ -5,29 +5,30 @@ When the selected model is a Hermes bridge model (id ∈
 OPENWEBUI_HERMES_BRIDGE_MODEL_IDS) and files are attached, this module:
 
   1. Resolves each uploaded file's bytes (via Storage / DB, same logic as Path A).
-  2. Converts each file to markdown via convert_to_markdown (cached).
-  3. Writes BOTH the original file bytes AND the .md into the shared
-     hermes-handoff volume under a per-user/per-chat/per-message subdirectory:
+  2. Writes ONLY the original file bytes into the shared hermes-handoff volume
+     under a per-user/per-chat/per-message subdirectory:
        /handoff/user/<user_id>/chat/<chat_id_or_nochat>/message/<message_id_or_uuid>/<unique_filename>
-       /handoff/user/<user_id>/chat/<chat_id_or_nochat>/message/<message_id_or_uuid>/<unique_filename>.md
-  4. REMOVES the file items from body['metadata']['files'] so that OWUI's
+
+     NOTE: No Docling/markdown conversion is performed. The Hermes agent has
+     its own tools (read_file, terminal, vision_analyze) to process files
+     as needed. This avoids unnecessary conversion delays and timeouts.
+
+  3. REMOVES the file items from body['metadata']['files'] so that OWUI's
      native RAG pipeline (chat_completion_files_handler / save_docs_to_vector_db
      / get_sources_from_items) NEVER embeds or injects them.  Consequence:
      later OWUI tools/code-interpreter paths that read __files__ from
      metadata.files will not see these file items; Hermes receives the
      explicit /handoff paths instead.
-  5. Injects a structured <files> block into the LAST USER message of
+  4. Injects a structured <files> block into the LAST USER message of
      body['messages'] listing the paths AS HERMES SEES THEM — identical
      /handoff/... path because the volume is mounted at the same path in
      both containers.
 
      Example injected block:
          <files>
-           <file name="report.pdf"
-                 user="<openwebui-user-id>"
-                 chat="<chat-id>"
-                 original="/handoff/user/.../report.pdf"
-                 markdown="/handoff/user/.../report.pdf.md"
+           <file original="/handoff/user/.../report.pdf"
+                 file_id="<openwebui-file-id>"
+                 sha256="<content-sha256>"
                  sig="<hmac>"/>
          </files>
 
@@ -40,15 +41,19 @@ Design assumptions
   `skip_rag` capability toggle is a Path A concern (non-Hermes models with
   full-context injection).  This is documented here and in the gate comment
   in utils/middleware.py.
+- NO markdown conversion: Hermes agent decides independently how to process
+  files using its own toolset. This is the core philosophy of skip-rag mode
+  for Hermes — avoid pre-hydrating content into messages.
 - Retention: handoff artifacts are NOT cleaned up — the hermes-handoff
   volume accumulates.  Revisit in a later maintenance cycle.
 
 Hermes-side consumption
 -----------------------
 The Hermes agent (hermes-agent submodule) parses the <files> block, verifies
-the user/chat scope and HMAC signature, reads each listed /handoff markdown
-path from the shared volume, and appends bounded file context to the agent
-input.  OWUI remains responsible for conversion + signed handoff creation.
+the user/chat scope and HMAC signature, and receives only the file paths.
+The agent then decides independently whether and how to process each file
+using its own tools (read_file, terminal commands like pdftotext/catdoc,
+vision_analyze for images, etc.).
 
 Environment variables
 ---------------------
@@ -61,7 +66,6 @@ OPENWEBUI_HERMES_BRIDGE_MODEL_IDS  Comma-separated model IDs treated as Hermes
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import logging
@@ -71,8 +75,6 @@ import uuid
 import html
 from pathlib import Path
 from typing import Optional
-
-from open_webui.skiprag.convert import convert_to_markdown
 
 log = logging.getLogger(__name__)
 
@@ -129,16 +131,25 @@ def _user_id_from_user(user) -> str:
     return _safe_segment(getattr(user, 'id', None), 'nouser')
 
 
-def _sign_handoff_entry(user_id: str, chat_id: str, original_path: str, md_path: str) -> str:
+def _sign_handoff_entry(
+    user_id: str,
+    chat_id: str,
+    original_path: str,
+    file_id: str = '',
+    sha256: str = '',
+) -> str:
     """
-    Sign one handoff entry with the user/chat scope and absolute paths.
+    Sign one handoff entry with the user/chat scope, path, and stable identity.
 
     Hermes verifies this against the forwarded OpenWebUI user/chat headers, so
     an arbitrary prompt-level <files> block cannot read another user's files.
     """
     if not HANDOFF_SIGNING_KEY:
         return ''
-    payload = '\0'.join([user_id, chat_id, original_path, md_path]).encode('utf-8')
+    parts = [user_id, chat_id, original_path]
+    if file_id or sha256:
+        parts.extend([file_id, sha256])
+    payload = '\0'.join(parts).encode('utf-8')
     return hmac.new(HANDOFF_SIGNING_KEY.encode('utf-8'), payload, hashlib.sha256).hexdigest()
 
 
@@ -161,14 +172,13 @@ def _write_handoff_files(
     subdir: Path,
     filename: str,
     raw_bytes: bytes,
-    md: str,
     index: int,
-) -> tuple[str, str]:
+) -> str:
     """
-    Write the original file bytes and the markdown to the handoff subdir.
+    Write the original file bytes to the handoff subdir.
 
-    Returns (original_path, md_path) as absolute strings that are valid
-    inside BOTH the owui and hermes containers (identical mount path).
+    Returns original_path as an absolute string that is valid inside BOTH the
+    owui and hermes containers (identical mount path).
     """
     # Sanitise filename: no path separators. Prefix with index+nonce so two
     # same-named uploads in one message cannot overwrite each other.
@@ -176,30 +186,97 @@ def _write_handoff_files(
     unique_name = f'{index:03d}-{uuid.uuid4().hex[:8]}-{safe_name}'
 
     orig_path = subdir / unique_name
-    md_path = subdir / (unique_name + '.md')
 
     orig_path.write_bytes(raw_bytes)
-    md_path.write_text(md, encoding='utf-8')
 
-    return str(orig_path), str(md_path)
+    return str(orig_path)
 
 
-def _build_files_block(entries: list[tuple[str, str, str, str, str]]) -> str:
+def _file_id_from_item(file_item: dict) -> str:
+    """Return the most stable OpenWebUI file id exposed by a file item."""
+    file_id = file_item.get('id') or file_item.get('file_id')
+    if not file_id and isinstance(file_item.get('file'), dict):
+        file_id = file_item['file'].get('id')
+    return str(file_id or '')
+
+
+def _current_turn_file_items(metadata: dict, all_files: list[dict]) -> list[dict]:
+    """
+    Return file items attached to the current user message only.
+
+    OpenWebUI request metadata.files is a chat-level superset: it contains
+    historical chat files plus the current upload. For Hermes Path B, the
+    persisted user_message.files field is the authoritative current-turn set.
+    Legacy/direct callers without user_message metadata fall back to all files.
+    """
+    user_message = metadata.get('user_message')
+    if isinstance(user_message, dict):
+        if 'files' in user_message:
+            current_files = user_message.get('files') or []
+            return [
+                f for f in current_files
+                if isinstance(f, dict) and f.get('type', 'file') == 'file'
+            ]
+        if user_message.get('id'):
+            return []
+
+    return [
+        f for f in all_files
+        if isinstance(f, dict) and f.get('type', 'file') == 'file'
+    ]
+
+
+def _dedupe_file_items(file_items: list[dict]) -> list[dict]:
+    """Dedupe exact current-turn file item repeats before byte resolution."""
+    deduped: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for file_item in file_items:
+        file_id = _file_id_from_item(file_item)
+        if file_id:
+            key = ('file_id', file_id)
+        else:
+            key = (
+                'fallback',
+                '|'.join(
+                    [
+                        str(file_item.get('name') or ''),
+                        str(file_item.get('path') or file_item.get('url') or ''),
+                    ]
+                ),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(file_item)
+    return deduped
+
+
+def _build_files_block(entries: list[dict[str, str]]) -> str:
     """
     Build the <files>…</files> XML block to inject into the user message.
-
-    entries: list of (display_name, original_path, md_path, user_id, chat_id)
     """
     lines = ['<files>']
-    for name, orig, md_p, user_id, chat_id in entries:
-        sig = _sign_handoff_entry(user_id, chat_id, orig, md_p)
+    for entry in entries:
+        orig = entry['original']
+        file_id = entry.get('file_id', '')
+        sha256 = entry.get('sha256', '')
+        sig = _sign_handoff_entry(
+            entry['user_id'],
+            entry['chat_id'],
+            orig,
+            file_id=file_id,
+            sha256=sha256,
+        )
+        attrs = [
+            f'original="{html.escape(orig, quote=True)}"',
+        ]
+        if file_id:
+            attrs.append(f'file_id="{html.escape(file_id, quote=True)}"')
+        if sha256:
+            attrs.append(f'sha256="{html.escape(sha256, quote=True)}"')
+        attrs.append(f'sig="{html.escape(sig, quote=True)}"')
         lines.append(
-            f'  <file name="{html.escape(name, quote=True)}"'
-            f' user="{html.escape(user_id, quote=True)}"'
-            f' chat="{html.escape(chat_id, quote=True)}"'
-            f' original="{html.escape(orig, quote=True)}"'
-            f' markdown="{html.escape(md_p, quote=True)}"'
-            f' sig="{html.escape(sig, quote=True)}"/>'
+            f'  <file {" ".join(attrs)}/>'
         )
     lines.append('</files>')
     return '\n'.join(lines)
@@ -286,8 +363,8 @@ async def run_hermes_handoff(
 
     Actions:
       1. Identify file items in body['metadata']['files'].
-      2. Resolve raw bytes + convert to md for each file.
-      3. Write original + .md into the shared handoff volume.
+      2. Resolve raw bytes for each file.
+      3. Write original bytes into the shared handoff volume.
       4. Remove the processed file items from body['metadata']['files']
          (prevents OWUI native embedding / RAG injection).
       5. Inject a <files> block into the last user message.
@@ -303,11 +380,19 @@ async def run_hermes_handoff(
     if not files:
         return body
 
-    # Partition: file items vs. everything else (collections, knowledge bases)
-    file_items = [f for f in files if f.get('type', 'file') == 'file']
-    other_items = [f for f in files if f.get('type', 'file') != 'file']
+    # Partition: current-turn file items vs. everything else. metadata.files
+    # is chat-level and may contain historical file items, so it is not the
+    # source of truth for "new upload on this turn" when user_message exists.
+    file_items = _dedupe_file_items(_current_turn_file_items(metadata, files))
+    other_items = [
+        f for f in files
+        if isinstance(f, dict) and f.get('type', 'file') != 'file'
+    ]
 
     if not file_items:
+        metadata['files'] = other_items
+        if 'metadata' in body:
+            body['metadata']['files'] = other_items
         return body
 
     # Determine the handoff subdir from user/chat/message context. User/chat
@@ -323,10 +408,11 @@ async def run_hermes_handoff(
 
     subdir = _make_handoff_subdir(user_id, chat_id, message_id)
 
-    entries: list[tuple[str, str, str, str, str]] = []  # (name, orig_path, md_path, user_id, chat_id)
+    entries: list[dict[str, str]] = []
 
     for idx, file_item in enumerate(file_items, start=1):
         filename = file_item.get('name', 'file')
+        file_id = _file_id_from_item(file_item)
 
         # 1. Resolve raw bytes
         raw_bytes = await _resolve_raw_bytes(file_item, filename)
@@ -334,15 +420,12 @@ async def run_hermes_handoff(
             log.warning('hermes-handoff: skipping %s — could not resolve bytes', filename)
             continue
 
-        # 2. Convert to markdown (cached via convert_to_markdown)
-        md = await asyncio.to_thread(convert_to_markdown, raw_bytes, filename, request)
-        if not md:
-            log.warning('hermes-handoff: empty md for %s — using empty string', filename)
-            md = ''
-
-        # 3. Write to shared handoff volume
+        content_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        # 2. Write original bytes to shared handoff volume. Do NOT convert to
+        # markdown here: Hermes/Origin Agent should receive the uploaded file
+        # path and decide which tools to use for processing.
         try:
-            orig_path, md_path = _write_handoff_files(subdir, filename, raw_bytes, md, idx)
+            orig_path = _write_handoff_files(subdir, filename, raw_bytes, idx)
         except OSError as exc:
             log.error(
                 'hermes-handoff: failed to write %s to handoff volume %s: %s',
@@ -350,10 +433,19 @@ async def run_hermes_handoff(
             )
             continue
 
-        entries.append((filename, orig_path, md_path, user_id, chat_id))
+        entries.append(
+            {
+                'original': orig_path,
+                'user_id': user_id,
+                'chat_id': chat_id,
+                'file_id': file_id,
+                'sha256': content_sha256,
+            }
+        )
         log.info(
-            'hermes-handoff: wrote %s → original=%s md=%s (md_len=%d)',
-            filename, orig_path, md_path, len(md),
+            'hermes-handoff: wrote %s → original=%s file_id=%s sha256=%s '
+            '(no markdown conversion)',
+            filename, orig_path, file_id or '-', content_sha256,
         )
 
     # 4. Remove processed file items from metadata.files (no embedding, no RAG)
