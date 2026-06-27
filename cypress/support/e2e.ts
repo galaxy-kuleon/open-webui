@@ -56,7 +56,9 @@ const register = (name: string, email: string, password: string) => {
 			failOnStatusCode: false
 		})
 		.then((response) => {
-			expect(response.status).to.be.oneOf([200, 400]);
+			// 403 = signup disabled on an already-initialized (live) stack — admin
+			// bootstrap is a no-op there, so don't fail the global setup.
+			expect(response.status).to.be.oneOf([200, 400, 403]);
 		});
 };
 
