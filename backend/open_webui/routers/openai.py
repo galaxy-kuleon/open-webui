@@ -62,7 +62,11 @@ from open_webui.utils.session_pool import (
 )
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
-from open_webui.utils.headers import include_user_info_headers, get_custom_headers
+from open_webui.utils.headers import (
+    include_user_info_headers,
+    get_custom_headers,
+    get_user_group_ids,
+)
 from open_webui.utils.anthropic import is_anthropic_url, get_anthropic_models
 
 log = logging.getLogger(__name__)
@@ -107,7 +111,9 @@ async def send_get_request(
                 cookies = None
 
                 if ENABLE_FORWARD_USER_INFO_HEADERS and user:
-                    headers = include_user_info_headers(headers, user)
+                    headers = include_user_info_headers(
+                        headers, user, user_groups=await get_user_group_ids(user)
+                    )
 
             async with session.get(
                 url,
@@ -177,7 +183,9 @@ async def get_headers_and_cookies(
     }
 
     if ENABLE_FORWARD_USER_INFO_HEADERS and user:
-        headers = include_user_info_headers(headers, user)
+        headers = include_user_info_headers(
+            headers, user, user_groups=await get_user_group_ids(user)
+        )
         if metadata and metadata.get('chat_id'):
             headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = metadata.get('chat_id')
 

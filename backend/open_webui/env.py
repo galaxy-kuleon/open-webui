@@ -237,6 +237,11 @@ FORWARD_USER_INFO_HEADER_USER_NAME = os.environ.get('FORWARD_USER_INFO_HEADER_US
 FORWARD_USER_INFO_HEADER_USER_ID = os.environ.get('FORWARD_USER_INFO_HEADER_USER_ID', 'X-OpenWebUI-User-Id')
 FORWARD_USER_INFO_HEADER_USER_EMAIL = os.environ.get('FORWARD_USER_INFO_HEADER_USER_EMAIL', 'X-OpenWebUI-User-Email')
 FORWARD_USER_INFO_HEADER_USER_ROLE = os.environ.get('FORWARD_USER_INFO_HEADER_USER_ROLE', 'X-OpenWebUI-User-Role')
+# Comma-separated stable OpenWebUI group IDs (not names). Forwarded downstream so
+# the Hermes agent can apply per-group skill ACLs.
+FORWARD_USER_INFO_HEADER_USER_GROUPS = os.environ.get(
+    'FORWARD_USER_INFO_HEADER_USER_GROUPS', 'X-OpenWebUI-User-Groups'
+)
 
 # Header name for chat ID forwarding (customizable via environment variable)
 FORWARD_SESSION_INFO_HEADER_MESSAGE_ID = os.environ.get(
