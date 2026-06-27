@@ -1,8 +1,12 @@
 """add feedback outbox
 
 Revision ID: b0c1d2e3f4a5
-Revises: a0b1c2d3e4f5
+Revises: 461111b60977
 Create Date: 2026-05-10
+
+Rebased onto v0.9.6 migration head 461111b60977 (was a0b1c2d3e4f5) during the
+v0.9.6 upstream merge so the kg feedback_outbox migration chains linearly after
+upstream's migrations instead of branching the revision tree.
 """
 
 from typing import Union
@@ -11,7 +15,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = 'b0c1d2e3f4a5'
-down_revision: Union[str, None] = 'a0b1c2d3e4f5'
+down_revision: Union[str, None] = '461111b60977'
 branch_labels = None
 depends_on = None
 
