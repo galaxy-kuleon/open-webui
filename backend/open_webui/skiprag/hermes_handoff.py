@@ -408,6 +408,19 @@ async def run_hermes_handoff(
 
     subdir = _make_handoff_subdir(user_id, chat_id, message_id)
 
+    # #17 slice-3 keying fix: record the EXACT message-dir segment this handoff actually wrote
+    # (``subdir.name``) into the request metadata, so the finalize-time partial-materials coverage
+    # scan (utils/middleware.py + utils/file_coverage.py) reads the SAME dir instead of guessing
+    # ``message/<user_message.id>/``. In the real flow ``body['messages']`` is id-stripped, so
+    # ``message_id`` above is usually None and ``_make_handoff_subdir`` falls back to a random
+    # uuid4 — which never matched ``user_message.id`` ⇒ the warning was inert. This does NOT change
+    # the on-disk keying/layout or the agent's <files> paths; it only publishes the chosen segment.
+    # ``metadata`` is the same dict threaded to the finalizer (process_chat_payload returns it →
+    # ctx['metadata']); the defensive body write mirrors the metadata['files'] handling below.
+    metadata['handoff_message_id'] = subdir.name
+    if 'metadata' in body:
+        body['metadata']['handoff_message_id'] = subdir.name
+
     entries: list[dict[str, str]] = []
 
     for idx, file_item in enumerate(file_items, start=1):

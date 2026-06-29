@@ -80,6 +80,11 @@ from open_webui.utils.failure_surface import (
     build_error_payload,
     should_flag_empty,
 )
+from open_webui.utils.file_coverage import (
+    build_warning_payload,
+    compute_turn_delivery_coverage,
+    should_warn,
+)
 from open_webui.utils.hermes_bridge import (
     memory_bridge_misconfigured,
     should_bypass_openwebui_memory_injection,
@@ -5258,6 +5263,58 @@ async def streaming_chat_response_handler(response, ctx):
                                 }
                             ),
                         )
+                    else:
+                        # #17 slice-3: a finalized (non-empty) file-heavy turn whose uploaded
+                        # files did NOT all reach the Hermes Path-B handoff is a silent materials
+                        # gap. Annotate the answer with a non-blocking, COUNTS-ONLY warning (never
+                        # raw names/content/paths — M4); the answer itself is left intact. The
+                        # handoff is settled here (run_hermes_handoff ran SYNCHRONOUSLY before the
+                        # stream), so "not delivered" is definitive, not a race. Path A / no
+                        # handoff dir = unmeasurable → no warning. Any failure SUPPRESSES the
+                        # warning (no false warning, no raw leak). Empty-turn (#16) took priority.
+                        try:
+                            user_message = metadata.get('user_message') or {}
+                            turn_files = user_message.get('files') or []
+                            # #17 slice-3 keying fix: scan the dir run_hermes_handoff ACTUALLY wrote
+                            # (recorded as metadata['handoff_message_id'] = subdir.name) rather than
+                            # reconstructing message/<user_message.id>/ — which never matched because
+                            # the handoff keys on the id-stripped body messages (random uuid). Absent
+                            # (Path A / non-bridge / no handoff) ⇒ None ⇒ scan finds nothing ⇒ no warn.
+                            handoff_msg_id = metadata.get('handoff_message_id')
+                            if turn_files and handoff_msg_id:
+                                cov = compute_turn_delivery_coverage(
+                                    '/handoff', user.id, metadata['chat_id'],
+                                    handoff_msg_id, turn_files,
+                                )
+                                if should_warn(cov):
+                                    warning = build_warning_payload(
+                                        metadata['chat_id'], metadata['message_id'],
+                                        used=cov['used'], total=cov['total'], unused=cov['unused'],
+                                        skipped=cov['skipped'], failed=cov['failed'],
+                                    )
+                                    await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                        metadata['chat_id'],
+                                        metadata['message_id'],
+                                        {'warning': warning},
+                                    )
+                                    await event_emitter(
+                                        {'type': 'chat:message:warning', 'data': {'warning': warning}}
+                                    )
+                                    log.info(
+                                        'partial-materials surfaced %s',
+                                        json.dumps(
+                                            {
+                                                'chat_id': metadata['chat_id'],
+                                                'msg_id': metadata['message_id'],
+                                                'trace_id': warning['trace_id'],
+                                                'kind': warning['kind'],
+                                                'used': warning['used'],
+                                                'total': warning['total'],
+                                            }
+                                        ),
+                                    )
+                        except Exception as warn_exc:  # suppress — never break the turn / leak raw
+                            log.debug('partial-materials coverage skipped: %s', type(warn_exc).__name__)
 
                 # Send a webhook notification if the user is not active
                 if request.app.state.config.ENABLE_USER_WEBHOOKS and not await Users.is_user_active(user.id):

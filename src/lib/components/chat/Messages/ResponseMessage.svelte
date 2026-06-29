@@ -42,6 +42,10 @@
 		hasStructuredEmptyError,
 		shouldFlagInterrupted
 	} from '$lib/utils/empty_turn';
+	import {
+		materialsWarningView,
+		shouldShowMaterialsWarning
+	} from '$lib/utils/materials_warning';
 	import { chatActiveTasks } from '$lib/stores/active-tasks';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import equal from 'fast-deep-equal';
@@ -60,6 +64,7 @@
 
 	import Error from './Error.svelte';
 	import EmptyTurnNotice from './EmptyTurnNotice.svelte';
+	import MaterialsWarningNotice from './MaterialsWarningNotice.svelte';
 	import Citations from './Citations.svelte';
 	import CodeExecutions from './CodeExecutions.svelte';
 	import ContentRenderer from './ContentRenderer.svelte';
@@ -217,6 +222,13 @@
 		hasStructuredEmptyError(message) || shouldFlagInterrupted(message, chatHasActiveTaskOrUnknown)
 			? emptyTurnView(message, chatId)
 			: null;
+
+	// #17 slice-3: a backend-set partial-materials warning (counts-only, kind canonical, unused>0).
+	// It is only ever set at FINALIZATION (a done turn with a real answer), so — like the #16
+	// case-1 structured error — it renders whenever present (no active-task gate needed). It is
+	// NON-BLOCKING/ADDITIVE: the answer is shown normally and this notice annotates it. Mutually
+	// exclusive with emptyTurn in practice (empty-turn takes backend priority), rendered defensively.
+	$: materialsWarning = shouldShowMaterialsWarning(message) ? materialsWarningView(message, chatId) : null;
 
 	let edit = false;
 	let editedContent = '';
@@ -951,6 +963,21 @@
 								/>
 							{:else if message?.error}
 								<Error content={message?.error?.content ?? message.content} />
+							{/if}
+
+							{#if materialsWarning}
+								<!-- #17: NON-BLOCKING, ADDITIVE partial-materials warning (counts + copyable
+								     trace). Rendered alongside — never replacing — the answer above (M3/M4:
+								     counts only, no raw names/content). -->
+								<MaterialsWarningNotice
+									banner={materialsWarning.banner}
+									used={materialsWarning.used}
+									total={materialsWarning.total}
+									unused={materialsWarning.unused}
+									skipped={materialsWarning.skipped}
+									failed={materialsWarning.failed}
+									traceId={materialsWarning.traceId}
+								/>
 							{/if}
 
 							{#if (message?.sources || message?.citations) && (model?.info?.meta?.capabilities?.citations ?? true)}

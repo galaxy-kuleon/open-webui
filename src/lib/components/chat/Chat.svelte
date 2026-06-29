@@ -539,6 +539,10 @@
 					}, 100);
 				} else if (type === 'chat:message:error') {
 					message.error = data.error;
+				} else if (type === 'chat:message:warning') {
+					// #17 slice-3: non-blocking partial-materials warning (counts-only) so the
+					// notice appears live without a reload (mirrors chat:message:error above).
+					message.warning = data.warning;
 				} else if (type === 'chat:message:follow_ups') {
 					message.followUps = data.follow_ups;
 
