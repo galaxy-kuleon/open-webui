@@ -311,3 +311,118 @@ def test_same_content_different_file_ids_are_preserved(monkeypatch, tmp_path):
     assert content.count("<file ") == 2
     assert 'file_id="file-1"' in content
     assert 'file_id="file-2"' in content
+
+
+# ── #17 slice-4: counts-only <materials_note> for SKIPPED (not-delivered) current-turn uploads ──
+
+
+def _body_with(files):
+    """Initial-turn body whose current-turn (user_message) uploads are ``files``."""
+    return {
+        "chat_id": "chat-1",
+        "metadata": {
+            "chat_id": "chat-1",
+            "user_message": {"id": "msg-1", "files": files},
+            "files": list(files),
+        },
+        "messages": [{"role": "user", "id": "msg-1", "content": "here are my materials"}],
+    }
+
+
+def test_materials_note_injected_when_a_file_is_skipped(monkeypatch, tmp_path):
+    # one delivered (real bytes) + one skipped (resolves to b'') → <files> for the delivered one
+    # AND a counts-only <materials_note skipped="1"> for the dropped one.
+    body = _body_with([
+        {"type": "file", "id": "del-1", "name": "delivered.pdf"},
+        {"type": "file", "id": "skip-1", "name": "dropped.pdf"},
+    ])
+    result, _calls = _run_handoff(monkeypatch, tmp_path, body, {"del-1": b"ok bytes", "skip-1": b""})
+    content = result["messages"][0]["content"]
+    assert content.count("<files>") == 1
+    assert content.count("<file ") == 1
+    assert 'file_id="del-1"' in content
+    assert len([p for p in tmp_path.rglob("*") if p.is_file()]) == 1  # only the delivered file
+    assert '<materials_note skipped="1">' in content
+    assert "1 uploaded file(s) could not be read or delivered" in content
+    assert content.count("<materials_note") == 1
+
+
+def test_all_skipped_injects_only_materials_note_no_files_block(monkeypatch, tmp_path):
+    # ALL current-turn uploads skipped (entries empty, skipped>0) → ONLY the note, NO empty <files>.
+    body = _body_with([
+        {"type": "file", "id": "skip-1", "name": "a.pdf"},
+        {"type": "file", "id": "skip-2", "name": "b.pdf"},
+    ])
+    result, _calls = _run_handoff(monkeypatch, tmp_path, body, {"skip-1": b"", "skip-2": b""})
+    content = result["messages"][0]["content"]
+    assert "<files>" not in content  # no empty files block
+    assert '<materials_note skipped="2">' in content
+    assert "2 uploaded file(s) could not be read or delivered" in content
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]  # nothing handed off
+    assert result["metadata"]["files"] == []  # current-turn file items still stripped from RAG
+
+
+def test_all_delivered_no_materials_note(monkeypatch, tmp_path):
+    # every upload delivered → <files> only, NO note, no noise.
+    body = _body_with([
+        {"type": "file", "id": "del-1", "name": "a.pdf"},
+        {"type": "file", "id": "del-2", "name": "b.pdf"},
+    ])
+    result, _calls = _run_handoff(monkeypatch, tmp_path, body, {"del-1": b"x", "del-2": b"y"})
+    content = result["messages"][0]["content"]
+    assert content.count("<file ") == 2
+    assert "<materials_note" not in content
+    assert "skipped=" not in content
+
+
+def test_no_uploaded_files_byte_for_byte_unchanged(monkeypatch, tmp_path):
+    # genuinely no current-turn uploads → early return, NO injection at all (no <files>, no note).
+    body = {
+        "chat_id": "chat-1",
+        "metadata": {
+            "chat_id": "chat-1",
+            "user_message": {"id": "msg-2", "content": "follow-up only"},
+            "files": [{"type": "file", "id": "old", "name": "old.pdf"}],
+        },
+        "messages": [
+            {"role": "user", "id": "msg-1", "content": "initial"},
+            {"role": "assistant", "id": "asst-1", "content": "done"},
+            {"role": "user", "id": "msg-2", "content": "follow-up only"},
+        ],
+    }
+    original = body["messages"][-1]["content"]
+    result, calls = _run_handoff(monkeypatch, tmp_path, body, {"old": b"x"})
+    assert calls == []
+    last = result["messages"][-1]["content"]
+    assert last == original  # byte-for-byte unchanged
+    assert "<files>" not in last and "<materials_note" not in last
+
+
+def test_materials_note_is_m4_counts_only_poison_skipped_name(monkeypatch, tmp_path):
+    # M4: a skipped file with a poison name must contribute ONLY to the count — its raw name must
+    # NEVER appear in the injection (or anywhere in the forwarded body/metadata).
+    poison = "SECRET Client Contract.pdf"
+    body = _body_with([
+        {"type": "file", "id": "del-1", "name": "public.pdf"},
+        {"type": "file", "id": "skip-1", "name": poison},
+    ])
+    result, _calls = _run_handoff(monkeypatch, tmp_path, body, {"del-1": b"ok", "skip-1": b""})
+    content = result["messages"][0]["content"]
+    assert '<materials_note skipped="1">' in content
+    for frag in ("SECRET", "Client", "Contract", poison):
+        assert frag not in content
+    assert "SECRET" not in str(result["messages"])
+    assert "SECRET" not in str(result["metadata"].get("files"))
+
+
+def test_materials_note_is_transient_not_in_user_message_record(monkeypatch, tmp_path):
+    # The note is injected into the FORWARDED messages only — NOT into metadata['user_message']
+    # (the per-turn record), exactly like <files>. OWUI persists the original user message, not this.
+    body = _body_with([
+        {"type": "file", "id": "del-1", "name": "a.pdf"},
+        {"type": "file", "id": "skip-1", "name": "b.pdf"},
+    ])
+    result, _calls = _run_handoff(monkeypatch, tmp_path, body, {"del-1": b"x", "skip-1": b""})
+    assert "<materials_note" in result["messages"][0]["content"]
+    assert "<materials_note" not in str(result["metadata"]["user_message"])
+    assert "<files>" not in str(result["metadata"]["user_message"])

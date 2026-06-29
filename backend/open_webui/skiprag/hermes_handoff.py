@@ -282,6 +282,28 @@ def _build_files_block(entries: list[dict[str, str]]) -> str:
     return '\n'.join(lines)
 
 
+def _build_materials_note(skipped: int) -> str:
+    """#17 slice-4: build the COUNTS-ONLY ``<materials_note>`` appended to the injection when one
+    or more current-turn uploads were SKIPPED (could not be resolved/written, so NOT delivered to
+    the agent). The agent otherwise has no skip signal (the ``<files>`` block lists delivered files
+    only), so this lets the work-product itself honestly state the limitation.
+
+    M4: takes ONLY a count — it interpolates ``int(skipped)`` and NOTHING else, so a raw skipped
+    filename / path / content can NEVER reach the note (the caller passes a number, never a name).
+    Transient: injected into the FORWARDED prompt only, exactly like ``<files>`` — never persisted
+    to ``webui.db``. Single source of the wording so it cannot drift. Scope = skipped/not-delivered
+    files only; the low-extraction-confidence clause of AC#5 is unmeasurable for Path B (the agent
+    reads raw bytes, no OWUI extraction) and is deferred to a future native-RAG slice."""
+    n = int(skipped)
+    return (
+        f'<materials_note skipped="{n}">\n'
+        f'{n} uploaded file(s) could not be read or delivered and were NOT considered in this answer.\n'
+        f'If your response relies on the attached materials, briefly note that {n} file(s) were unavailable.\n'
+        f"Do not guess these files' contents.\n"
+        f'</materials_note>'
+    )
+
+
 def _inject_transiently(body: dict, block: str) -> None:
     """
     Append the <files> block transiently to the LAST USER message.
@@ -466,18 +488,39 @@ async def run_hermes_handoff(
     if 'metadata' in body:
         body['metadata']['files'] = other_items
 
-    if not entries:
+    # #17 slice-4: how many of THIS turn's uploads were skipped (could not be resolved/written →
+    # NOT delivered to the agent). file_items is the deduped current-turn set; entries is what was
+    # actually handed off. Counts only — never names. (Reaching here implies file_items is non-empty;
+    # the genuinely-no-uploaded-files turn already returned above, byte-for-byte unchanged.)
+    skipped_count = len(file_items) - len(entries)
+
+    # 5. Build the transient injection for the LAST USER message (NOT persisted to webui.db):
+    #    - the <files> block (delivered files), when any were handed off; AND/OR
+    #    - a counts-only <materials_note> when >=1 current-turn upload was skipped, so the agent can
+    #      honestly state the materials limitation. all-skipped (entries empty, skipped>0) → ONLY the
+    #      note (no empty <files> block); all-delivered → ONLY <files> (no note, no noise).
+    injection_parts: list[str] = []
+    if entries:
+        injection_parts.append(_build_files_block(entries))
+    if skipped_count > 0:
+        injection_parts.append(_build_materials_note(skipped_count))
+
+    if not injection_parts:
+        # entries empty AND nothing skipped — unreachable here (file_items non-empty ⇒ skipped>0
+        # when entries is empty); defensive no-op preserving the original "nothing written" log.
         log.warning('hermes-handoff: no files successfully written to handoff volume')
         return body
 
-    # 5. Inject <files> block into the last user message (transient, not persisted)
-    files_block = _build_files_block(entries)
-    _inject_transiently(body, files_block)
+    _inject_transiently(body, '\n\n'.join(injection_parts))
 
     log.info(
-        'hermes-handoff: Path B done — %d file(s) handed off under %s, '
-        'file items removed from metadata.files, <files> block injected',
-        len(entries), subdir,
+        'hermes-handoff: Path B done — %d file(s) handed off under %s, %d skipped, '
+        'file items removed from metadata.files (injected: %s)',
+        len(entries), subdir, skipped_count,
+        '+'.join(
+            [p for p in ('<files>' if entries else '',
+                         'materials_note' if skipped_count > 0 else '') if p]
+        ),
     )
 
     return body
