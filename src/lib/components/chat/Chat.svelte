@@ -81,6 +81,8 @@
 		updateChatById,
 		updateChatFolderIdById
 	} from '$lib/apis/chats';
+	import { checkActiveChats } from '$lib/apis/tasks';
+	import { setChatActiveTask } from '$lib/stores/active-tasks';
 	import { generateOpenAIChatCompletion } from '$lib/apis/openai';
 	import { processWeb, processWebSearch, processYoutubeVideo } from '$lib/apis/retrieval';
 	import { getAndUpdateUserLocation, getUserSettings } from '$lib/apis/users';
@@ -1435,6 +1437,14 @@
 
 				// Load tasks from chat-level DB field
 				chatTasks = chat?.tasks ?? [];
+
+				// #16 runtime slice: probe whether this chat has an active task (cross-tab) so
+				// the interrupted-turn notice's secondary suppressor is accurate. Best-effort:
+				// on failure the chat stays unprobed and the notice rides on the reliable
+				// done=true signal (loadChat below already reconciles interrupted leaves).
+				checkActiveChats(localStorage.token, [$chatId])
+					.then((res) => setChatActiveTask($chatId, (res?.active_chat_ids ?? []).includes($chatId)))
+					.catch(() => {});
 
 				autoScroll = true;
 				await tick();

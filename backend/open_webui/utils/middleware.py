@@ -76,6 +76,10 @@ from open_webui.utils.access_control import has_connection_access, has_permissio
 from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.code_interpreter import execute_code_jupyter
+from open_webui.utils.failure_surface import (
+    build_error_payload,
+    should_flag_empty,
+)
 from open_webui.utils.hermes_bridge import (
     memory_bridge_misconfigured,
     should_bypass_openwebui_memory_injection,
@@ -5224,6 +5228,37 @@ async def streaming_chat_response_handler(response, ctx):
                             {'done': True},
                         )
 
+                # #16 runtime slice: a turn that finalized with NO rendered content is a
+                # silent false-success (a completed bubble with nothing in it). Surface it as
+                # a visible error carrying ONLY a bucketed cause label + opaque trace id
+                # (no raw content — M4), mirroring the tool-call-limit path above. Keyed on
+                # serialize_output(output) so legit tool/skip-rag turns are non-empty and do
+                # NOT flag. Stream has ended here, so done=True.
+                if not metadata.get('chat_id', '').startswith('channel:'):
+                    if should_flag_empty(serialize_output(output), True, task_active=False):
+                        empty_error = build_error_payload(
+                            metadata['chat_id'], metadata['message_id']
+                        )
+                        await Chats.upsert_message_to_chat_by_id_and_message_id(
+                            metadata['chat_id'],
+                            metadata['message_id'],
+                            {'error': empty_error},
+                        )
+                        await event_emitter(
+                            {'type': 'chat:message:error', 'data': {'error': empty_error}}
+                        )
+                        log.info(
+                            'empty-assistant-turn surfaced %s',
+                            json.dumps(
+                                {
+                                    'chat_id': metadata['chat_id'],
+                                    'msg_id': metadata['message_id'],
+                                    'trace_id': empty_error['trace_id'],
+                                    'cause': empty_error['cause'],
+                                }
+                            ),
+                        )
+
                 # Send a webhook notification if the user is not active
                 if request.app.state.config.ENABLE_USER_WEBHOOKS and not await Users.is_user_active(user.id):
                     webhook_url = await Users.get_user_webhook_url_by_id(user.id)
@@ -5285,6 +5320,34 @@ async def streaming_chat_response_handler(response, ctx):
                                 metadata['chat_id'],
                                 metadata['message_id'],
                                 {'done': True},
+                            )
+
+                        # #16 runtime slice: a cancelled turn that kept partial content has a
+                        # non-empty serialize_output → NOT flagged (A5: leave the partial for
+                        # recovery). Only a truly-EMPTY cancelled turn is surfaced as an error
+                        # (bucketed cause + opaque trace; no raw content — M4).
+                        if should_flag_empty(serialize_output(output), True, task_active=False):
+                            empty_error = build_error_payload(
+                                metadata['chat_id'], metadata['message_id']
+                            )
+                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                metadata['chat_id'],
+                                metadata['message_id'],
+                                {'error': empty_error},
+                            )
+                            await event_emitter(
+                                {'type': 'chat:message:error', 'data': {'error': empty_error}}
+                            )
+                            log.info(
+                                'empty-assistant-turn surfaced (cancelled) %s',
+                                json.dumps(
+                                    {
+                                        'chat_id': metadata['chat_id'],
+                                        'msg_id': metadata['message_id'],
+                                        'trace_id': empty_error['trace_id'],
+                                        'cause': empty_error['cause'],
+                                    }
+                                ),
                             )
 
                 try:

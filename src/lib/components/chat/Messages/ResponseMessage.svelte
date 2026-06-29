@@ -37,6 +37,12 @@
 		removeAllDetails
 	} from '$lib/utils';
 	import { extractFeedbackArtifacts, getFeedbackRequestErrorMessage } from '$lib/utils/feedback';
+	import {
+		emptyTurnView,
+		hasStructuredEmptyError,
+		shouldFlagInterrupted
+	} from '$lib/utils/empty_turn';
+	import { chatActiveTasks } from '$lib/stores/active-tasks';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import equal from 'fast-deep-equal';
 
@@ -53,6 +59,7 @@
 	import DeleteConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 
 	import Error from './Error.svelte';
+	import EmptyTurnNotice from './EmptyTurnNotice.svelte';
 	import Citations from './Citations.svelte';
 	import CodeExecutions from './CodeExecutions.svelte';
 	import ContentRenderer from './ContentRenderer.svelte';
@@ -198,6 +205,18 @@
 		(model?.info?.meta?.capabilities?.status_updates ?? true) &&
 		statusEntries.length > 0 &&
 		!(statusEntries.at(-1)?.hidden ?? false);
+
+	// #16 runtime slice: surface a silent empty/interrupted turn in-place.
+	// Case 1 = backend finalizer set a structured error {cause, trace_id}.
+	// Case 2 = load-time guard for the done=false majority the finalizer can't catch — only
+	// when the chat has NO active task (unprobed = treated as active, so a turn live in
+	// another tab / navigated-away is NOT flagged). Banner/cause/trace are M4-safe (no raw
+	// content) via $lib/utils/empty_turn.
+	$: chatHasActiveTaskOrUnknown = !$chatActiveTasks.has(chatId) || $chatActiveTasks.get(chatId) === true;
+	$: emptyTurn =
+		hasStructuredEmptyError(message) || shouldFlagInterrupted(message, chatHasActiveTaskOrUnknown)
+			? emptyTurnView(message, chatId)
+			: null;
 
 	let edit = false;
 	let editedContent = '';
@@ -876,7 +895,7 @@
 							class="w-full flex flex-col relative {edit ? 'hidden' : ''}"
 							id="response-content-container"
 						>
-							{#if message.content === '' && !message.done && !message.error && !hasVisibleStatus}
+							{#if message.content === '' && !message.done && !message.error && !hasVisibleStatus && !emptyTurn}
 								<Skeleton />
 							{:else if message.content && message.error !== true}
 								<!-- always show message contents even if there's an error -->
@@ -919,7 +938,18 @@
 								/>
 							{/if}
 
-							{#if message?.error}
+							{#if emptyTurn}
+								<!-- #16: in-place notice for a silent empty/interrupted turn (cause label +
+								     copyable opaque trace + explicit Retry). Rendered ADDITIVELY so any
+								     existing artifact/citation blocks below still surface (A5). -->
+								<EmptyTurnNotice
+									cause={emptyTurn.cause}
+									traceId={emptyTurn.traceId}
+									banner={emptyTurn.banner}
+									{readOnly}
+									onRetry={() => regenerateResponse(message)}
+								/>
+							{:else if message?.error}
 								<Error content={message?.error?.content ?? message.content} />
 							{/if}
 
