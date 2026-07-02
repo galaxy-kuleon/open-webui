@@ -34,9 +34,9 @@ Design
 Environment variables
 ---------------------
 SKIP_RAG_EXTRACTOR_MODEL_ID     Model id to use for extraction
-                                 (default: qwen3.5-122b-a10b:ud-q4-k-xl)
+                                 (default: qwen3.5-122b-a10b-mtp)
 SKIP_RAG_EXTRACTOR_API_BASE     OpenAI-compatible base URL
-                                 (default: http://host.docker.internal:11234/v1)
+                                 (default: http://host.docker.internal:1234/v1)
 SKIP_RAG_EXTRACTOR_API_KEY      Bearer key for the extractor endpoint
                                  (default: change-me-local-key)
 SKIP_RAG_EXTRACTOR_MAX_TOKENS   max_tokens for each extractor call (default: 32768)
@@ -66,10 +66,10 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 EXTRACTOR_MODEL_ID: str = os.environ.get(
-    'SKIP_RAG_EXTRACTOR_MODEL_ID', 'qwen3.5-122b-a10b:ud-q4-k-xl'
+    'SKIP_RAG_EXTRACTOR_MODEL_ID', 'qwen3.5-122b-a10b-mtp'
 )
 EXTRACTOR_API_BASE: str = os.environ.get(
-    'SKIP_RAG_EXTRACTOR_API_BASE', 'http://host.docker.internal:11234/v1'
+    'SKIP_RAG_EXTRACTOR_API_BASE', 'http://host.docker.internal:1234/v1'
 ).rstrip('/')
 EXTRACTOR_API_KEY: str = os.environ.get(
     'SKIP_RAG_EXTRACTOR_API_KEY', 'change-me-local-key'

@@ -357,7 +357,7 @@ def _extract_image_via_task_model(file_bytes: bytes, filename: str) -> tuple[boo
     try:
         api_base = os.environ.get(
             "SKIP_RAG_EXTRACTOR_API_BASE",
-            "http://host.docker.internal:11234/v1",
+            "http://host.docker.internal:1234/v1",
         ).rstrip("/")
         model = os.environ.get("TASK_MODEL", "qwen3.5-4b")
 
