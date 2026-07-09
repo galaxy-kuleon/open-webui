@@ -3043,8 +3043,8 @@ def _soc_export_owner_ok(nonce: str, user) -> bool:
     stranger must NOT fetch another user's converted document even with the URL.
 
     Authoritative source is the per-artifact ``<nonce>/.owner`` file (co-located
-    with the export, append-only, so a truncated shared registry cannot strand
-    it). Falls back to the shared registry jsonl for older artifacts."""
+    with the export, so a truncated shared registry cannot strand it). Falls
+    back to the shared registry jsonl for older artifacts."""
     if not nonce:
         return False
     uid = getattr(user, 'id', None)
