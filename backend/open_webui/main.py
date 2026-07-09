@@ -3031,13 +3031,41 @@ async def serve_cache_file(
     return FileResponse(file_path, headers=headers)
 
 
+def _soc_export_owner_ok(nonce: str, user) -> bool:
+    """SOC exports (/api/exports/soc/<nonce>/<file>) are OWNER-SCOPED: only the
+    submitting OpenWebUI user (or an admin) may download. The soc-mcp registry
+    maps the unguessable nonce → owner (the owui user id for owui-submitted
+    jobs, or ``handoff_<uid>`` for hermes-submitted jobs where <uid> is the same
+    owui user id). Unknown nonce → deny. Legal-work privacy: a logged-in
+    stranger must NOT be able to fetch another user's converted document even if
+    they obtain the URL."""
+    if not nonce:
+        return False
+    uid = getattr(user, 'id', None)
+    if not uid:
+        return False
+    reg = Path('/handoff/exports/soc/.submitted-jobs.jsonl')
+    try:
+        for line in reg.read_text(encoding='utf-8').splitlines():
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict) and entry.get('artifact') == nonce:
+                owner = entry.get('owner')
+                return owner == uid or owner == f'handoff_{uid}'
+    except OSError:
+        return False
+    return False
+
+
 @app.get('/api/exports/{path:path}')
 async def serve_export_file(
     path: str,
     user=Depends(get_verified_user),
 ):
     """Serve files from /handoff/exports/ for download.
-    
+
     This route allows the hermes agent to place any file (docx, pdf, zip, md, etc.)
     in /handoff/exports/ and provide relative download links in chat responses.
     Example: [Download file.docx](/api/exports/user_hash/artifact_id/file.docx)
@@ -3045,12 +3073,20 @@ async def serve_export_file(
     # /handoff/exports is a shared volume between hermes and owui containers
     exports_dir = Path('/handoff/exports')
     file_path = (exports_dir / path).resolve()
-    
+
     # prevent path traversal
     if not str(file_path).startswith(str(exports_dir.resolve())):
         raise HTTPException(status_code=404, detail='File not found')
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail='File not found')
+
+    # SOC conversion exports are owner-scoped (see _soc_export_owner_ok). Other
+    # /api/exports/* paths keep the legacy any-verified-user behavior.
+    if path.startswith('soc/') and getattr(user, 'role', None) != 'admin':
+        parts = path.split('/')
+        nonce = parts[1] if len(parts) > 1 else ''
+        if not _soc_export_owner_ok(nonce, user):
+            raise HTTPException(status_code=404, detail='File not found')
 
     mime, _ = mimetypes.guess_type(str(file_path))
     # PDF can be viewed inline in browser; other types force download
