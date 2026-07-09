@@ -3071,20 +3071,25 @@ async def serve_export_file(
     Example: [Download file.docx](/api/exports/user_hash/artifact_id/file.docx)
     """
     # /handoff/exports is a shared volume between hermes and owui containers
-    exports_dir = Path('/handoff/exports')
-    file_path = (exports_dir / path).resolve()
+    exports_root = Path('/handoff/exports').resolve()
+    file_path = (exports_root / path).resolve()
 
-    # prevent path traversal
-    if not str(file_path).startswith(str(exports_dir.resolve())):
+    # Prevent path traversal via relative_to on the RESOLVED path (collapses
+    # any `..`/`.`), not a raw-string prefix — a bare startswith also
+    # misclassifies sibling dirs like /handoff/exports-evil.
+    try:
+        rel = file_path.relative_to(exports_root)
+    except ValueError:
         raise HTTPException(status_code=404, detail='File not found')
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail='File not found')
 
-    # SOC conversion exports are owner-scoped (see _soc_export_owner_ok). Other
-    # /api/exports/* paths keep the legacy any-verified-user behavior.
-    if path.startswith('soc/') and getattr(user, 'role', None) != 'admin':
-        parts = path.split('/')
-        nonce = parts[1] if len(parts) > 1 else ''
+    # SOC conversion exports are owner-scoped (see _soc_export_owner_ok). Decide
+    # from the NORMALIZED path parts, NOT the raw request string — otherwise a
+    # non-canonical route like `x/../soc/<nonce>/<file>` resolves into the SOC
+    # tree while a raw `startswith('soc/')` test is false, skipping the gate.
+    if rel.parts and rel.parts[0] == 'soc' and getattr(user, 'role', None) != 'admin':
+        nonce = rel.parts[1] if len(rel.parts) > 1 else ''
         if not _soc_export_owner_ok(nonce, user):
             raise HTTPException(status_code=404, detail='File not found')
 
