@@ -3031,29 +3031,42 @@ async def serve_cache_file(
     return FileResponse(file_path, headers=headers)
 
 
+def _soc_owner_matches(owner, uid: str) -> bool:
+    return bool(owner) and (owner == uid or owner == f'handoff_{uid}')
+
+
 def _soc_export_owner_ok(nonce: str, user) -> bool:
     """SOC exports (/api/exports/soc/<nonce>/<file>) are OWNER-SCOPED: only the
-    submitting OpenWebUI user (or an admin) may download. The soc-mcp registry
-    maps the unguessable nonce → owner (the owui user id for owui-submitted
-    jobs, or ``handoff_<uid>`` for hermes-submitted jobs where <uid> is the same
-    owui user id). Unknown nonce → deny. Legal-work privacy: a logged-in
-    stranger must NOT be able to fetch another user's converted document even if
-    they obtain the URL."""
+    submitting OpenWebUI user (or an admin) may download. Owner = the owui user
+    id for owui-submitted jobs, or ``handoff_<uid>`` for hermes-submitted jobs
+    (same owui uid). Unknown nonce → deny. Legal-work privacy: a logged-in
+    stranger must NOT fetch another user's converted document even with the URL.
+
+    Authoritative source is the per-artifact ``<nonce>/.owner`` file (co-located
+    with the export, append-only, so a truncated shared registry cannot strand
+    it). Falls back to the shared registry jsonl for older artifacts."""
     if not nonce:
         return False
     uid = getattr(user, 'id', None)
     if not uid:
         return False
-    reg = Path('/handoff/exports/soc/.submitted-jobs.jsonl')
+    soc_root = Path('/handoff/exports/soc')
+    # 1) co-located per-artifact owner file (clobber-proof)
     try:
-        for line in reg.read_text(encoding='utf-8').splitlines():
+        owner_file = (soc_root / nonce / '.owner')
+        if owner_file.is_file():
+            return _soc_owner_matches(owner_file.read_text(encoding='utf-8').strip(), uid)
+    except OSError:
+        pass
+    # 2) fallback: shared registry
+    try:
+        for line in (soc_root / '.submitted-jobs.jsonl').read_text(encoding='utf-8').splitlines():
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue
             if isinstance(entry, dict) and entry.get('artifact') == nonce:
-                owner = entry.get('owner')
-                return owner == uid or owner == f'handoff_{uid}'
+                return _soc_owner_matches(entry.get('owner'), uid)
     except OSError:
         return False
     return False
