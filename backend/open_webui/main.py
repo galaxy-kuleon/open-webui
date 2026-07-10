@@ -3035,22 +3035,24 @@ def _soc_owner_matches(owner, uid: str) -> bool:
     return bool(owner) and (owner == uid or owner == f'handoff_{uid}')
 
 
-def _soc_export_owner_ok(nonce: str, user) -> bool:
-    """SOC exports (/api/exports/soc/<nonce>/<file>) are OWNER-SCOPED: only the
-    submitting OpenWebUI user (or an admin) may download. Owner = the owui user
-    id for owui-submitted jobs, or ``handoff_<uid>`` for hermes-submitted jobs
-    (same owui uid). Unknown nonce → deny. Legal-work privacy: a logged-in
-    stranger must NOT fetch another user's converted document even with the URL.
+def _soc_export_owner_ok(nonce: str, user, prefix: str = 'soc') -> bool:
+    """SOC exports (/api/exports/<prefix>/<nonce>/<file>) are OWNER-SCOPED: only
+    the submitting OpenWebUI user (or an admin) may download. ``prefix`` is
+    ``soc`` (v1 :7173 runner) or ``socv2`` (SOCv2 :7273 service) — both use the
+    identical ownership model. Owner = the owui user id for owui-submitted jobs,
+    or ``handoff_<uid>`` for hermes-submitted jobs (same owui uid). Unknown
+    nonce → deny. Legal-work privacy: a logged-in stranger must NOT fetch another
+    user's converted document even with the URL.
 
     Authoritative source is the per-artifact ``<nonce>/.owner`` file (co-located
     with the export, so a truncated shared registry cannot strand it). Falls
     back to the shared registry jsonl for older artifacts."""
-    if not nonce:
+    if not nonce or prefix not in ('soc', 'socv2'):
         return False
     uid = getattr(user, 'id', None)
     if not uid:
         return False
-    soc_root = Path('/handoff/exports/soc')
+    soc_root = Path('/handoff/exports') / prefix
     # 1) co-located per-artifact owner file (clobber-proof)
     try:
         owner_file = (soc_root / nonce / '.owner')
@@ -3101,9 +3103,10 @@ async def serve_export_file(
     # from the NORMALIZED path parts, NOT the raw request string — otherwise a
     # non-canonical route like `x/../soc/<nonce>/<file>` resolves into the SOC
     # tree while a raw `startswith('soc/')` test is false, skipping the gate.
-    if rel.parts and rel.parts[0] == 'soc' and getattr(user, 'role', None) != 'admin':
+    # Covers both v1 (soc/, :7173) and SOCv2 (socv2/, :7273) exports.
+    if rel.parts and rel.parts[0] in ('soc', 'socv2') and getattr(user, 'role', None) != 'admin':
         nonce = rel.parts[1] if len(rel.parts) > 1 else ''
-        if not _soc_export_owner_ok(nonce, user):
+        if not _soc_export_owner_ok(nonce, user, prefix=rel.parts[0]):
             raise HTTPException(status_code=404, detail='File not found')
 
     mime, _ = mimetypes.guess_type(str(file_path))
