@@ -34,7 +34,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from redis import Redis
@@ -3035,6 +3035,29 @@ def _soc_owner_matches(owner, uid: str) -> bool:
     return bool(owner) and (owner == uid or owner == f'handoff_{uid}')
 
 
+def _soc_courtesy_page(title: str, body: str, refresh: bool = False, status_code: int = 202) -> HTMLResponse:
+    """Human-readable page for SOC export links whose file is not (yet) there.
+    Users open these links straight from chat, so a raw 404 JSON reads as
+    breakage even while the conversion is still running."""
+    import html as _html
+    meta = '<meta http-equiv="refresh" content="15">' if refresh else ''
+    return HTMLResponse(
+        status_code=status_code,
+        headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store'},
+        content=(
+            '<!doctype html><html><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">{meta}'
+            f'<title>{_html.escape(title)}</title>'
+            '<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;'
+            'justify-content:center;min-height:90vh;margin:0;background:#fafafa;color:#222}'
+            '@media (prefers-color-scheme:dark){body{background:#111;color:#ddd}}'
+            'main{max-width:34em;padding:2em;text-align:center}h1{font-size:1.3em}</style>'
+            f'</head><body><main><h1>{_html.escape(title)}</h1>'
+            f'<p>{_html.escape(body)}</p></main></body></html>'
+        ),
+    )
+
+
 def _soc_export_owner_ok(nonce: str, user, prefix: str = 'soc') -> bool:
     """SOC exports (/api/exports/<prefix>/<nonce>/<file>) are OWNER-SCOPED: only
     the submitting OpenWebUI user (or an admin) may download. ``prefix`` is
@@ -3096,18 +3119,47 @@ async def serve_export_file(
         rel = file_path.relative_to(exports_root)
     except ValueError:
         raise HTTPException(status_code=404, detail='File not found')
-    if not file_path.is_file():
-        raise HTTPException(status_code=404, detail='File not found')
 
     # SOC conversion exports are owner-scoped (see _soc_export_owner_ok). Decide
     # from the NORMALIZED path parts, NOT the raw request string — otherwise a
     # non-canonical route like `x/../soc/<nonce>/<file>` resolves into the SOC
     # tree while a raw `startswith('soc/')` test is false, skipping the gate.
     # Covers both v1 (soc/, :7173) and SOCv2 (socv2/, :7273) exports.
-    if rel.parts and rel.parts[0] in ('soc', 'socv2') and getattr(user, 'role', None) != 'admin':
+    is_soc = bool(rel.parts) and rel.parts[0] in ('soc', 'socv2')
+    if is_soc and getattr(user, 'role', None) != 'admin':
         nonce = rel.parts[1] if len(rel.parts) > 1 else ''
         if not _soc_export_owner_ok(nonce, user, prefix=rel.parts[0]):
             raise HTTPException(status_code=404, detail='File not found')
+
+    if not file_path.is_file():
+        # SOC links are handed out in chat BEFORE the conversion finishes (the
+        # MCP wrapper materializes the DOCX asynchronously). For the verified
+        # owner/admin, answer a not-yet-there file with an honest status page
+        # instead of a bare 404: `.failed` marker → conversion failed (written
+        # by the MCP reconciler), no `.done` marker → still converting
+        # (auto-refresh). Strangers never reach here (owner gate above), and
+        # unknown nonces still 404 so existence is not leaked.
+        if is_soc and len(rel.parts) >= 2:
+            art_dir = exports_root / rel.parts[0] / rel.parts[1]
+            if art_dir.is_dir():
+                if (art_dir / '.failed').is_file():
+                    return _soc_courtesy_page(
+                        '轉檔失敗 / Conversion failed',
+                        '這個文件轉檔沒有成功，請回到聊天視窗重新提交一次。'
+                        ' The conversion did not succeed — please go back to the chat and submit it again.',
+                        refresh=False,
+                        status_code=410,
+                    )
+                if not (art_dir / '.done').is_file():
+                    return _soc_courtesy_page(
+                        '轉檔進行中 / Still converting',
+                        '文件還在轉換中，可能需要幾分鐘。此頁面每 15 秒會自動重新整理，完成後會直接開始下載。'
+                        ' The document is still being converted (this can take a few minutes).'
+                        ' This page refreshes every 15 seconds and the download starts automatically when ready.',
+                        refresh=True,
+                        status_code=202,
+                    )
+        raise HTTPException(status_code=404, detail='File not found')
 
     mime, _ = mimetypes.guess_type(str(file_path))
     # PDF can be viewed inline in browser; other types force download
