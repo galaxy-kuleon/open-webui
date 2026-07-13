@@ -3145,15 +3145,49 @@ async def serve_export_file(
                 if (art_dir / '.failed').is_file():
                     return _soc_courtesy_page(
                         '轉檔失敗 / Conversion failed',
-                        '這個文件轉檔沒有成功，請回到聊天視窗重新提交一次。'
-                        ' The conversion did not succeed — please go back to the chat and submit it again.',
+                        '這個文件轉檔沒有成功。請回到聊天視窗，直接請 AI「重新轉檔」即可 — 不需要重新上傳檔案。'
+                        ' The conversion did not succeed — go back to the chat and ask the AI to retry the'
+                        ' conversion (no re-upload needed).',
                         refresh=False,
                         status_code=410,
                     )
                 if not (art_dir / '.done').is_file():
+                    # Live progress written by the MCP reconciler (~20s cadence):
+                    # <nonce>/.stage = {"phase": ..., "created_at": ISO}. Phase
+                    # names only — never filenames (legal-work privacy).
+                    stage_line = ''
+                    try:
+                        stage_file = art_dir / '.stage'
+                        if stage_file.is_file():
+                            stage = json.loads(stage_file.read_text(encoding='utf-8'))
+                            phase_labels = {
+                                'queued': '排隊中 / queued',
+                                'preparing': '準備中 / preparing',
+                                'extracting': '解析文件 / extracting',
+                                'ocr': '掃描辨識 / OCR',
+                                'ir': '版面分析 / layout analysis',
+                                'translating': '翻譯中 / translating',
+                                'rendering': '產生 DOCX / rendering',
+                            }
+                            phase = str(stage.get('phase') or '')
+                            label = phase_labels.get(phase, phase)
+                            elapsed = ''
+                            created = str(stage.get('created_at') or '')
+                            if created:
+                                from datetime import datetime, timezone
+                                try:
+                                    started = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                                    minutes = max(0, int((datetime.now(timezone.utc) - started).total_seconds() // 60))
+                                    elapsed = f'，已進行約 {minutes} 分鐘'
+                                except ValueError:
+                                    pass
+                            if label:
+                                stage_line = f'目前階段：{label}{elapsed}。 '
+                    except (OSError, ValueError):
+                        pass
                     return _soc_courtesy_page(
                         '轉檔進行中 / Still converting',
-                        '文件還在轉換中，可能需要幾分鐘。此頁面每 15 秒會自動重新整理，完成後會直接開始下載。'
+                        f'{stage_line}文件還在轉換中，可能需要幾分鐘。此頁面每 15 秒會自動重新整理，完成後會直接開始下載。'
                         ' The document is still being converted (this can take a few minutes).'
                         ' This page refreshes every 15 seconds and the download starts automatically when ready.',
                         refresh=True,
