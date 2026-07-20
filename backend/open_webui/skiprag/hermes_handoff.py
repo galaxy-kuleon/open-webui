@@ -76,6 +76,8 @@ import html
 from pathlib import Path
 from typing import Optional
 
+from open_webui.utils.handoff_filename import build_attachment_basename
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -180,10 +182,14 @@ def _write_handoff_files(
     Returns original_path as an absolute string that is valid inside BOTH the
     owui and hermes containers (identical mount path).
     """
-    # Sanitise filename: no path separators. Prefix with index+nonce so two
-    # same-named uploads in one message cannot overwrite each other.
-    safe_name = _safe_segment(Path(filename).name or 'file', 'file')
-    unique_name = f'{index:03d}-{uuid.uuid4().hex[:8]}-{safe_name}'
+    # Prefix with index+random nonce so same-named uploads cannot overwrite.
+    # Attachment basenames have a separate suffix-preserving policy; identity
+    # path segments remain owned by _safe_segment.
+    unique_name = build_attachment_basename(
+        filename,
+        index=index,
+        nonce=uuid.uuid4().hex[:8],
+    )
 
     orig_path = subdir / unique_name
 

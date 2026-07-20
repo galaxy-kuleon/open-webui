@@ -10,8 +10,16 @@ import asyncio
 import hashlib
 import importlib.util
 import os
+import random
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from open_webui.utils.handoff_filename import (
+    build_attachment_basename,
+    legacy_attachment_candidate,
+)
 
 _HERE = os.path.dirname(__file__)
 _MOD = os.path.normpath(os.path.join(_HERE, "..", "..", "utils", "file_coverage.py"))
@@ -20,22 +28,89 @@ fc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(fc)
 
 
-def _handoff_name(fc_mod, raw_name, idx=1, nonce="deadbeef"):
-    """Reproduce hermes_handoff's filename scheme: {idx:03d}-{nonce8}-{safe_name}."""
-    return f"{idx:03d}-{nonce}-{fc_mod.safe_segment(os.path.basename(raw_name))}"
+def _handoff_name(raw_name, idx=1, nonce="deadbeef", generation="legacy"):
+    """Build one historical or corrected physical handoff basename."""
+    if generation == "new":
+        return build_attachment_basename(raw_name, index=idx, nonce=nonce)
+    if generation == "legacy":
+        return f"{idx:03d}-{nonce}-{legacy_attachment_candidate(raw_name)}"
+    raise ValueError("unknown handoff filename generation")
 
 
-def _make_handoff_tree(root, user_id, chat_id, msg_id, raw_names):
+def _make_handoff_tree(
+    root,
+    user_id,
+    chat_id,
+    msg_id,
+    raw_names,
+    generations=None,
+    indices=None,
+):
     d = os.path.join(root, "user", user_id, "chat", chat_id, "message", msg_id)
     os.makedirs(d, exist_ok=True)
-    for i, nm in enumerate(raw_names):
-        with open(os.path.join(d, _handoff_name(fc, nm, idx=i)), "wb") as fh:
+    generations = generations or ["legacy"] * len(raw_names)
+    indices = indices or range(1, len(raw_names) + 1)
+    for i, nm, generation in zip(indices, raw_names, generations):
+        with open(
+            os.path.join(
+                d,
+                _handoff_name(nm, idx=i, generation=generation),
+            ),
+            "wb",
+        ) as fh:
             fh.write(b"x")  # 1 byte; the scanner never reads bytes, only lists/stats
     return d
 
 
-def _file_item(name, status="uploaded", error=None):
-    return {"type": "file", "id": "id-" + name, "name": name, "status": status, "error": error}
+def _file_item(name, status="uploaded", error=None, file_id=None):
+    return {
+        "type": "file",
+        "id": file_id or "id-" + name,
+        "name": name,
+        "status": status,
+        "error": error,
+    }
+
+
+def _brute_force_match_count(adjacency, slot_count):
+    def search(file_index, used_slots):
+        if file_index == len(adjacency):
+            return 0
+        best = search(file_index + 1, used_slots)
+        for slot_index in adjacency[file_index]:
+            if slot_index not in used_slots:
+                best = max(
+                    best,
+                    1
+                    + search(
+                        file_index + 1,
+                        used_slots | frozenset({slot_index}),
+                    ),
+                )
+        return best
+
+    return search(0, frozenset())
+
+
+class TestMaximumSlotMatching(unittest.TestCase):
+    def test_cardinality_matches_brute_force_on_small_deterministic_graphs(self):
+        rng = random.Random(20260720)
+        for trial in range(500):
+            file_count = rng.randrange(6)
+            slot_count = rng.randrange(6)
+            adjacency = [
+                tuple(
+                    slot_index
+                    for slot_index in range(slot_count)
+                    if rng.randrange(2)
+                )
+                for _ in range(file_count)
+            ]
+            with self.subTest(trial=trial):
+                self.assertEqual(
+                    len(fc._matched_file_indexes(adjacency, slot_count)),
+                    _brute_force_match_count(adjacency, slot_count),
+                )
 
 
 class TestClassifier(unittest.TestCase):
@@ -117,6 +192,296 @@ class TestDeliveryScan(unittest.TestCase):
     def test_scan_error_suppresses_warning(self):
         cov = {"scan_error": True, "present": False, "total": 0, "used": 0, "unused": 0, "skipped": 0, "failed": 0}
         self.assertFalse(fc.should_warn(cov))
+
+    def test_legacy_only_and_new_only_names_both_match(self):
+        names = [
+            "個資同意書.pdf",
+            "個資同意書.pdf ",
+            "x" * 120 + ".pdf",
+        ]
+        items = [
+            _file_item(names[0], file_id="cjk"),
+            _file_item(names[1], file_id="cjk-whitespace"),
+            _file_item(names[2], file_id="long"),
+        ]
+        for generation in ("legacy", "new"):
+            with self.subTest(generation=generation):
+                with tempfile.TemporaryDirectory() as root:
+                    _make_handoff_tree(
+                        root,
+                        "u1",
+                        "c1",
+                        "m1",
+                        names,
+                        generations=[generation] * len(names),
+                    )
+                    cov = fc.compute_turn_delivery_coverage(
+                        root,
+                        "u1",
+                        "c1",
+                        "m1",
+                        items,
+                    )
+                    self.assertEqual(
+                        (cov["total"], cov["used"], cov["unused"]),
+                        (3, 3, 0),
+                    )
+                    self.assertFalse(fc.should_warn(cov))
+
+    def test_same_name_duplicates_match_mixed_legacy_and_new_generations(self):
+        name = "x" * 120 + ".pdf"
+        items = [
+            _file_item(name, file_id="duplicate-1"),
+            _file_item(name, file_id="duplicate-2"),
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            _make_handoff_tree(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [name, name],
+                generations=["legacy", "new"],
+            )
+            cov = fc.compute_turn_delivery_coverage(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                items,
+            )
+            self.assertEqual((cov["used"], cov["unused"]), (2, 0))
+            self.assertFalse(fc.should_warn(cov))
+
+    def test_corrected_long_name_uses_physical_index_1000_not_db_position(self):
+        name = "a" * 120 + ".pdf"
+        with tempfile.TemporaryDirectory() as root:
+            _make_handoff_tree(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [name],
+                generations=["new"],
+                indices=[1000],
+            )
+            cov = fc.compute_turn_delivery_coverage(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [_file_item(name)],
+            )
+            self.assertEqual((cov["used"], cov["unused"]), (1, 0))
+
+    def test_reordered_db_items_match_physical_indices_999_and_1000(self):
+        names = ["a" * 120 + ".pdf", "b" * 120 + ".pdf"]
+        with tempfile.TemporaryDirectory() as root:
+            _make_handoff_tree(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                names,
+                generations=["new", "new"],
+                indices=[999, 1000],
+            )
+            cov = fc.compute_turn_delivery_coverage(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [
+                    _file_item(names[1], file_id="db-first"),
+                    _file_item(names[0], file_id="db-second"),
+                ],
+            )
+            self.assertEqual((cov["used"], cov["unused"]), (2, 0))
+
+    def test_skipped_earlier_db_item_does_not_redefine_physical_index(self):
+        name = "c" * 120 + ".pdf"
+        with tempfile.TemporaryDirectory() as root:
+            _make_handoff_tree(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [name],
+                generations=["new"],
+                indices=[1000],
+            )
+            cov = fc.compute_turn_delivery_coverage(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [
+                    _file_item(
+                        "unavailable.bin",
+                        status="error",
+                        error="unsupported file type",
+                        file_id="skipped",
+                    ),
+                    _file_item(name, file_id="delivered"),
+                ],
+            )
+            self.assertEqual(
+                (cov["used"], cov["unused"], cov["skipped"]),
+                (1, 0, 1),
+            )
+
+    def test_mixed_generations_do_not_lose_a_match_to_candidate_collision(self):
+        names = ["個資同意書.pdf", "file.pdf"]
+        items = [
+            _file_item(names[0], file_id="legacy-cjk"),
+            _file_item(names[1], file_id="new-ascii"),
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            _make_handoff_tree(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                names,
+                generations=["legacy", "new"],
+            )
+            cov = fc.compute_turn_delivery_coverage(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                items,
+            )
+            self.assertEqual((cov["used"], cov["unused"]), (2, 0))
+            self.assertFalse(fc.should_warn(cov))
+
+    def test_one_physical_name_consumes_only_one_duplicate_candidate(self):
+        name = "個資同意書.pdf"
+        items = [
+            _file_item(name, file_id="duplicate-1"),
+            _file_item(name, file_id="duplicate-2"),
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            _make_handoff_tree(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [name],
+                generations=["new"],
+            )
+            cov = fc.compute_turn_delivery_coverage(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                items,
+            )
+            self.assertEqual((cov["used"], cov["unused"]), (1, 1))
+            self.assertTrue(fc.should_warn(cov))
+
+    def test_unprefixed_slots_match_legacy_only_not_corrected_aliases(self):
+        name = "個資同意書.pdf"
+        with tempfile.TemporaryDirectory() as root:
+            directory = _make_handoff_tree(root, "u1", "c1", "m1", [])
+            (Path(directory) / "file.pdf").write_bytes(b"x")
+            _, slots, scan_error = fc._scan_turn_handoff(
+                root,
+                "u1",
+                "c1",
+                "m1",
+            )
+            self.assertFalse(scan_error)
+            self.assertEqual(
+                slots,
+                [(None, hashlib.sha256(b"file.pdf").hexdigest()[:16])],
+            )
+            corrected_only = fc.compute_turn_delivery_coverage(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [_file_item(name)],
+            )
+            self.assertEqual(
+                (corrected_only["used"], corrected_only["unused"]),
+                (0, 1),
+            )
+
+        with tempfile.TemporaryDirectory() as root:
+            directory = _make_handoff_tree(root, "u1", "c1", "m1", [])
+            (Path(directory) / "pdf").write_bytes(b"x")
+            legacy = fc.compute_turn_delivery_coverage(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [_file_item(name)],
+            )
+            self.assertEqual((legacy["used"], legacy["unused"]), (1, 0))
+
+    def test_malformed_prefix_is_an_unindexed_exact_legacy_slot(self):
+        name = "1000-deadbeeZ-file.pdf"
+        with tempfile.TemporaryDirectory() as root:
+            directory = _make_handoff_tree(root, "u1", "c1", "m1", [])
+            (Path(directory) / name).write_bytes(b"x")
+            _, slots, scan_error = fc._scan_turn_handoff(
+                root,
+                "u1",
+                "c1",
+                "m1",
+            )
+            self.assertFalse(scan_error)
+            self.assertEqual(
+                slots,
+                [(None, hashlib.sha256(name.encode("utf-8")).hexdigest()[:16])],
+            )
+            cov = fc.compute_turn_delivery_coverage(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [_file_item(name)],
+            )
+            self.assertEqual((cov["used"], cov["unused"]), (1, 0))
+
+    def test_scanner_is_list_stat_only_and_hashes_physical_tail_once(self):
+        name = "個資同意書.pdf"
+        with tempfile.TemporaryDirectory() as root:
+            directory = _make_handoff_tree(
+                root,
+                "u1",
+                "c1",
+                "m1",
+                [name],
+                generations=["new"],
+            )
+            physical = next(Path(directory).iterdir())
+            actual_tail = physical.name.split("-", 2)[2]
+            real_sha256 = fc.hashlib.sha256
+            expected_hash = real_sha256(actual_tail.encode("utf-8")).hexdigest()[:16]
+            hashed = []
+
+            def recording_sha256(value):
+                hashed.append(value)
+                return real_sha256(value)
+
+            with patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("coverage scanner must not read bytes"),
+            ), patch.object(fc.hashlib, "sha256", side_effect=recording_sha256):
+                present, slots, scan_error = fc._scan_turn_handoff(
+                    root,
+                    "u1",
+                    "c1",
+                    "m1",
+                )
+
+            self.assertTrue(present)
+            self.assertFalse(scan_error)
+            self.assertEqual(slots, [(1, expected_hash)])
+            self.assertEqual(hashed, [actual_tail.encode("utf-8")])
 
 
 class TestShouldWarnMatrix(unittest.TestCase):

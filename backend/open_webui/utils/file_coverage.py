@@ -38,6 +38,11 @@ import hashlib
 import re
 from pathlib import Path
 
+from open_webui.utils.handoff_filename import (
+    corrected_attachment_candidate,
+    legacy_attachment_candidate,
+)
+
 # ── per-file status vocabulary (MIRROR scripts/ops/openwebui_8083_file_coverage.py) ──────────
 FILE_STATUSES = ["handed_off", "extracted_or_ocr", "uploaded", "skipped", "failed", "unknown"]
 SKIP_REASONS = frozenset({"unsupported_type", "too_large", "skipped_skiprag"})
@@ -216,8 +221,8 @@ async def persist_and_emit_warning(
 
 # ── runtime Path-B handoff-DELIVERY scan (impure: filesystem LIST/STAT only, never reads bytes) ─
 _SAFE_SEGMENT_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
-# Handoff filename scheme (hermes_handoff._write_handoff_files): {index:03d}-{uuid4hex8}-{safe_name}.
-_HANDOFF_PREFIX_RE = re.compile(r"^\d+-[0-9a-fA-F]{8}-(.*)$")
+# Handoff filename scheme: {index:03d}-{uuid4hex8}-{attachment_candidate}.
+_HANDOFF_PREFIX_RE = re.compile(r"^(\d+)-[0-9a-fA-F]{8}-(.*)$")
 
 
 def safe_segment(raw, default: str = "file") -> str:
@@ -228,8 +233,8 @@ def safe_segment(raw, default: str = "file") -> str:
 
 
 def _name_key(name: str) -> str:
-    """sha256 of the sanitised basename (of the NAME, never content) — the handoff match key."""
-    return hashlib.sha256(safe_segment(Path(name).name).encode("utf-8")).hexdigest()[:16]
+    """Hash one already-normalized physical or DB candidate name."""
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
 
 
 def bucket_error(raw_status, raw_error):
@@ -255,51 +260,120 @@ def bucket_error(raw_status, raw_error):
 
 
 def _scan_turn_handoff(handoff_dir: str, user_id: str, chat_id: str, user_message_id):
-    """LIST/STAT the per-turn handoff dir → (present, name-multiset, scan_error). Uses only
+    """LIST/STAT the per-turn handoff dir → (present, physical-slots, scan_error). Uses only
     is_dir / rglob / is_file / .name — NEVER reads a handoff file's bytes (M4). Per-user-scoped."""
     root = (Path(handoff_dir) / "user" / safe_segment(user_id, "nouser")
             / "chat" / safe_segment(chat_id, "nochat")
             / "message" / safe_segment(user_message_id, "nomsg"))
     present = False
-    multiset: dict = {}
+    physical_slots: list[tuple[int | None, str]] = []
     scan_error = False
     try:
         present = root.is_dir()
         if present:
             for p in root.rglob("*"):
                 if p.is_file():
-                    mo = _HANDOFF_PREFIX_RE.match(p.name)
-                    sname = mo.group(1) if mo else p.name
-                    h = hashlib.sha256(sname.encode("utf-8")).hexdigest()[:16]
-                    multiset[h] = multiset.get(h, 0) + 1
+                    mo = _HANDOFF_PREFIX_RE.fullmatch(p.name)
+                    if mo:
+                        physical_index = int(mo.group(1))
+                        tail = mo.group(2)
+                    else:
+                        physical_index = None
+                        tail = p.name
+                    physical_slots.append((physical_index, _name_key(tail)))
     except OSError:
         scan_error = True
-    return present, multiset, scan_error
+    return present, physical_slots, scan_error
 
 
-def _file_signals(file_items: list, present: bool, multiset: dict) -> list:
+def _matched_file_indexes(
+    slot_edges_by_file: list[tuple[int, ...]],
+    slot_count: int,
+) -> set[int]:
+    """Maximize one-to-one file/physical-slot matches."""
+    owner_by_slot: dict[int, int] = {}
+    slot_by_file: dict[int, int] = {}
+
+    def assign(file_index: int, seen_slots: set[int]) -> bool:
+        for slot_index in slot_edges_by_file[file_index]:
+            if slot_index < 0 or slot_index >= slot_count:
+                continue
+            if slot_index in seen_slots:
+                continue
+            seen_slots.add(slot_index)
+            previous_owner = owner_by_slot.get(slot_index)
+            if previous_owner is None or assign(previous_owner, seen_slots):
+                owner_by_slot[slot_index] = file_index
+                slot_by_file[file_index] = slot_index
+                return True
+        return False
+
+    for file_index in range(len(slot_edges_by_file)):
+        assign(file_index, set())
+    return set(slot_by_file)
+
+
+def _slot_edges_for_name(
+    name: str,
+    physical_slots: list[tuple[int | None, str]],
+) -> tuple[int, ...]:
+    """Return corrected-first then legacy edges to opaque physical slot ids."""
+    legacy_key = _name_key(legacy_attachment_candidate(name))
+    corrected_keys: dict[int, str | None] = {}
+    corrected_edges = []
+    legacy_edges = []
+
+    for slot_index, (physical_index, tail_key) in enumerate(physical_slots):
+        corrected_key = None
+        if physical_index is not None:
+            if physical_index not in corrected_keys:
+                try:
+                    corrected_keys[physical_index] = _name_key(
+                        corrected_attachment_candidate(name, physical_index)
+                    )
+                except ValueError:
+                    corrected_keys[physical_index] = None
+            corrected_key = corrected_keys[physical_index]
+
+        if corrected_key is not None and tail_key == corrected_key:
+            corrected_edges.append(slot_index)
+        elif tail_key == legacy_key:
+            legacy_edges.append(slot_index)
+
+    return tuple(corrected_edges + legacy_edges)
+
+
+def _file_signals(
+    file_items: list,
+    present: bool,
+    physical_slots: list[tuple[int | None, str]],
+) -> list:
     """Per current-turn file → minimal classify signal (delivery-only: ``extracted=False``).
-    Matches against the handoff name multiset (decrement → duplicate names by count)."""
-    remaining = dict(multiset)
-    out = []
+    Matches corrected/legacy candidates against opaque physical slot identities.
+    A file and physical slot are each consumed at most once."""
+    records = []
     for f in file_items:
         if not isinstance(f, dict) or f.get("type", "file") != "file":
             continue
         nested = f.get("file") if isinstance(f.get("file"), dict) else {}
         name = f.get("name") or nested.get("filename") or (nested.get("meta") or {}).get("name") or ""
-        nk = _name_key(name)
-        handed = None
-        if present:
-            if remaining.get(nk, 0) > 0:
-                remaining[nk] -= 1
-                handed = True
-            else:
-                handed = False
+        records.append((f, _slot_edges_for_name(name, physical_slots)))
+
+    matched = (
+        _matched_file_indexes(
+            [slot_edges for _, slot_edges in records],
+            len(physical_slots),
+        )
+        if present
+        else set()
+    )
+    out = []
+    for record_index, (f, _) in enumerate(records):
         out.append({
             "upload_status": f.get("status"),
             "error_bucket": bucket_error(f.get("status"), f.get("error")),
             "extracted": False,          # MVP: delivery-only; native extraction not consulted
-            "handed_off": handed,
+            "handed_off": record_index in matched if present else None,
             "handoff_dir_present": present,
         })
     return out
@@ -310,12 +384,17 @@ def compute_turn_delivery_coverage(handoff_dir: str, user_id: str, chat_id: str,
     """Path-B handoff-delivery coverage for ONE finalized turn. Returns counts only (no raw).
     On a handoff-scan OSError returns ``{'scan_error': True, ...}`` so the caller SUPPRESSES the
     warning (never a raw error, never a false warning)."""
-    present, multiset, scan_error = _scan_turn_handoff(handoff_dir, user_id, chat_id, user_message_id)
+    present, physical_slots, scan_error = _scan_turn_handoff(
+        handoff_dir,
+        user_id,
+        chat_id,
+        user_message_id,
+    )
     if scan_error:
         return {"scan_error": True, "present": False,
                 "total": 0, "used": 0, "unused": 0, "skipped": 0, "failed": 0}
     items = [f for f in (file_items or []) if isinstance(f, dict)]
-    sigs = _file_signals(items, present, multiset)
+    sigs = _file_signals(items, present, physical_slots)
     summ = summarize([{"verdict": classify_file(s)} for s in sigs],
                      {"handoff_dir_present": present, "is_path_b": True})
     return {

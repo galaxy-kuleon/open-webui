@@ -1,9 +1,118 @@
 import ast
 import asyncio
+import hashlib
 import inspect
 from types import SimpleNamespace
 
+import pytest
+
 from open_webui.skiprag import hermes_handoff
+from open_webui.utils.handoff_filename import (
+    MAX_ATTACHMENT_BASENAME_LENGTH,
+    build_attachment_basename,
+    corrected_attachment_candidate,
+    legacy_attachment_candidate,
+)
+
+
+@pytest.mark.parametrize(
+    ("raw_name", "expected"),
+    [
+        ("個資同意書.pdf", "file.pdf"),
+        ("個人情報同意書.pdf", "file.pdf"),
+        ("개인정보동의서.pdf", "file.pdf"),
+        ("😀😀.pdf", "file.pdf"),
+        ("Report個資.pdf", "Report.pdf"),
+        ("archive.tar.gz", "archive.tar.gz"),
+        ("SCAN.PDF", "SCAN.PDF"),
+        ("README", "README"),
+        (".env", "file.env"),
+        ("report.invalid-suffix!", "report"),
+        ("report.abcdefghijklmnopq", "report"),
+        ("report.pdf ", "report.pdf"),
+        ("個資同意書.pdf ", "file.pdf"),
+        ("final report.pdf ", "final_report.pdf"),
+        ("../private/contract.pdf", "contract.pdf"),
+        (r"C:\private\report.PDF", "report.PDF"),
+        ("bad\x00line\nname.pdf", "bad_line_name.pdf"),
+        ("x" * 120 + ".pdf", "x" * 79 + ".pdf"),
+    ],
+)
+def test_corrected_attachment_candidate_vectors(raw_name, expected):
+    assert corrected_attachment_candidate(raw_name, index=0) == expected
+
+
+@pytest.mark.parametrize("stem_length", [95, 96, 120])
+@pytest.mark.parametrize("index", [0, 999, 1000])
+def test_corrected_basename_retains_suffix_with_actual_prefix_budget(
+    stem_length,
+    index,
+):
+    nonce = "deadbeef"
+    prefix = f"{index:03d}-{nonce}-"
+    basename = build_attachment_basename(
+        "a" * stem_length + ".pdf",
+        index=index,
+        nonce=nonce,
+    )
+
+    assert basename.startswith(prefix)
+    assert basename.endswith(".pdf")
+    assert len(basename) == MAX_ATTACHMENT_BASENAME_LENGTH
+    assert len(basename) <= MAX_ATTACHMENT_BASENAME_LENGTH
+    assert basename == (
+        prefix
+        + "a" * (MAX_ATTACHMENT_BASENAME_LENGTH - len(prefix) - len(".pdf"))
+        + ".pdf"
+    )
+
+
+def test_legacy_candidate_reproduces_old_whole_basename_sanitizer():
+    assert legacy_attachment_candidate("個資同意書.pdf") == "pdf"
+    assert legacy_attachment_candidate("😀😀.pdf") == "pdf"
+    assert legacy_attachment_candidate("x" * 120 + ".pdf") == "x" * 96
+    assert legacy_attachment_candidate("../report.pdf") == "report.pdf"
+    assert (
+        legacy_attachment_candidate(r"C:\private\report.pdf")
+        == "C_private_report.pdf"
+    )
+    assert legacy_attachment_candidate(".env") == "env"
+
+
+def test_safe_segment_identity_contract_is_byte_and_behavior_unchanged():
+    source = inspect.getsource(hermes_handoff._safe_segment)
+    assert (
+        hashlib.sha256(source.encode()).hexdigest()
+        == "5582250b4c28d82071a3f5970906d167373fb81c7ac4ba8c9a1835e744cd8c4e"
+    )
+    assert hermes_handoff._safe_segment("../secret", "fallback") == "secret"
+    assert hermes_handoff._safe_segment(r"user\name", "fallback") == "user_name"
+    assert hermes_handoff._safe_segment("個資", "fallback") == "fallback"
+    assert hermes_handoff._safe_segment("x" * 120, "fallback") == "x" * 96
+
+
+def test_write_handoff_files_uses_corrected_name_nonce_and_original_bytes(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        hermes_handoff.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="deadbeefcafebabe"),
+    )
+    raw_bytes = b"\x00original payload\xff"
+
+    written = hermes_handoff._write_handoff_files(
+        tmp_path,
+        r"C:\incoming\個資同意書.pdf ",
+        raw_bytes,
+        index=1000,
+    )
+
+    path = tmp_path / "1000-deadbeef-file.pdf"
+    assert written == str(path)
+    assert path.read_bytes() == raw_bytes
+    assert len(path.name) <= MAX_ATTACHMENT_BASENAME_LENGTH
 
 
 def _run_handoff(monkeypatch, tmp_path, body, payloads):
