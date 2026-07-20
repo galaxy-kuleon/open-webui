@@ -11,8 +11,9 @@ convert_to_markdown(file_bytes_or_path, filename, request=None) -> str
       - modern .docx/.xlsx/.pptx + .pdf + images → docling directly
     Cache: keyed by sha256(original bytes) + ext; stored under
     SKIP_RAG_CACHE_DIR (default /app/backend/skiprag-cache).
-    Fallback: on any soffice/docling failure, use OWUI's Loader chain and
-    log the downgrade.  Never raises — always returns some text.
+    Non-PDF fallback: on a soffice/docling failure, use OWUI's Loader chain.
+    PDFs fail closed when page counting or any native page range is unavailable.
+    The public string API returns '' for an unavailable conversion.
 
 count_tokens(text) -> int
     Tiktoken token count using TIKTOKEN_ENCODING_NAME env var.
@@ -26,9 +27,14 @@ extract_to_budget(items, query, target_tokens) -> list[str]
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import tempfile
+import threading
+import time
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 import requests
@@ -40,12 +46,51 @@ log = logging.getLogger(__name__)
 # Environment / configuration
 # ---------------------------------------------------------------------------
 
+
+def _read_positive_int_env(name: str, default: int) -> int:
+    """Read a positive integer setting and fail loudly on invalid deployment config."""
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f'{name} must be an integer >= 1, got {raw!r}') from exc
+    if value < 1:
+        raise ValueError(f'{name} must be an integer >= 1, got {raw!r}')
+    return value
+
+
 DOCLING_SERVER_URL: str = os.environ.get('DOCLING_SERVER_URL', 'http://docling:5001').rstrip('/')
 SOFFICE_URL: str = os.environ.get('SKIP_RAG_SOFFICE_URL', 'http://soffice:2004').rstrip('/')
 CACHE_DIR: str = os.environ.get('SKIP_RAG_CACHE_DIR', '/app/backend/skiprag-cache')
-OCR_PAGE_TIMEOUT: int = int(os.environ.get('SKIP_RAG_OCR_PAGE_TIMEOUT', '240'))
-TRIGGER_TOKENS: int = int(os.environ.get('SKIP_RAG_TRIGGER_TOKENS', '200000'))
-TARGET_TOKENS: int = int(os.environ.get('SKIP_RAG_TARGET_TOKENS', '180000'))
+DEFAULT_OCR_PAGE_TIMEOUT_SECONDS: int = 240
+DEFAULT_PDF_CHUNK_PAGES: int = 4
+DEFAULT_DOCLING_MAX_INFLIGHT: int = 1
+# Maximum seconds allowed per page in the current Docling PDF range.
+OCR_PAGE_TIMEOUT_SECONDS: int = _read_positive_int_env(
+    'SKIP_RAG_OCR_PAGE_TIMEOUT',
+    DEFAULT_OCR_PAGE_TIMEOUT_SECONDS,
+)
+# Maximum PDF pages submitted in one native Docling page_range request.
+PDF_CHUNK_PAGES: int = _read_positive_int_env(
+    'SKIP_RAG_PDF_CHUNK_PAGES',
+    DEFAULT_PDF_CHUNK_PAGES,
+)
+# Maximum process-wide concurrent Docling HTTP requests across worker threads.
+DOCLING_MAX_INFLIGHT: int = _read_positive_int_env(
+    'SKIP_RAG_DOCLING_MAX_INFLIGHT',
+    DEFAULT_DOCLING_MAX_INFLIGHT,
+)
+DOCLING_NON_PDF_TIMEOUT_SECONDS: int = 120
+SOFFICE_TIMEOUT_SECONDS: int = 120
+LOG_HASH_PREFIX_LENGTH: int = 16
+ELAPSED_SECONDS_DECIMAL_PLACES: int = 3
+# Explicit boundary emitted within a range by Docling and between adjacent ranges by OWUI.
+MARKDOWN_PAGE_BREAK: str = '<!-- page-break -->'
+_DOCLING_SEMAPHORE = threading.BoundedSemaphore(DOCLING_MAX_INFLIGHT)
+# Backward-compatible constant name for existing imports/config documentation.
+OCR_PAGE_TIMEOUT: int = OCR_PAGE_TIMEOUT_SECONDS
+TRIGGER_TOKENS: int = int(os.environ.get('SKIP_RAG_TRIGGER_TOKENS', '16000'))
+TARGET_TOKENS: int = int(os.environ.get('SKIP_RAG_TARGET_TOKENS', '12000'))
 TIKTOKEN_ENCODING: str = os.environ.get('TIKTOKEN_ENCODING_NAME', 'cl100k_base')
 
 # Legacy → modern mapping for soffice conversion
@@ -68,6 +113,42 @@ EMAIL_EXTS: frozenset[str] = frozenset({'eml'})
 PLAINTEXT_EXTS: frozenset[str] = frozenset({'md', 'txt'})
 
 
+class ConversionStatus(StrEnum):
+    COMPLETE = 'complete'
+    UNAVAILABLE = 'unavailable'
+
+
+@dataclass(frozen=True)
+class ConversionOutcome:
+    """Internal result contract; public ``convert_to_markdown`` remains string-compatible."""
+
+    status: ConversionStatus
+    markdown: str = ''
+    failure_kind: str | None = None
+
+    @property
+    def is_complete(self) -> bool:
+        return self.status is ConversionStatus.COMPLETE
+
+    @property
+    def is_unavailable(self) -> bool:
+        return self.status is ConversionStatus.UNAVAILABLE
+
+    @classmethod
+    def complete(cls, markdown: str) -> ConversionOutcome:
+        if not isinstance(markdown, str) or not markdown.strip():
+            raise ValueError('complete conversion outcome requires non-empty markdown')
+        return cls(status=ConversionStatus.COMPLETE, markdown=markdown)
+
+    @classmethod
+    def unavailable(cls, failure_kind: str) -> ConversionOutcome:
+        return cls(status=ConversionStatus.UNAVAILABLE, failure_kind=failure_kind)
+
+
+class PDFPageCountError(ValueError):
+    """The PDF cannot be safely assigned to bounded native page ranges."""
+
+
 # ---------------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------------
@@ -82,6 +163,12 @@ def _cache_key(raw_bytes: bytes, ext: str) -> str:
     return f'{digest}.{ext}.md'
 
 
+def content_dedupe_key(raw_bytes: bytes, filename: str) -> tuple[str, str]:
+    """Same-turn identity: full content SHA-256 plus normalized extension."""
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    return hashlib.sha256(raw_bytes).hexdigest(), ext
+
+
 def _cache_read(key: str) -> str | None:
     path = Path(CACHE_DIR) / key
     if path.exists():
@@ -92,13 +179,15 @@ def _cache_read(key: str) -> str | None:
     return None
 
 
-def _cache_write(key: str, text: str) -> None:
+def _cache_write(key: str, text: str) -> bool:
     _ensure_cache_dir()
     path = Path(CACHE_DIR) / key
     try:
         path.write_text(text, encoding='utf-8')
+        return True
     except OSError as exc:
-        log.warning('skip-rag: cache write failed: %s', exc)
+        log.warning('skip-rag: cache write failed; kind=%s', type(exc).__name__)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +202,7 @@ def _soffice_convert(file_bytes: bytes, filename: str, target_ext: str) -> bytes
         f'{SOFFICE_URL}/convert',
         params={'to': target_ext},
         files={'file': (filename, file_bytes)},
-        timeout=120,
+        timeout=SOFFICE_TIMEOUT_SECONDS,
     )
     resp.raise_for_status()
     return resp.content
@@ -123,45 +212,163 @@ def _soffice_convert(file_bytes: bytes, filename: str, target_ext: str) -> bytes
 # Docling conversion
 # ---------------------------------------------------------------------------
 def _count_pdf_pages(file_bytes: bytes) -> int:
-    """Return page count for a PDF given its bytes; 1 on any error."""
+    """Return a positive page count or fail closed before any unbounded request."""
     try:
         import io
 
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(file_bytes))
-        return max(1, len(reader.pages))
-    except Exception:
-        return 1
+        page_count = len(reader.pages)
+    except Exception as exc:
+        raise PDFPageCountError('unable to count PDF pages safely') from exc
+    if page_count < 1:
+        raise PDFPageCountError('PDF must contain at least one page')
+    return page_count
+
+
+def _plan_pdf_ranges(page_count: int, chunk_pages: int) -> list[tuple[int, int]]:
+    """Return strict 1-based inclusive coverage of every page exactly once."""
+    if page_count < 1:
+        raise ValueError(f'page_count must be >= 1, got {page_count!r}')
+    if chunk_pages < 1:
+        raise ValueError(f'chunk_pages must be >= 1, got {chunk_pages!r}')
+    return [(start, min(start + chunk_pages - 1, page_count)) for start in range(1, page_count + 1, chunk_pages)]
+
+
+def _docling_form_data(
+    page_range: tuple[int, int] | None = None,
+    *,
+    include_page_break_placeholder: bool = False,
+) -> list[tuple[str, object]]:
+    data: list[tuple[str, object]] = [
+        ('to_formats', 'md'),
+        ('image_export_mode', 'placeholder'),
+    ]
+    if include_page_break_placeholder:
+        data.append(('md_page_break_placeholder', MARKDOWN_PAGE_BREAK))
+    if page_range is not None:
+        data.extend((('page_range', page_range[0]), ('page_range', page_range[1])))
+    return data
+
+
+def _extract_docling_markdown(response) -> ConversionOutcome:
+    try:
+        result = response.json()
+    except (TypeError, ValueError):
+        return ConversionOutcome.unavailable('docling_malformed_response')
+    if isinstance(result, list):
+        result = result[0] if result else {}
+    if not isinstance(result, dict):
+        return ConversionOutcome.unavailable('docling_malformed_response')
+    doc = result.get('document', result)
+    if not isinstance(doc, dict):
+        return ConversionOutcome.unavailable('docling_malformed_response')
+    md = doc.get('md_content') or doc.get('content', '')
+    if not isinstance(md, str):
+        return ConversionOutcome.unavailable('docling_malformed_response')
+    if not md.strip():
+        return ConversionOutcome.unavailable('docling_empty_markdown')
+    return ConversionOutcome.complete(md)
+
+
+def _docling_request(
+    file_bytes: bytes,
+    filename: str,
+    *,
+    timeout_seconds: int,
+    page_range: tuple[int, int] | None = None,
+    include_page_break_placeholder: bool = False,
+) -> ConversionOutcome:
+    try:
+        with _DOCLING_SEMAPHORE:
+            response = requests.post(
+                url=f'{DOCLING_SERVER_URL}/v1/convert/file',
+                files={'files': (filename, file_bytes, 'application/octet-stream')},
+                data=_docling_form_data(
+                    page_range,
+                    include_page_break_placeholder=include_page_break_placeholder,
+                ),
+                timeout=timeout_seconds,
+            )
+            response.raise_for_status()
+        return _extract_docling_markdown(response)
+    except requests.Timeout:
+        return ConversionOutcome.unavailable('docling_timeout')
+    except requests.RequestException:
+        return ConversionOutcome.unavailable('docling_request_failed')
+
+
+def _docling_pdf_outcome(file_bytes: bytes, filename: str) -> ConversionOutcome:
+    try:
+        page_count = _count_pdf_pages(file_bytes)
+    except PDFPageCountError:
+        log.warning('skip-rag: docling_pdf_page_count outcome=unavailable')
+        return ConversionOutcome.unavailable('pdf_page_count_failed')
+    ranges = _plan_pdf_ranges(page_count, PDF_CHUNK_PAGES)
+    use_native_ranges = page_count > PDF_CHUNK_PAGES
+    hash_prefix = hashlib.sha256(file_bytes).hexdigest()[:LOG_HASH_PREFIX_LENGTH]
+    markdown_ranges: list[str] = []
+
+    for range_index, (start, end) in enumerate(ranges, start=1):
+        pages_in_range = end - start + 1
+        native_range = (start, end) if use_native_ranges else None
+        started = time.monotonic()
+        outcome = _docling_request(
+            file_bytes,
+            filename,
+            timeout_seconds=OCR_PAGE_TIMEOUT_SECONDS * pages_in_range,
+            page_range=native_range,
+            include_page_break_placeholder=True,
+        )
+        elapsed_seconds = round(
+            time.monotonic() - started,
+            ELAPSED_SECONDS_DECIMAL_PLACES,
+        )
+        log.info(
+            'skip-rag: docling_pdf_range %s',
+            json.dumps(
+                {
+                    'hash_prefix': hash_prefix,
+                    'page_count': page_count,
+                    'range_start': start,
+                    'range_end': end,
+                    'range_index': range_index,
+                    'range_total': len(ranges),
+                    'elapsed_seconds': elapsed_seconds,
+                    'outcome': outcome.status.value,
+                    'failure_kind': outcome.failure_kind,
+                },
+                sort_keys=True,
+            ),
+        )
+        if outcome.is_unavailable:
+            return outcome
+        markdown_ranges.append(outcome.markdown.strip())
+
+    combined = f'\n\n{MARKDOWN_PAGE_BREAK}\n\n'.join(markdown_ranges)
+    return ConversionOutcome.complete(combined)
 
 
 def _docling_convert(file_bytes: bytes, filename: str, ext: str) -> str:
     """
     POST file bytes to docling-serve and return the markdown text.
-    Timeout scales by page count for PDFs (OCR_PAGE_TIMEOUT × pages).
+    PDF timeout scales by pages in the current native page range.
     Raises requests.RequestException on failure.
     """
     if ext == 'pdf':
-        pages = _count_pdf_pages(file_bytes)
-        timeout = OCR_PAGE_TIMEOUT * pages
-        log.info('skip-rag: PDF has %d page(s), docling timeout=%ds', pages, timeout)
+        outcome = _docling_pdf_outcome(file_bytes, filename)
     else:
-        timeout = 120
-
-    resp = requests.post(
-        f'{DOCLING_SERVER_URL}/v1/convert/file',
-        files={'files': (filename, file_bytes, 'application/octet-stream')},
-        data={'to_formats': 'md', 'image_export_mode': 'placeholder'},
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    result = resp.json()
-    # docling-serve response: {"document": {"md_content": "..."}} or list
-    if isinstance(result, list):
-        result = result[0] if result else {}
-    doc = result.get('document', result)
-    md = doc.get('md_content') or doc.get('content', '')
-    return md
+        outcome = _docling_request(
+            file_bytes,
+            filename,
+            timeout_seconds=DOCLING_NON_PDF_TIMEOUT_SECONDS,
+        )
+    if outcome.is_unavailable and not (
+        ext != 'pdf' and outcome.failure_kind == 'docling_empty_markdown'
+    ):
+        raise requests.RequestException(outcome.failure_kind)
+    return outcome.markdown
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +399,11 @@ def _fallback_loader(file_bytes: bytes, filename: str, request=None) -> str:
         docs = loader.load(filename, None, tmp_path)
         return '\n\n'.join(doc.page_content for doc in docs if doc.page_content)
     except Exception as exc:
-        log.error('skip-rag: fallback loader also failed for %s: %s', filename, exc)
+        log.error(
+            'skip-rag: fallback loader failed for extension %s; kind=%s',
+            ext,
+            type(exc).__name__,
+        )
         return ''
     finally:
         try:
@@ -212,7 +423,7 @@ def _resolve_file_input(
     if file_bytes is not None:
         return file_bytes
     if file_bytes_or_path is None:
-        log.error('skip-rag: no file bytes or path provided for %s', filename)
+        log.error('skip-rag: no file bytes or path provided')
         return b''
     return file_bytes_or_path
 
@@ -224,6 +435,22 @@ def convert_to_markdown(
     *,
     file_bytes: bytes | None = None,
 ) -> str:
+    """Backward-compatible string API over the typed conversion outcome."""
+    return convert_to_markdown_outcome(
+        file_bytes_or_path,
+        filename,
+        request,
+        file_bytes=file_bytes,
+    ).markdown
+
+
+def convert_to_markdown_outcome(
+    file_bytes_or_path: bytes | str | os.PathLike | None = None,
+    filename: str = '',
+    request=None,
+    *,
+    file_bytes: bytes | None = None,
+) -> ConversionOutcome:
     """
     Convert a file to markdown.
 
@@ -241,8 +468,9 @@ def convert_to_markdown(
 
     Returns
     -------
-    str
-        Markdown text.  Never raises; on total failure returns ''.
+    ConversionOutcome
+        Explicit complete/unavailable state. The public compatibility wrapper
+        returns only ``markdown`` and therefore returns '' when unavailable.
     """
     file_bytes_or_path = _resolve_file_input(file_bytes_or_path, file_bytes, filename)
 
@@ -252,8 +480,8 @@ def convert_to_markdown(
             with open(file_bytes_or_path, 'rb') as fh:
                 raw_bytes = fh.read()
         except OSError as exc:
-            log.error('skip-rag: cannot read file %s: %s', file_bytes_or_path, exc)
-            return ''
+            log.error('skip-rag: file read failed; kind=%s', type(exc).__name__)
+            return ConversionOutcome.unavailable('file_read_failed')
     else:
         raw_bytes = file_bytes_or_path
 
@@ -262,37 +490,98 @@ def convert_to_markdown(
     # --- Plain text: read directly, no conversion ---
     if ext in PLAINTEXT_EXTS:
         try:
-            return raw_bytes.decode('utf-8', errors='replace')
+            md = raw_bytes.decode('utf-8', errors='replace')
         except Exception:
-            return raw_bytes.decode('latin-1', errors='replace')
+            md = raw_bytes.decode('latin-1', errors='replace')
+        return ConversionOutcome.complete(md) if md.strip() else ConversionOutcome.unavailable('empty_plaintext')
 
     # --- Cache lookup ---
     cache_key = _cache_key(raw_bytes, ext)
     cached = _cache_read(cache_key)
     if cached is not None:
-        log.info('skip-rag: cache hit for %s (%s)', filename, cache_key[:16])
-        return cached
+        outcome = (
+            ConversionOutcome.complete(cached) if cached.strip() else ConversionOutcome.unavailable('empty_cache_entry')
+        )
+        log.info(
+            'skip-rag: conversion_outcome %s',
+            json.dumps(
+                {
+                    'hash_prefix': cache_key[:LOG_HASH_PREFIX_LENGTH],
+                    'extension': ext,
+                    'outcome': outcome.status.value,
+                    'failure_kind': outcome.failure_kind,
+                    'cache_decision': 'hit_complete' if outcome.is_complete else 'hit_empty',
+                },
+                sort_keys=True,
+            ),
+        )
+        return outcome
 
     # --- Conversion ---
     used_degraded_fallback = False
-    try:
-        md = _convert_uncached(raw_bytes, filename, ext, request=request)
-    except Exception as exc:
-        log.warning('skip-rag: conversion failed for %s (%s), falling back to OWUI Loader: %s', filename, ext, exc)
-        md = _fallback_loader(raw_bytes, filename, request)
-        used_degraded_fallback = True
-        if md:
-            log.info('skip-rag: fallback loader succeeded for %s, len=%d', filename, len(md))
-        else:
-            log.error('skip-rag: fallback loader returned empty for %s', filename)
+    if ext == 'pdf':
+        try:
+            outcome = _docling_pdf_outcome(raw_bytes, filename)
+        except Exception:
+            # Keep every PDF failure on the typed fail-closed path.  Exception
+            # details are deliberately omitted because they may carry request
+            # or document context; the canonical kind is enough to diagnose.
+            log.warning(
+                'skip-rag: docling_pdf_unexpected %s',
+                json.dumps(
+                    {
+                        'outcome': 'unavailable',
+                        'failure_kind': 'unexpected_error',
+                    },
+                    sort_keys=True,
+                ),
+            )
+            outcome = ConversionOutcome.unavailable('unexpected_error')
+        md = outcome.markdown
+    else:
+        try:
+            md = _convert_uncached(raw_bytes, filename, ext, request=request)
+            outcome = (
+                ConversionOutcome.complete(md)
+                if isinstance(md, str) and md.strip()
+                else ConversionOutcome.unavailable('empty_conversion')
+            )
+        except Exception as exc:
+            log.warning(
+                'skip-rag: conversion failed for extension %s; fallback_kind=%s',
+                ext,
+                type(exc).__name__,
+            )
+            md = _fallback_loader(raw_bytes, filename, request)
+            used_degraded_fallback = True
+            outcome = (
+                ConversionOutcome.complete(md)
+                if isinstance(md, str) and md.strip()
+                else ConversionOutcome.unavailable('fallback_empty')
+            )
 
     # Cache only the normal docling/soffice conversion. Do not cache degraded
     # fallback output under the content hash: a transient sidecar outage should
     # not permanently poison future skip-rag turns for the same file.
-    if md and not used_degraded_fallback:
-        _cache_write(cache_key, md)
+    if outcome.is_complete and not used_degraded_fallback:
+        cache_decision = 'write_complete' if _cache_write(cache_key, md) else 'write_failed'
+    else:
+        cache_decision = 'skip_unavailable' if outcome.is_unavailable else 'skip_degraded'
 
-    return md
+    log.info(
+        'skip-rag: conversion_outcome %s',
+        json.dumps(
+            {
+                'hash_prefix': cache_key[:LOG_HASH_PREFIX_LENGTH],
+                'extension': ext,
+                'outcome': outcome.status.value,
+                'failure_kind': outcome.failure_kind,
+                'cache_decision': cache_decision,
+            },
+            sort_keys=True,
+        ),
+    )
+    return outcome
 
 
 def _convert_uncached(raw_bytes: bytes, filename: str, ext: str, request=None) -> str:

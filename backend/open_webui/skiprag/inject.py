@@ -46,19 +46,51 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import os
-from typing import Optional
+from dataclasses import dataclass
+from pathlib import Path
 
 from open_webui.skiprag.convert import (
-    convert_to_markdown,
-    count_tokens,
-    TRIGGER_TOKENS,
+    LOG_HASH_PREFIX_LENGTH,
     TARGET_TOKENS,
+    TRIGGER_TOKENS,
+    ConversionOutcome,
+    content_dedupe_key,
+    convert_to_markdown_outcome,
+    count_tokens,
 )
 from open_webui.skiprag.extract import extract_to_budget
 
 log = logging.getLogger(__name__)
+
+_UNAVAILABLE_MARKER_TEMPLATE = """\
+<skip-rag-materials status="unavailable" total="{total}">
+Attachment content unavailable: {total} uploaded material(s) could not be read.
+Do not claim that you read or summarized unavailable attachments.
+Tool output or conversion-job metadata is not document content.
+</skip-rag-materials>"""
+
+
+@dataclass(frozen=True)
+class ResolvedMaterial:
+    """Original bytes plus optional already-extracted DB text."""
+
+    raw_bytes: bytes
+    prepared_markdown: str | None = None
+
+
+@dataclass
+class ConversionBatch:
+    """Same-turn conversion results with item and unique-content counts separated."""
+
+    file_mds: list[tuple[str, str]]
+    unique_materials: int
+    duplicate_items: int
+    unavailable_unique_materials: int
+    unavailable_file_items: int
+
 
 # Hermes bridge model IDs — Phase 5 gate
 _HERMES_MODEL_IDS: frozenset[str] = frozenset(
@@ -105,7 +137,13 @@ def _build_injection_block(file_mds: list[tuple[str, str]]) -> str:
     return f'\n\n{sources}'
 
 
-def _inject_transiently(body: dict, injection_block: str) -> None:
+def _build_unavailable_marker(total: int) -> str:
+    if isinstance(total, bool) or not isinstance(total, int) or total < 1:
+        raise ValueError('unavailable material count must be a positive integer')
+    return '\n\n' + _UNAVAILABLE_MARKER_TEMPLATE.format(total=total)
+
+
+def _inject_transiently(body: dict, injection_block: str) -> bool:
     """
     Inject the md block transiently into the LAST USER message in the
     in-memory messages array.  Never touches the DB.
@@ -126,7 +164,75 @@ def _inject_transiently(body: dict, injection_block: str) -> None:
                     msg['content'] = [{'type': 'text', 'text': injection_block}] + list(content)
             else:
                 msg['content'] = (content or '') + injection_block
-            return
+            return True
+    return False
+
+
+async def _convert_file_items(
+    skip_rag_files: list[dict],
+    request,
+) -> ConversionBatch:
+    file_mds: list[tuple[str, str]] = []
+    outcomes_by_key: dict[tuple[str, str], ConversionOutcome] = {}
+    unavailable_item_count = 0
+    unavailable_unique_count = 0
+    duplicate_count = 0
+
+    for file_item in skip_rag_files:
+        filename = file_item.get('name', 'file')
+        resolved = await _resolve_file_bytes(file_item, filename)
+        if resolved is None:
+            key = ('unresolved:' + str(file_item.get('id') or file_item.get('file_id') or ''), '')
+            outcome = ConversionOutcome.unavailable('file_unavailable')
+        else:
+            key = content_dedupe_key(resolved.raw_bytes, filename)
+            if key in outcomes_by_key:
+                duplicate_count += 1
+                outcome = outcomes_by_key[key]
+                if outcome.is_unavailable:
+                    unavailable_item_count += 1
+                log.info(
+                    'skip-rag: same_turn_dedupe %s',
+                    json.dumps(
+                        {
+                            'hash_prefix': key[0][:LOG_HASH_PREFIX_LENGTH],
+                            'extension': key[1],
+                            'outcome': outcome.status.value,
+                            'deduplicated': True,
+                        },
+                        sort_keys=True,
+                    ),
+                )
+                continue
+            if resolved.prepared_markdown is not None:
+                outcome = ConversionOutcome.complete(resolved.prepared_markdown)
+            else:
+                outcome = await asyncio.to_thread(
+                    convert_to_markdown_outcome,
+                    resolved.raw_bytes,
+                    filename,
+                    request,
+                )
+
+        outcomes_by_key[key] = outcome
+        if outcome.is_complete:
+            file_mds.append((filename, outcome.markdown))
+        else:
+            unavailable_item_count += 1
+            unavailable_unique_count += 1
+            log.warning(
+                'skip-rag: material_unavailable outcome=%s failure_kind=%s',
+                outcome.status.value,
+                outcome.failure_kind,
+            )
+
+    return ConversionBatch(
+        file_mds=file_mds,
+        unique_materials=len(outcomes_by_key),
+        duplicate_items=duplicate_count,
+        unavailable_unique_materials=unavailable_unique_count,
+        unavailable_file_items=unavailable_item_count,
+    )
 
 
 async def run_skip_rag_path_a(
@@ -166,30 +272,20 @@ async def run_skip_rag_path_a(
     if not skip_rag_files:
         return body, {'sources': []}
 
-    # --- Convert each file to markdown ---
-    file_mds: list[tuple[str, str]] = []  # (filename, md)
-    for file_item in skip_rag_files:
-        file_id = file_item.get('id') or file_item.get('file_id')
-        filename = file_item.get('name', 'file')
+    # --- Convert each unique content+extension once; reuse success or failure. ---
+    batch = await _convert_file_items(skip_rag_files, request)
+    file_mds = batch.file_mds
 
-        md = await _load_and_convert(file_item, filename, request)
-
-        if md:
-            file_mds.append((filename, md))
-        else:
-            log.warning('skip-rag: got empty md for file %s (%s)', filename, file_id)
-
-    # --- Remove processed skip_rag file items from metadata.files ---
-    # This prevents OWUI's native pipeline (chat_completion_files_handler /
-    # get_sources_from_items) from embedding or injecting them.
-    # Non-file items (collections, knowledge) are preserved.
-    metadata['files'] = other_files
-    if 'metadata' in body:
-        body['metadata']['files'] = other_files
-
-    if not file_mds:
-        log.warning('skip-rag: no markdown produced for any file; skip injection')
-        return body, {'sources': []}
+    total_file_items = len(skip_rag_files)
+    metadata.pop('skip_rag_materials_warning', None)
+    if batch.unavailable_file_items:
+        metadata['skip_rag_materials_warning'] = {
+            'used': total_file_items - batch.unavailable_file_items,
+            'total': total_file_items,
+            'unused': batch.unavailable_file_items,
+            'skipped': 0,
+            'failed': batch.unavailable_file_items,
+        }
 
     # --- Phase 4: oversize check + query-aware extraction ---
     mds = [md for _, md in file_mds]
@@ -204,25 +300,55 @@ async def run_skip_rag_path_a(
         query = get_last_user_message(body.get('messages', [])) or ''
         # Phase 4: async extract_to_budget with extractor model call
         extracted = await extract_to_budget(mds, query, TARGET_TOKENS, request=request)
+        if len(extracted) != len(file_mds):
+            log.error(
+                'skip-rag: Phase 4 cardinality mismatch input=%d output=%d',
+                len(file_mds),
+                len(extracted),
+            )
+            raise RuntimeError('skip-rag Phase 4 cardinality mismatch')
         file_mds = [(name, t) for (name, _), t in zip(file_mds, extracted)]
 
-    # --- Build and inject the md block transiently into the last user message ---
-    injection_block = _build_injection_block(file_mds)
-    _inject_transiently(body, injection_block)
+    # --- Build and inject content and/or an explicit fail-closed marker ---
+    injection_block = _build_injection_block(file_mds) if file_mds else ''
+    if batch.unavailable_file_items:
+        injection_block += _build_unavailable_marker(batch.unavailable_file_items)
+    if not _inject_transiently(body, injection_block):
+        raise RuntimeError('skip-rag injection requires a user message')
+
+    # Remove only after model-visible injection succeeds. This prevents an
+    # unavailable attachment from disappearing silently on a malformed turn.
+    metadata['files'] = other_files
+    if 'metadata' in body:
+        body['metadata']['files'] = other_files
 
     log.info(
-        'skip-rag: Path A done (transient, Phase 4) — %d file(s), %d md chars injected, '
-        'skip_rag files removed from metadata.files',
-        len(file_mds),
-        sum(len(md) for _, md in file_mds),
+        'skip-rag: path_a_outcome %s',
+        json.dumps(
+            {
+                'input_file_items': len(skip_rag_files),
+                'unique_materials': batch.unique_materials,
+                'deduplicated_items': batch.duplicate_items,
+                'complete_materials': len(file_mds),
+                'unavailable_unique_materials': batch.unavailable_unique_materials,
+                'unavailable_file_items': batch.unavailable_file_items,
+                'markdown_chars': sum(len(md) for _, md in file_mds),
+                'embedding_suppressed': True,
+                'marker_injected': bool(batch.unavailable_file_items),
+            },
+            sort_keys=True,
+        ),
     )
 
     return body, {'sources': []}
 
 
-async def _load_and_convert(file_item: dict, filename: str, request) -> str:
+async def _resolve_file_bytes(
+    file_item: dict,
+    filename: str,
+) -> ResolvedMaterial | None:
     """
-    Resolve the physical file bytes from the file_item and call convert_to_markdown.
+    Resolve physical bytes for content-hash dedupe before conversion.
     Tries file.path (via OWUI Storage), falls back to the file DB record.
     """
     file_path = file_item.get('path') or file_item.get('file', {}).get('path')
@@ -230,9 +356,13 @@ async def _load_and_convert(file_item: dict, filename: str, request) -> str:
         try:
             from open_webui.storage.provider import Storage
             local_path = Storage.get_file(file_path)
-            return await asyncio.to_thread(convert_to_markdown, local_path, filename, request)
+            raw_bytes = await asyncio.to_thread(Path(local_path).read_bytes)
+            return ResolvedMaterial(raw_bytes=raw_bytes)
         except Exception as exc:
-            log.warning('skip-rag: Storage.get_file failed for %s: %s', filename, exc)
+            log.warning(
+                'skip-rag: file byte resolution failed at storage path; kind=%s',
+                type(exc).__name__,
+            )
 
     # Fallback: look up the file DB record (async — we are already in an async context)
     file_id = file_item.get('id') or file_item.get('file_id')
@@ -247,14 +377,21 @@ async def _load_and_convert(file_item: dict, filename: str, request) -> str:
                 if file_model.path:
                     from open_webui.storage.provider import Storage
                     local_path = Storage.get_file(file_model.path)
-                    return await asyncio.to_thread(convert_to_markdown, local_path, filename, request)
+                    raw_bytes = await asyncio.to_thread(Path(local_path).read_bytes)
+                    return ResolvedMaterial(raw_bytes=raw_bytes)
 
                 # Last resort: use text content stored in file.data
                 content = (file_model.data or {}).get('content', '')
-                if content:
-                    return content
+                if isinstance(content, str) and content.strip():
+                    return ResolvedMaterial(
+                        raw_bytes=content.encode('utf-8'),
+                        prepared_markdown=content,
+                    )
         except Exception as exc:
-            log.warning('skip-rag: file DB lookup failed for %s: %s', filename, exc)
+            log.warning(
+                'skip-rag: file byte resolution failed at DB fallback; kind=%s',
+                type(exc).__name__,
+            )
 
-    log.error('skip-rag: cannot resolve bytes for file %s', filename)
-    return ''
+    log.error('skip-rag: cannot resolve file bytes')
+    return None

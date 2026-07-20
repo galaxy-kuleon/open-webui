@@ -3,9 +3,10 @@
 
 A file-heavy turn whose uploaded files did NOT all reach the Hermes Path-B handoff is a silent
 "materials gap": the answer looks complete but some uploads may never have been delivered to the
-agent. This module is a PURE classifier + a privacy-safe warning builder + a read-only handoff
-scan so ``middleware`` can ANNOTATE such a turn (a non-blocking ``message.warning``) instead of
-implying every file was considered. The answer is still shown — this only annotates it.
+agent. This module provides a pure classifier, a privacy-safe warning builder, a read-only
+handoff scan, and a small dependency-injected persistence/event mechanism so ``middleware``
+can ANNOTATE such a turn (a non-blocking ``message.warning``) instead of implying every file
+was considered. The answer is still shown — this only annotates it.
 
 MVP scope (Planner-approved, #17 slice-3):
   * Measures ONLY Path-B handoff DELIVERY — which of the turn's user-message uploads reached
@@ -13,7 +14,8 @@ MVP scope (Planner-approved, #17 slice-3):
     stream by ``hermes_handoff.run_hermes_handoff`` — middleware:2944 — so it is fully settled at
     finalization; NOT a race). It deliberately does NOT depend on native extraction/OCR
     (``file.data.content``), which can lag at finalize — that is a later load-time endpoint.
-  * Path A (skip-rag, no handoff dir) is UNMEASURABLE per-file → NO warning (no false positive).
+  * This handoff scanner does not infer Path-A coverage. Path A supplies definitive typed
+    conversion counts in request metadata and reuses the same privacy-safe builder/surface.
   * Warns iff: a handoff dir exists for the turn AND files>0 AND >=1 file is definitively NOT
     delivered (``unused>0``). Empty-turn (#16) takes priority over this warning.
 
@@ -193,6 +195,23 @@ def assert_warning_privacy_safe(payload: dict) -> dict:
     if payload.get("content") != rebuilt:
         raise ValueError("warning payload 'content' is not the fixed counts banner (possible leak)")
     return payload
+
+
+async def persist_and_emit_warning(
+    persist_message_update,
+    event_emitter,
+    chat_id: str,
+    message_id: str,
+    warning: dict,
+) -> None:
+    """Persist and emit one already-built privacy-safe warning through OWUI's
+    existing message-warning contract. Dependencies are passed explicitly so
+    the mechanism remains unit-testable without importing live app state."""
+    assert_warning_privacy_safe(warning)
+    await persist_message_update(chat_id, message_id, {"warning": warning})
+    await event_emitter(
+        {"type": "chat:message:warning", "data": {"warning": warning}}
+    )
 
 
 # ── runtime Path-B handoff-DELIVERY scan (impure: filesystem LIST/STAT only, never reads bytes) ─

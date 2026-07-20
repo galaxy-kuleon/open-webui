@@ -83,6 +83,7 @@ from open_webui.utils.failure_surface import (
 from open_webui.utils.file_coverage import (
     build_warning_payload,
     compute_turn_delivery_coverage,
+    persist_and_emit_warning,
     should_warn,
 )
 from open_webui.utils.hermes_bridge import (
@@ -5264,24 +5265,35 @@ async def streaming_chat_response_handler(response, ctx):
                             ),
                         )
                     else:
-                        # #17 slice-3: a finalized (non-empty) file-heavy turn whose uploaded
-                        # files did NOT all reach the Hermes Path-B handoff is a silent materials
-                        # gap. Annotate the answer with a non-blocking, COUNTS-ONLY warning (never
-                        # raw names/content/paths — M4); the answer itself is left intact. The
-                        # handoff is settled here (run_hermes_handoff ran SYNCHRONOUSLY before the
-                        # stream), so "not delivered" is definitive, not a race. Path A / no
-                        # handoff dir = unmeasurable → no warning. Any failure SUPPRESSES the
-                        # warning (no false warning, no raw leak). Empty-turn (#16) took priority.
+                        # #17 + Path-A fail-closed: annotate a finalized file-heavy answer with a
+                        # non-blocking, COUNTS-ONLY warning (never raw names/content/paths — M4).
+                        # Path A records definitive typed conversion outcomes before streaming;
+                        # Path B computes settled handoff delivery here. Any warning-builder/scan
+                        # failure suppresses the warning without leaking raw exception details.
+                        # Empty-turn (#16) retains priority.
                         try:
                             user_message = metadata.get('user_message') or {}
                             turn_files = user_message.get('files') or []
+                            path_a_counts = metadata.get('skip_rag_materials_warning')
+                            warning = None
+                            warning_source = None
+                            if isinstance(path_a_counts, dict) and path_a_counts.get('unused', 0) > 0:
+                                warning = build_warning_payload(
+                                    metadata['chat_id'],
+                                    metadata['message_id'],
+                                    used=path_a_counts['used'],
+                                    total=path_a_counts['total'],
+                                    unused=path_a_counts['unused'],
+                                    skipped=path_a_counts['skipped'],
+                                    failed=path_a_counts['failed'],
+                                )
+                                warning_source = 'path_a_conversion'
                             # #17 slice-3 keying fix: scan the dir run_hermes_handoff ACTUALLY wrote
                             # (recorded as metadata['handoff_message_id'] = subdir.name) rather than
                             # reconstructing message/<user_message.id>/ — which never matched because
-                            # the handoff keys on the id-stripped body messages (random uuid). Absent
-                            # (Path A / non-bridge / no handoff) ⇒ None ⇒ scan finds nothing ⇒ no warn.
+                            # the handoff keys on the id-stripped body messages (random uuid).
                             handoff_msg_id = metadata.get('handoff_message_id')
-                            if turn_files and handoff_msg_id:
+                            if warning is None and turn_files and handoff_msg_id:
                                 cov = compute_turn_delivery_coverage(
                                     '/handoff', user.id, metadata['chat_id'],
                                     handoff_msg_id, turn_files,
@@ -5292,27 +5304,29 @@ async def streaming_chat_response_handler(response, ctx):
                                         used=cov['used'], total=cov['total'], unused=cov['unused'],
                                         skipped=cov['skipped'], failed=cov['failed'],
                                     )
-                                    await Chats.upsert_message_to_chat_by_id_and_message_id(
-                                        metadata['chat_id'],
-                                        metadata['message_id'],
-                                        {'warning': warning},
-                                    )
-                                    await event_emitter(
-                                        {'type': 'chat:message:warning', 'data': {'warning': warning}}
-                                    )
-                                    log.info(
-                                        'partial-materials surfaced %s',
-                                        json.dumps(
-                                            {
-                                                'chat_id': metadata['chat_id'],
-                                                'msg_id': metadata['message_id'],
-                                                'trace_id': warning['trace_id'],
-                                                'kind': warning['kind'],
-                                                'used': warning['used'],
-                                                'total': warning['total'],
-                                            }
-                                        ),
-                                    )
+                                    warning_source = 'path_b_handoff'
+                            if warning is not None:
+                                await persist_and_emit_warning(
+                                    Chats.upsert_message_to_chat_by_id_and_message_id,
+                                    event_emitter,
+                                    metadata['chat_id'],
+                                    metadata['message_id'],
+                                    warning,
+                                )
+                                log.info(
+                                    'partial-materials surfaced %s',
+                                    json.dumps(
+                                        {
+                                            'trace_id': warning['trace_id'],
+                                            'kind': warning['kind'],
+                                            'used': warning['used'],
+                                            'total': warning['total'],
+                                            'unused': warning['unused'],
+                                            'failed': warning['failed'],
+                                            'source': warning_source,
+                                        }
+                                    ),
+                                )
                         except Exception as warn_exc:  # suppress — never break the turn / leak raw
                             log.debug('partial-materials coverage skipped: %s', type(warn_exc).__name__)
 

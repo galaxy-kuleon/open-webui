@@ -6,6 +6,7 @@ classifier, the Path-B handoff-delivery scan (against a real temp dir, list/stat
 warn gating, the privacy-safe warning payload (allow-list + fail-loud canonical kind), the
 trace format, and a drift-guard vs the parent-repo ops classifier.
 """
+import asyncio
 import hashlib
 import importlib.util
 import os
@@ -194,6 +195,43 @@ class TestWarningPayload(unittest.TestCase):
     def test_valid_payload_round_trips(self):
         p = fc.build_warning_payload("c1234567", "m1234567", used=10, total=12, unused=2, skipped=1, failed=1)
         self.assertEqual(fc.assert_warning_privacy_safe(p), p)
+
+    def test_warning_is_persisted_and_emitted_via_existing_event_contract(self):
+        calls = []
+
+        async def persist(chat_id, message_id, update):
+            calls.append(("persist", chat_id, message_id, update))
+
+        async def emit(event):
+            calls.append(("emit", event))
+
+        warning = fc.build_warning_payload(
+            "c1234567", "m1234567", used=0, total=2, unused=2, failed=2
+        )
+        asyncio.run(
+            fc.persist_and_emit_warning(
+                persist, emit, "c1234567", "m1234567", warning
+            )
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "persist",
+                    "c1234567",
+                    "m1234567",
+                    {"warning": warning},
+                ),
+                (
+                    "emit",
+                    {
+                        "type": "chat:message:warning",
+                        "data": {"warning": warning},
+                    },
+                ),
+            ],
+        )
 
 
 class TestSanitizerAndVocabularyDriftGuard(unittest.TestCase):
