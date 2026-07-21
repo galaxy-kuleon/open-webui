@@ -68,11 +68,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import html
+import json
 import logging
 import os
 import re
+import tempfile
+import threading
 import uuid
-import html
 from pathlib import Path
 from typing import Optional
 
@@ -90,6 +93,11 @@ HANDOFF_SIGNING_KEY: str = os.environ.get(
     os.environ.get('HERMES_BRIDGE_API_KEY', ''),
 )
 _SAFE_SEGMENT_RE = re.compile(r'[^a-zA-Z0-9_.-]+')
+_SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
+HANDOFF_MANIFEST_NAME = '.owui-handoff-manifest.json'
+HANDOFF_MANIFEST_MAX_ENTRIES = 50
+HANDOFF_MANIFEST_MAX_BYTES = 128 * 1024
+_MANIFEST_LOCK = threading.Lock()
 
 # Mirror of _HERMES_MODEL_IDS in inject.py — duplicated intentionally so this
 # module has no import dependency on inject.py (avoids circular imports).
@@ -288,6 +296,179 @@ def _build_files_block(entries: list[dict[str, str]]) -> str:
     return '\n'.join(lines)
 
 
+def _chat_handoff_dir(user_id: str, chat_id: str) -> Path:
+    return Path(HANDOFF_DIR) / 'user' / user_id / 'chat' / chat_id
+
+
+def _manifest_enabled(metadata: dict, user_id: str, chat_id: str) -> bool:
+    user_message = metadata.get('user_message')
+    return (
+        user_id != 'nouser'
+        and chat_id != 'nochat'
+        and isinstance(user_message, dict)
+        and bool(user_message.get('id'))
+    )
+
+
+def _valid_manifest_entry(
+    raw: object,
+    *,
+    user_id: str,
+    chat_id: str,
+    allowed_root: Path,
+) -> Optional[dict[str, str]]:
+    if not isinstance(raw, dict) or not HANDOFF_SIGNING_KEY:
+        return None
+    original = str(raw.get('original') or '')
+    file_id = str(raw.get('file_id') or '')
+    sha256 = str(raw.get('sha256') or '')
+    supplied_sig = str(raw.get('sig') or '')
+    if not original or not _SHA256_RE.fullmatch(sha256) or not supplied_sig:
+        return None
+    try:
+        candidate = Path(original).resolve()
+        candidate.relative_to(allowed_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    expected_sig = _sign_handoff_entry(
+        user_id,
+        chat_id,
+        str(candidate),
+        file_id=file_id,
+        sha256=sha256,
+    )
+    if not hmac.compare_digest(expected_sig, supplied_sig):
+        return None
+    return {
+        'original': str(candidate),
+        'user_id': user_id,
+        'chat_id': chat_id,
+        'file_id': file_id,
+        'sha256': sha256,
+        'sig': supplied_sig,
+    }
+
+
+def _read_manifest_entries(user_id: str, chat_id: str) -> list[dict[str, str]]:
+    chat_root = _chat_handoff_dir(user_id, chat_id)
+    manifest_path = chat_root / HANDOFF_MANIFEST_NAME
+    try:
+        if manifest_path.stat().st_size > HANDOFF_MANIFEST_MAX_BYTES:
+            log.warning('hermes-handoff: rejecting oversized manifest %s', manifest_path)
+            return []
+        payload = json.loads(manifest_path.read_text(encoding='utf-8'))
+        if payload.get('version') != 1 or payload.get('scope') != {
+            'user_id': user_id,
+            'chat_id': chat_id,
+        }:
+            return []
+        raw_entries = payload.get('entries')
+        if not isinstance(raw_entries, list):
+            return []
+        allowed_root = chat_root.resolve()
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return []
+
+    entries: list[dict[str, str]] = []
+    for raw in raw_entries[-HANDOFF_MANIFEST_MAX_ENTRIES:]:
+        entry = _valid_manifest_entry(
+            raw,
+            user_id=user_id,
+            chat_id=chat_id,
+            allowed_root=allowed_root,
+        )
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _atomic_write_manifest(
+    user_id: str,
+    chat_id: str,
+    entries: list[dict[str, str]],
+) -> None:
+    chat_root = _chat_handoff_dir(user_id, chat_id)
+    chat_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = chat_root / HANDOFF_MANIFEST_NAME
+    payload = {
+        'version': 1,
+        'scope': {'user_id': user_id, 'chat_id': chat_id},
+        'entries': [
+            {
+                'original': entry['original'],
+                'file_id': entry.get('file_id', ''),
+                'sha256': entry.get('sha256', ''),
+                'sig': entry['sig'],
+            }
+            for entry in entries[-HANDOFF_MANIFEST_MAX_ENTRIES:]
+        ],
+    }
+    temp_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            encoding='utf-8',
+            dir=chat_root,
+            prefix='.owui-handoff-manifest-',
+            suffix='.tmp',
+            delete=False,
+        ) as handle:
+            temp_path = handle.name
+            json.dump(payload, handle, separators=(',', ':'), sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, manifest_path)
+        temp_path = None
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+def _merge_manifest_entries(
+    user_id: str,
+    chat_id: str,
+    new_entries: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Atomically read-modify-write one bounded chat manifest."""
+    with _MANIFEST_LOCK:
+        existing = _read_manifest_entries(user_id, chat_id)
+        for entry in new_entries:
+            entry = dict(entry)
+            entry['sig'] = _sign_handoff_entry(
+                user_id,
+                chat_id,
+                entry['original'],
+                file_id=entry.get('file_id', ''),
+                sha256=entry.get('sha256', ''),
+            )
+            identity = ('file_id', entry['file_id']) if entry.get('file_id') else (
+                'original',
+                entry['original'],
+            )
+            existing = [
+                prior
+                for prior in existing
+                if (
+                    ('file_id', prior.get('file_id'))
+                    if prior.get('file_id')
+                    else ('original', prior.get('original'))
+                )
+                != identity
+            ]
+            existing.append(entry)
+        merged = existing[-HANDOFF_MANIFEST_MAX_ENTRIES:]
+        _atomic_write_manifest(user_id, chat_id, merged)
+        return merged
+
+
+def _load_manifest_entries(user_id: str, chat_id: str) -> list[dict[str, str]]:
+    with _MANIFEST_LOCK:
+        return _read_manifest_entries(user_id, chat_id)
+
+
 def _build_materials_note(skipped: int) -> str:
     """#17 slice-4: build the COUNTS-ONLY ``<materials_note>`` appended to the injection when one
     or more current-turn uploads were SKIPPED (could not be resolved/written, so NOT delivered to
@@ -405,8 +586,9 @@ async def run_hermes_handoff(
     metadata = body.get('metadata', {})
     files = metadata.get('files', [])
 
-    if not files:
-        return body
+    user_id = _user_id_from_user(user)
+    chat_id: str = _safe_segment(metadata.get('chat_id') or body.get('chat_id'), 'nochat')
+    use_manifest = _manifest_enabled(metadata, user_id, chat_id)
 
     # Partition: current-turn file items vs. everything else. metadata.files
     # is chat-level and may contain historical file items, so it is not the
@@ -421,12 +603,13 @@ async def run_hermes_handoff(
         metadata['files'] = other_items
         if 'metadata' in body:
             body['metadata']['files'] = other_items
+        entries = _load_manifest_entries(user_id, chat_id) if use_manifest else []
+        if entries:
+            _inject_transiently(body, _build_files_block(entries))
         return body
 
     # Determine the handoff subdir from user/chat/message context. User/chat
     # scope is also signed into each <file> entry and re-checked by Hermes.
-    user_id = _user_id_from_user(user)
-    chat_id: str = _safe_segment(metadata.get('chat_id') or body.get('chat_id'), 'nochat')
     # Try to derive a message_id from the last user message (if present)
     message_id: Optional[str] = None
     for msg in reversed(body.get('messages', [])):
@@ -499,6 +682,12 @@ async def run_hermes_handoff(
     # actually handed off. Counts only — never names. (Reaching here implies file_items is non-empty;
     # the genuinely-no-uploaded-files turn already returned above, byte-for-byte unchanged.)
     skipped_count = len(file_items) - len(entries)
+
+    if use_manifest and entries:
+        try:
+            entries = _merge_manifest_entries(user_id, chat_id, entries)
+        except OSError as exc:
+            log.error('hermes-handoff: failed to update chat manifest: %s', exc)
 
     # 5. Build the transient injection for the LAST USER message (NOT persisted to webui.db):
     #    - the <files> block (delivered files), when any were handed off; AND/OR
