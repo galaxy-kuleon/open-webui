@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import multiprocessing
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -145,8 +146,43 @@ def _attachment_files(tmp_path):
     return [
         path
         for path in tmp_path.rglob("*")
-        if path.is_file() and path.name != ".owui-handoff-manifest.json"
+        if path.is_file()
+        and path.name
+        not in {".owui-handoff-manifest.json", ".owui-handoff-manifest.lock"}
     ]
+
+
+def _merge_manifest_entry_in_process(
+    handoff_dir,
+    index,
+    start_barrier,
+):
+    from open_webui.skiprag import hermes_handoff as process_handoff
+
+    process_handoff.HANDOFF_DIR = handoff_dir
+    process_handoff.HANDOFF_SIGNING_KEY = "test-secret"
+    original_read = process_handoff._read_manifest_entries
+
+    def slow_read(user_id, chat_id):
+        entries = original_read(user_id, chat_id)
+        time.sleep(0.1)
+        return entries
+
+    process_handoff._read_manifest_entries = slow_read
+    chat_root = Path(handoff_dir) / "user" / "user-1" / "chat" / "chat-1"
+    path = chat_root / "message" / f"msg-{index}" / f"report-{index}.pdf"
+    start_barrier.wait(timeout=30)
+    process_handoff._merge_manifest_entries(
+        "user-1",
+        "chat-1",
+        [
+            {
+                "original": str(path),
+                "file_id": f"file-{index}",
+                "sha256": hashlib.sha256(str(index).encode()).hexdigest(),
+            }
+        ],
+    )
 
 
 def test_path_b_imports_no_asyncio_or_markdown_converter():
@@ -527,7 +563,7 @@ def test_three_upload_turns_accumulate_50_and_followup_reinjects_without_scan(
         assert f'file_id="file-{index:03d}"' in content
 
 
-def test_manifest_cap_keeps_latest_50_entries_without_deleting_handoff_files(
+def test_manifest_preserves_all_entries_without_silent_eviction(
     monkeypatch,
     tmp_path,
 ):
@@ -564,7 +600,7 @@ def test_manifest_cap_keeps_latest_50_entries_without_deleting_handoff_files(
         / ".owui-handoff-manifest.json"
     )
     first_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    evicted_paths = [entry["original"] for entry in first_manifest["entries"][:5]]
+    original_paths = [entry["original"] for entry in first_manifest["entries"][:5]]
 
     newest_files = [
         {
@@ -592,17 +628,17 @@ def test_manifest_cap_keeps_latest_50_entries_without_deleting_handoff_files(
 
     final_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert [entry["file_id"] for entry in final_manifest["entries"]] == [
-        f"file-{index:03d}" for index in range(5, 55)
+        f"file-{index:03d}" for index in range(55)
     ]
     assert calls == [(item["id"], item["name"]) for item in newest_files]
     content = result["messages"][-1]["content"]
-    assert content.count("<file ") == 50
-    for index in range(5):
-        assert f'file_id="file-{index:03d}"' not in content
-    assert all(Path(path).is_file() for path in evicted_paths)
+    assert content.count("<file ") == 55
+    for index in range(55):
+        assert f'file_id="file-{index:03d}"' in content
+    assert all(Path(path).is_file() for path in original_paths)
 
 
-def test_concurrent_manifest_updates_do_not_lose_entries(monkeypatch, tmp_path):
+def test_concurrent_thread_manifest_updates_do_not_lose_entries(monkeypatch, tmp_path):
     handoff_dir = tmp_path / "handoff"
     monkeypatch.setattr(hermes_handoff, "HANDOFF_DIR", str(handoff_dir))
     monkeypatch.setattr(hermes_handoff, "HANDOFF_SIGNING_KEY", "test-secret")
@@ -639,6 +675,147 @@ def test_concurrent_manifest_updates_do_not_lose_entries(monkeypatch, tmp_path):
     assert {entry["file_id"] for entry in manifest["entries"]} == {
         f"file-{index}" for index in range(20)
     }
+
+
+def test_concurrent_process_manifest_updates_do_not_lose_entries(tmp_path):
+    handoff_dir = tmp_path / "handoff"
+    context = multiprocessing.get_context("spawn")
+    start_barrier = context.Barrier(9)
+    processes = [
+        context.Process(
+            target=_merge_manifest_entry_in_process,
+            args=(str(handoff_dir), index, start_barrier),
+        )
+        for index in range(8)
+    ]
+
+    try:
+        for process in processes:
+            process.start()
+        start_barrier.wait(timeout=30)
+        for process in processes:
+            process.join(timeout=15)
+            assert process.exitcode == 0
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    manifest_path = (
+        handoff_dir
+        / "user"
+        / "user-1"
+        / "chat"
+        / "chat-1"
+        / ".owui-handoff-manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert {entry["file_id"] for entry in manifest["entries"]} == {
+        f"file-{index}" for index in range(8)
+    }
+
+
+def test_manifest_byte_overflow_rolls_back_and_marks_turn_skipped(
+    monkeypatch,
+    tmp_path,
+):
+    first_body = _body_with([
+        {"type": "file", "id": "file-1", "name": "first.pdf"},
+    ])
+    _run_handoff(monkeypatch, tmp_path, first_body, {"file-1": b"first"})
+    chat_root = tmp_path / "handoff" / "user" / "user-1" / "chat" / "chat-1"
+    manifest_path = chat_root / ".owui-handoff-manifest.json"
+    manifest_before = manifest_path.read_bytes()
+    prior_attachments = _attachment_files(tmp_path)
+    assert len(prior_attachments) == 1
+    monkeypatch.setattr(
+        hermes_handoff,
+        "HANDOFF_MANIFEST_MAX_BYTES",
+        len(manifest_before),
+    )
+
+    second_body = {
+        "chat_id": "chat-1",
+        "metadata": {
+            "chat_id": "chat-1",
+            "user_message": {
+                "id": "msg-2",
+                "files": [
+                    {"type": "file", "id": "file-2", "name": "second.pdf"},
+                ],
+            },
+            "files": [
+                {"type": "file", "id": "file-2", "name": "second.pdf"},
+            ],
+        },
+        "messages": [{"role": "user", "id": "msg-2", "content": "second"}],
+    }
+    result, _calls = _run_handoff(
+        monkeypatch,
+        tmp_path,
+        second_body,
+        {"file-2": b"second"},
+    )
+
+    assert manifest_path.read_bytes() == manifest_before
+    assert _attachment_files(tmp_path) == prior_attachments
+    content = result["messages"][-1]["content"]
+    assert 'file_id="file-1"' in content
+    assert "file-2" not in content
+    assert '<materials_note skipped="1">' in content
+
+
+def test_manifest_lock_timeout_rolls_back_and_marks_turn_skipped(
+    monkeypatch,
+    tmp_path,
+):
+    body = _body_with([
+        {"type": "file", "id": "file-1", "name": "report.pdf"},
+    ])
+
+    def timeout(*_args):
+        raise hermes_handoff.FileLockTimeout("manifest lock")
+
+    monkeypatch.setattr(hermes_handoff, "_merge_manifest_entries", timeout)
+    result, _calls = _run_handoff(
+        monkeypatch,
+        tmp_path,
+        body,
+        {"file-1": b"payload"},
+    )
+
+    content = result["messages"][-1]["content"]
+    assert "<files>" not in content
+    assert '<materials_note skipped="1">' in content
+    assert _attachment_files(tmp_path) == []
+
+
+def test_manifest_merge_runs_off_event_loop_thread(monkeypatch, tmp_path):
+    import threading
+
+    body = _body_with([
+        {"type": "file", "id": "file-1", "name": "report.pdf"},
+    ])
+    event_loop_thread = threading.get_ident()
+
+    def observe_thread(_user_id, _chat_id, entries):
+        assert threading.get_ident() != event_loop_thread
+        return entries
+
+    monkeypatch.setattr(
+        hermes_handoff,
+        "_merge_manifest_entries",
+        observe_thread,
+    )
+    result, _calls = _run_handoff(
+        monkeypatch,
+        tmp_path,
+        body,
+        {"file-1": b"payload"},
+    )
+
+    assert 'file_id="file-1"' in result["messages"][-1]["content"]
 
 
 def test_followup_manifest_rejects_validly_signed_cross_user_entry(
@@ -769,19 +946,65 @@ def test_materials_note_injected_when_a_file_is_skipped(monkeypatch, tmp_path):
     assert content.count("<materials_note") == 1
 
 
-def test_all_skipped_injects_only_materials_note_no_files_block(monkeypatch, tmp_path):
-    # ALL current-turn uploads skipped (entries empty, skipped>0) → ONLY the note, NO empty <files>.
-    body = _body_with([
+def test_all_skipped_without_history_injects_only_materials_note(monkeypatch, tmp_path):
+    skipped = [
         {"type": "file", "id": "skip-1", "name": "a.pdf"},
         {"type": "file", "id": "skip-2", "name": "b.pdf"},
-    ])
-    result, _calls = _run_handoff(monkeypatch, tmp_path, body, {"skip-1": b"", "skip-2": b""})
+    ]
+
+    result, _calls = _run_handoff(
+        monkeypatch,
+        tmp_path,
+        _body_with(skipped),
+        {"skip-1": b"", "skip-2": b""},
+    )
+
     content = result["messages"][0]["content"]
-    assert "<files>" not in content  # no empty files block
+    assert "<files>" not in content
+    assert "<file " not in content
     assert '<materials_note skipped="2">' in content
-    assert "2 uploaded file(s) could not be read or delivered" in content
-    assert not _attachment_files(tmp_path)  # nothing handed off
-    assert result["metadata"]["files"] == []  # current-turn file items still stripped from RAG
+    assert _attachment_files(tmp_path) == []
+
+
+def test_all_skipped_preserves_prior_manifest_and_adds_materials_note(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    seed = _body_with([
+        {'type': 'file', 'id': 'existing-1', 'name': 'existing.pdf'},
+    ])
+    _run_handoff(monkeypatch, tmp_path, seed, {'existing-1': b'existing bytes'})
+    caplog.clear()
+    caplog.set_level("INFO", logger=hermes_handoff.__name__)
+
+    skipped = [
+        {'type': 'file', 'id': 'skip-1', 'name': 'a.pdf'},
+        {'type': 'file', 'id': 'skip-2', 'name': 'b.pdf'},
+    ]
+    body = {
+        'chat_id': 'chat-1',
+        'metadata': {
+            'chat_id': 'chat-1',
+            'user_message': {'id': 'msg-2', 'files': skipped},
+            'files': skipped,
+        },
+        'messages': [{'role': 'user', 'id': 'msg-2', 'content': 'more materials'}],
+    }
+    result, _calls = _run_handoff(monkeypatch, tmp_path, body, {'skip-1': b'', 'skip-2': b''})
+    content = result['messages'][0]['content']
+    assert content.count('<files>') == 1
+    assert content.count('<file ') == 1
+    assert 'file_id="existing-1"' in content
+    assert '<materials_note skipped="2">' in content
+    assert '2 uploaded file(s) could not be read or delivered' in content
+    assert len(_attachment_files(tmp_path)) == 1
+    assert result['metadata']['files'] == []  # current-turn file items still stripped from RAG
+    assert any(
+        "Path B done" in record.message
+        and "0 file(s) handed off" in record.message
+        for record in caplog.records
+    )
 
 
 def test_all_delivered_no_materials_note(monkeypatch, tmp_path):

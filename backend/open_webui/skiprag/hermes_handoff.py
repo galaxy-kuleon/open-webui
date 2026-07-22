@@ -74,10 +74,12 @@ import logging
 import os
 import re
 import tempfile
-import threading
 import uuid
 from pathlib import Path
 from typing import Optional
+
+from filelock import FileLock, Timeout as FileLockTimeout
+from starlette.concurrency import run_in_threadpool
 
 from open_webui.utils.handoff_filename import build_attachment_basename
 
@@ -95,9 +97,9 @@ HANDOFF_SIGNING_KEY: str = os.environ.get(
 _SAFE_SEGMENT_RE = re.compile(r'[^a-zA-Z0-9_.-]+')
 _SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 HANDOFF_MANIFEST_NAME = '.owui-handoff-manifest.json'
-HANDOFF_MANIFEST_MAX_ENTRIES = 50
+HANDOFF_MANIFEST_LOCK_NAME = '.owui-handoff-manifest.lock'
 HANDOFF_MANIFEST_MAX_BYTES = 128 * 1024
-_MANIFEST_LOCK = threading.Lock()
+HANDOFF_MANIFEST_LOCK_TIMEOUT_SECONDS = 10
 
 # Mirror of _HERMES_MODEL_IDS in inject.py — duplicated intentionally so this
 # module has no import dependency on inject.py (avoids circular imports).
@@ -370,7 +372,7 @@ def _read_manifest_entries(user_id: str, chat_id: str) -> list[dict[str, str]]:
         return []
 
     entries: list[dict[str, str]] = []
-    for raw in raw_entries[-HANDOFF_MANIFEST_MAX_ENTRIES:]:
+    for raw in raw_entries:
         entry = _valid_manifest_entry(
             raw,
             user_id=user_id,
@@ -380,6 +382,10 @@ def _read_manifest_entries(user_id: str, chat_id: str) -> list[dict[str, str]]:
         if entry is not None:
             entries.append(entry)
     return entries
+
+
+class HandoffManifestCapacityError(ValueError):
+    """Raised when chat continuity cannot fit in the bounded manifest."""
 
 
 def _atomic_write_manifest(
@@ -400,21 +406,29 @@ def _atomic_write_manifest(
                 'sha256': entry.get('sha256', ''),
                 'sig': entry['sig'],
             }
-            for entry in entries[-HANDOFF_MANIFEST_MAX_ENTRIES:]
+            for entry in entries
         ],
     }
+    encoded_payload = json.dumps(
+        payload,
+        separators=(',', ':'),
+        sort_keys=True,
+    ).encode('utf-8')
+    if len(encoded_payload) > HANDOFF_MANIFEST_MAX_BYTES:
+        raise HandoffManifestCapacityError(
+            f'handoff manifest exceeds {HANDOFF_MANIFEST_MAX_BYTES} bytes'
+        )
     temp_path: Optional[str] = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode='w',
-            encoding='utf-8',
+            mode='wb',
             dir=chat_root,
             prefix='.owui-handoff-manifest-',
             suffix='.tmp',
             delete=False,
         ) as handle:
             temp_path = handle.name
-            json.dump(payload, handle, separators=(',', ':'), sort_keys=True)
+            handle.write(encoded_payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, manifest_path)
@@ -433,7 +447,13 @@ def _merge_manifest_entries(
     new_entries: list[dict[str, str]],
 ) -> list[dict[str, str]]:
     """Atomically read-modify-write one bounded chat manifest."""
-    with _MANIFEST_LOCK:
+    chat_root = _chat_handoff_dir(user_id, chat_id)
+    chat_root.mkdir(parents=True, exist_ok=True)
+    lock_path = chat_root / HANDOFF_MANIFEST_LOCK_NAME
+    with FileLock(
+        str(lock_path),
+        timeout=HANDOFF_MANIFEST_LOCK_TIMEOUT_SECONDS,
+    ):
         existing = _read_manifest_entries(user_id, chat_id)
         for entry in new_entries:
             entry = dict(entry)
@@ -459,14 +479,33 @@ def _merge_manifest_entries(
                 != identity
             ]
             existing.append(entry)
-        merged = existing[-HANDOFF_MANIFEST_MAX_ENTRIES:]
-        _atomic_write_manifest(user_id, chat_id, merged)
-        return merged
+        _atomic_write_manifest(user_id, chat_id, existing)
+        return existing
+
+
+def _cleanup_failed_turn_files(
+    entries: list[dict[str, str]],
+    subdir: Path,
+) -> None:
+    """Remove only files written by a turn whose manifest update failed."""
+    for original in {entry['original'] for entry in entries}:
+        path = Path(original)
+        if path.parent != subdir:
+            continue
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning('hermes-handoff: failed to clean up %s: %s', path, exc)
+    try:
+        subdir.rmdir()
+    except OSError:
+        pass
 
 
 def _load_manifest_entries(user_id: str, chat_id: str) -> list[dict[str, str]]:
-    with _MANIFEST_LOCK:
-        return _read_manifest_entries(user_id, chat_id)
+    return _read_manifest_entries(user_id, chat_id)
 
 
 def _build_materials_note(skipped: int) -> str:
@@ -603,7 +642,11 @@ async def run_hermes_handoff(
         metadata['files'] = other_items
         if 'metadata' in body:
             body['metadata']['files'] = other_items
-        entries = _load_manifest_entries(user_id, chat_id) if use_manifest else []
+        entries = (
+            await run_in_threadpool(_load_manifest_entries, user_id, chat_id)
+            if use_manifest
+            else []
+        )
         if entries:
             _inject_transiently(body, _build_files_block(entries))
         return body
@@ -632,7 +675,7 @@ async def run_hermes_handoff(
     if 'metadata' in body:
         body['metadata']['handoff_message_id'] = subdir.name
 
-    entries: list[dict[str, str]] = []
+    turn_entries: list[dict[str, str]] = []
 
     for idx, file_item in enumerate(file_items, start=1):
         filename = file_item.get('name', 'file')
@@ -657,7 +700,7 @@ async def run_hermes_handoff(
             )
             continue
 
-        entries.append(
+        turn_entries.append(
             {
                 'original': orig_path,
                 'user_id': user_id,
@@ -678,31 +721,56 @@ async def run_hermes_handoff(
         body['metadata']['files'] = other_items
 
     # #17 slice-4: how many of THIS turn's uploads were skipped (could not be resolved/written →
-    # NOT delivered to the agent). file_items is the deduped current-turn set; entries is what was
+    # NOT delivered to the agent). file_items is the deduped current-turn set; turn_entries is what was
     # actually handed off. Counts only — never names. (Reaching here implies file_items is non-empty;
     # the genuinely-no-uploaded-files turn already returned above, byte-for-byte unchanged.)
-    skipped_count = len(file_items) - len(entries)
+    skipped_count = len(file_items) - len(turn_entries)
+    injection_entries = turn_entries
 
-    if use_manifest and entries:
-        try:
-            entries = _merge_manifest_entries(user_id, chat_id, entries)
-        except OSError as exc:
-            log.error('hermes-handoff: failed to update chat manifest: %s', exc)
+    if use_manifest:
+        if turn_entries:
+            try:
+                injection_entries = await run_in_threadpool(
+                    _merge_manifest_entries,
+                    user_id,
+                    chat_id,
+                    turn_entries,
+                )
+            except (HandoffManifestCapacityError, FileLockTimeout) as exc:
+                _cleanup_failed_turn_files(turn_entries, subdir)
+                turn_entries = []
+                skipped_count = len(file_items)
+                injection_entries = await run_in_threadpool(
+                    _load_manifest_entries,
+                    user_id,
+                    chat_id,
+                )
+                log.error(
+                    'hermes-handoff: manifest unavailable; current turn marked skipped: %s',
+                    exc,
+                )
+            except OSError as exc:
+                log.error('hermes-handoff: failed to update chat manifest: %s', exc)
+        else:
+            injection_entries = await run_in_threadpool(
+                _load_manifest_entries,
+                user_id,
+                chat_id,
+            )
 
     # 5. Build the transient injection for the LAST USER message (NOT persisted to webui.db):
     #    - the <files> block (delivered files), when any were handed off; AND/OR
     #    - a counts-only <materials_note> when >=1 current-turn upload was skipped, so the agent can
-    #      honestly state the materials limitation. all-skipped (entries empty, skipped>0) → ONLY the
-    #      note (no empty <files> block); all-delivered → ONLY <files> (no note, no noise).
+    #      honestly state the materials limitation. An all-skipped turn injects any valid historical
+    #      manifest entries plus the note; with no history it injects only the note.
     injection_parts: list[str] = []
-    if entries:
-        injection_parts.append(_build_files_block(entries))
+    if injection_entries:
+        injection_parts.append(_build_files_block(injection_entries))
     if skipped_count > 0:
         injection_parts.append(_build_materials_note(skipped_count))
 
     if not injection_parts:
-        # entries empty AND nothing skipped — unreachable here (file_items non-empty ⇒ skipped>0
-        # when entries is empty); defensive no-op preserving the original "nothing written" log.
+        # No injected entries and nothing skipped is unreachable here; preserve a defensive no-op.
         log.warning('hermes-handoff: no files successfully written to handoff volume')
         return body
 
@@ -711,9 +779,9 @@ async def run_hermes_handoff(
     log.info(
         'hermes-handoff: Path B done — %d file(s) handed off under %s, %d skipped, '
         'file items removed from metadata.files (injected: %s)',
-        len(entries), subdir, skipped_count,
+        len(turn_entries), subdir, skipped_count,
         '+'.join(
-            [p for p in ('<files>' if entries else '',
+            [p for p in ('<files>' if injection_entries else '',
                          'materials_note' if skipped_count > 0 else '') if p]
         ),
     )
