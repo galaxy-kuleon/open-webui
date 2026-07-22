@@ -21,6 +21,7 @@ aiohttp==3.13.5 # do not update to 3.13.3 - broken
 async-timeout
 aiocache
 aiofiles
+filelock==3.16.1
 starlette-compress==1.7.0
 Brotli==1.2.0
 brotlicffi==1.2.0.1
