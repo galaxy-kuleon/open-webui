@@ -1073,15 +1073,18 @@ def test_materials_note_is_transient_not_in_user_message_record(monkeypatch, tmp
     assert "<files>" not in str(result["metadata"]["user_message"])
 
 
-# --- M1 / 2026-07-28: metadata['files'] is explicitly None -------------------
-# Live 8083 raised `TypeError: 'NoneType' object is not iterable` at
-# hermes_handoff.py:636 21 times between 2026-07-24 and 2026-07-28. The caller
-# in utils/middleware.py catches it, logs
-# "run_hermes_handoff raised unexpectedly ... no file context injected
-# (embedding suppressed)" and forwards the turn with NO file context at all, so
-# every previously uploaded file silently disappears mid-chat. `.get(key,
-# default)` only substitutes the default when the key is ABSENT; an explicit
-# null value flows straight through.
+# --- M1 / 2026-07-28: metadata['files'] arrives as None ----------------------
+# Live 8083 raised `TypeError: 'NoneType' object is not iterable` in
+# run_hermes_handoff 21 times between 2026-07-24 and 2026-07-28. The caller in
+# utils/middleware.py catches it, logs "run_hermes_handoff raised unexpectedly
+# ... no file context injected (embedding suppressed)" and forwards the turn
+# with NO file context at all, so every previously uploaded file silently
+# disappears mid-chat.
+#
+# The None is produced inside OpenWebUI, not by the client: process_chat_payload
+# does `files = form_data.pop('files', None)` and writes the result into
+# metadata unconditionally, so an OMITTED files field and an explicit JSON null
+# are indistinguishable by the time Path B sees them. Both are covered below.
 
 
 def test_none_metadata_files_followup_still_reinjects_manifest(monkeypatch, tmp_path):
@@ -1156,3 +1159,93 @@ def test_none_metadata_files_legacy_no_user_message_is_a_noop(monkeypatch, tmp_p
     assert calls == []
     assert result["messages"][-1]["content"] == original
     assert result["metadata"]["files"] == []
+
+
+def test_current_turn_file_items_normalises_none_directly():
+    # Direct contract test. Without this, removing the normalisation inside
+    # _current_turn_file_items leaves every run_hermes_handoff test passing
+    # (the call site also normalises), so the helper guard was a surviving
+    # mutant with no coverage of its own.
+    assert hermes_handoff._current_turn_file_items({}, None) == []
+    assert hermes_handoff._current_turn_file_items({"user_message": {}}, None) == []
+
+
+def test_file_items_normalisation_distinguishes_absent_from_invalid(caplog):
+    # None means "field omitted" and is silent. Anything else that is not a
+    # list is a schema violation: still treated as no files so one malformed
+    # field cannot strand an upload, but never silently.
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        assert hermes_handoff._normalised_file_items(None, source='t') == []
+    assert caplog.records == []
+
+    items = [{"type": "file", "id": "a"}]
+    assert hermes_handoff._normalised_file_items(items, source='t') is items
+
+    for invalid in (False, 0, '', {}):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert hermes_handoff._normalised_file_items(invalid, source='t') == []
+        assert caplog.records, f"{invalid!r} must not normalise silently"
+
+
+def test_non_dict_metadata_is_refused_rather_than_half_handled(monkeypatch, tmp_path):
+    # `body.get('metadata') or {}` looks tolerant but the no-file branch writes
+    # back into body['metadata'], so a None metadata only moved the exception.
+    body = {
+        "chat_id": "chat-1",
+        "metadata": None,
+        "messages": [{"role": "user", "id": "msg-1", "content": "hi"}],
+    }
+    original = body["messages"][-1]["content"]
+    result, calls = _run_handoff(monkeypatch, tmp_path, body, {})
+    assert calls == []
+    assert result["messages"][-1]["content"] == original
+    assert result["metadata"] is None
+
+
+def test_continuity_log_is_counts_only(monkeypatch, tmp_path, caplog):
+    # The continuity line must never grow filenames or ids, even when someone
+    # adds them "just for debugging".
+    import logging
+
+    upload_files = [{"type": "file", "id": "file-1", "name": "SECRET Contract.pdf"}]
+    _run_handoff(
+        monkeypatch,
+        tmp_path,
+        {
+            "chat_id": "chat-1",
+            "metadata": {
+                "chat_id": "chat-1",
+                "user_message": {"id": "msg-1", "files": upload_files},
+                "files": list(upload_files),
+            },
+            "messages": [{"role": "user", "id": "msg-1", "content": "audit"}],
+        },
+        {"file-1": b"%PDF payload"},
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        _run_handoff(
+            monkeypatch,
+            tmp_path,
+            {
+                "chat_id": "chat-1",
+                "metadata": {
+                    "chat_id": "chat-1",
+                    "user_message": {"id": "msg-2", "content": "continue"},
+                    "files": None,
+                },
+                "messages": [{"role": "user", "id": "msg-2", "content": "continue"}],
+            },
+            {},
+        )
+
+    continuity = [r for r in caplog.records if 'Path B continuity' in r.getMessage()]
+    assert len(continuity) == 1
+    message = continuity[0].getMessage()
+    assert '1 manifest entry reinjected' in message
+    for leak in ("SECRET", "Contract", "file-1", "user-1", "chat-1", "/handoff"):
+        assert leak not in message, leak

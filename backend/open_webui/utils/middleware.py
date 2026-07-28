@@ -2331,6 +2331,34 @@ async def connect_mcp_server(
     return client, tool_specs
 
 
+def _normalised_request_files(files):
+    """Return the request `files` field as a list.
+
+    `metadata['files']` is internal state that many consumers iterate, so it
+    must always be a list. `form_data.pop('files', None)` yields None both
+    when the caller omits the field and when it sends an explicit null, and
+    that None used to be written into metadata unchanged. Downstream, the
+    Hermes Path B handoff iterated it and raised, aborting the whole handoff:
+    21 turns on 8083 between 2026-07-24 and 2026-07-28 were forwarded with no
+    attachments at all, silently dropping every file previously uploaded to
+    those chats.
+
+    None normalises silently. Any other non-list is a schema violation: still
+    treated as no files, but logged, so a malformed payload cannot pass for an
+    ordinary fileless turn. Truthiness is deliberately not used — `False` and
+    `0` are violations, not empty collections.
+    """
+    if files is None:
+        return []
+    if isinstance(files, list):
+        return files
+    log.warning(
+        'request files field is %s, not a list; treating as no files',
+        type(files).__name__,
+    )
+    return []
+
+
 async def process_chat_payload(request, form_data, user, metadata, model):
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
@@ -2638,7 +2666,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     tool_ids = form_data.pop('tool_ids', None)
     terminal_id = form_data.pop('terminal_id', None)
-    files = form_data.pop('files', None)
+    files = _normalised_request_files(form_data.pop('files', None))
     form_data.pop('folder_id', None)
 
     # If the original caller provided tools, use them as-is (skip resolution).
