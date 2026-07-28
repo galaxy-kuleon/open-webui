@@ -224,7 +224,12 @@ def _current_turn_file_items(metadata: dict, all_files: list[dict]) -> list[dict
     historical chat files plus the current upload. For Hermes Path B, the
     persisted user_message.files field is the authoritative current-turn set.
     Legacy/direct callers without user_message metadata fall back to all files.
+
+    ``all_files`` may legitimately arrive as ``None`` (an explicit JSON null,
+    which ``dict.get(key, default)`` does not replace), so it is normalised
+    here rather than trusted.
     """
+    all_files = all_files or []
     user_message = metadata.get('user_message')
     if isinstance(user_message, dict):
         if 'files' in user_message:
@@ -622,8 +627,13 @@ async def run_hermes_handoff(
     body: the modified form_data body (file items removed from
           metadata.files; last user message has <files> block appended).
     """
-    metadata = body.get('metadata', {})
-    files = metadata.get('files', [])
+    metadata = body.get('metadata') or {}
+    # `.get(key, default)` only substitutes an ABSENT key. OpenWebUI sends an
+    # explicit `"files": null` on some turns, which used to reach the list
+    # comprehension below and abort the whole handoff with a TypeError — the
+    # caller then forwarded the turn with no file context at all, silently
+    # dropping every previously uploaded file. Normalise, never trust.
+    files = metadata.get('files') or []
 
     user_id = _user_id_from_user(user)
     chat_id: str = _safe_segment(metadata.get('chat_id') or body.get('chat_id'), 'nochat')
@@ -649,6 +659,17 @@ async def run_hermes_handoff(
         )
         if entries:
             _inject_transiently(body, _build_files_block(entries))
+        # Positive signal for the no-upload turn. Without it the only evidence
+        # that a follow-up turn carried file context was the ABSENCE of an
+        # ERROR line, so a silent continuity loss looked exactly like a normal
+        # fileless chat message.
+        log.info(
+            'hermes-handoff: Path B continuity — 0 new file(s), %d manifest '
+            'entr%s reinjected (manifest=%s)',
+            len(entries),
+            'y' if len(entries) == 1 else 'ies',
+            'on' if use_manifest else 'off',
+        )
         return body
 
     # Determine the handoff subdir from user/chat/message context. User/chat

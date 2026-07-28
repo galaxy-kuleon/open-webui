@@ -1071,3 +1071,88 @@ def test_materials_note_is_transient_not_in_user_message_record(monkeypatch, tmp
     assert "<materials_note" in result["messages"][0]["content"]
     assert "<materials_note" not in str(result["metadata"]["user_message"])
     assert "<files>" not in str(result["metadata"]["user_message"])
+
+
+# --- M1 / 2026-07-28: metadata['files'] is explicitly None -------------------
+# Live 8083 raised `TypeError: 'NoneType' object is not iterable` at
+# hermes_handoff.py:636 21 times between 2026-07-24 and 2026-07-28. The caller
+# in utils/middleware.py catches it, logs
+# "run_hermes_handoff raised unexpectedly ... no file context injected
+# (embedding suppressed)" and forwards the turn with NO file context at all, so
+# every previously uploaded file silently disappears mid-chat. `.get(key,
+# default)` only substitutes the default when the key is ABSENT; an explicit
+# null value flows straight through.
+
+
+def test_none_metadata_files_followup_still_reinjects_manifest(monkeypatch, tmp_path):
+    # Turn 1: a genuine upload, so the chat manifest is populated.
+    upload_files = [{"type": "file", "id": "file-1", "name": "report.pdf"}]
+    upload_body = {
+        "chat_id": "chat-1",
+        "metadata": {
+            "chat_id": "chat-1",
+            "user_message": {"id": "msg-1", "files": upload_files},
+            "files": list(upload_files),
+        },
+        "messages": [{"role": "user", "id": "msg-1", "content": "audit this"}],
+    }
+    result, _calls = _run_handoff(
+        monkeypatch, tmp_path, upload_body, {"file-1": b"%PDF payload"}
+    )
+    assert result["messages"][-1]["content"].count("<file ") == 1
+
+    # Turn 2: OWUI sends metadata.files == None (not [] and not absent).
+    followup_body = {
+        "chat_id": "chat-1",
+        "metadata": {
+            "chat_id": "chat-1",
+            "user_message": {"id": "msg-2", "content": "continue"},
+            "files": None,
+        },
+        "messages": [{"role": "user", "id": "msg-2", "content": "continue"}],
+    }
+    followup, calls = _run_handoff(monkeypatch, tmp_path, followup_body, {})
+
+    assert calls == []  # nothing re-uploaded
+    content = followup["messages"][-1]["content"]
+    assert content.count("<file ") == 1  # continuity preserved, not lost
+    assert 'file_id="file-1"' in content
+    assert followup["metadata"]["files"] == []
+
+
+def test_none_metadata_files_with_current_turn_upload_still_hands_off(
+    monkeypatch, tmp_path
+):
+    # metadata.files is None while the authoritative current-turn set lives on
+    # user_message.files — the upload must still reach /handoff.
+    current_files = [{"type": "file", "id": "file-1", "name": "report.pdf"}]
+    body = {
+        "chat_id": "chat-1",
+        "metadata": {
+            "chat_id": "chat-1",
+            "user_message": {"id": "msg-1", "files": current_files},
+            "files": None,
+        },
+        "messages": [{"role": "user", "id": "msg-1", "content": "audit this"}],
+    }
+    result, calls = _run_handoff(monkeypatch, tmp_path, body, {"file-1": b"%PDF x"})
+
+    assert calls == [("file-1", "report.pdf")]
+    assert result["messages"][-1]["content"].count("<file ") == 1
+    assert result["metadata"]["files"] == []
+
+
+def test_none_metadata_files_legacy_no_user_message_is_a_noop(monkeypatch, tmp_path):
+    # Legacy callers have no user_message, so _current_turn_file_items falls
+    # back to metadata.files. None must degrade to "no files", never crash.
+    body = {
+        "chat_id": "chat-1",
+        "metadata": {"chat_id": "chat-1", "files": None},
+        "messages": [{"role": "user", "id": "msg-1", "content": "plain question"}],
+    }
+    original = body["messages"][-1]["content"]
+    result, calls = _run_handoff(monkeypatch, tmp_path, body, {})
+
+    assert calls == []
+    assert result["messages"][-1]["content"] == original
+    assert result["metadata"]["files"] == []
