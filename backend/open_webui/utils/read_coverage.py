@@ -23,10 +23,13 @@ from open_webui.utils.history_compact import (
     is_replayable_reader_tool,
 )
 
-# Stable tokens for mutation tests / runner probes.
-COVERAGE_SUMMARY_BEGIN = "<!-- owui-read-coverage -->"
-COVERAGE_SUMMARY_END = "<!-- /owui-read-coverage -->"
+# A-channel delivery (Kimi delivery-channels §4): VISIBLE markdown in the
+# persisted assistant message body — NOT HTML comments (those do not render),
+# NOT user-message injection, NOT metadata-only. Title is the durable marker.
 COVERAGE_SUMMARY_TITLE = "## Read coverage (authoritative)"
+# Stable probe tokens for tests/runners (must appear in rendered body).
+COVERAGE_SUMMARY_BEGIN = COVERAGE_SUMMARY_TITLE
+COVERAGE_SUMMARY_END = ""  # section ends at next heading or EOF; no HTML wrapper
 
 _HANDLE_RE = re.compile(r"\b(F\d{1,4})\b", re.IGNORECASE)
 # Synthetic canaries used by HEMKV runner / lab fixtures.
@@ -49,24 +52,39 @@ def _display_handle_name(path_or_name: str) -> str:
 
 
 def extract_attachment_handles(form_data: dict | None, metadata: dict | None) -> list[dict[str, str]]:
-    """Build immutable attachment rows [{id, name}] from request metadata/files."""
+    """Build attachment rows [{id, name}] preferring request files / handle maps.
+
+    Prefer metadata.file_handles and request files over prompt-only ``<file>``
+    tag counting (prompt-derived counts are not an immutable manifest).
+    When only a Path-B ``<files>`` block exists, assign ordered F01.. handles
+    as a best-effort baseline (Hermes grants may re-label later).
+    """
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
 
     def add(handle: str, name: str) -> None:
-        h = handle.upper() if handle else f"A{len(rows)+1:02d}"
+        h = str(handle or "").strip().upper() or f"A{len(rows)+1:02d}"
         if h in seen:
             return
         seen.add(h)
         rows.append({"id": h, "name": _display_handle_name(name or h)})
 
     meta = metadata if isinstance(metadata, dict) else {}
-    # Explicit handle map if present (Hermes grant style).
+    # Explicit handle map if present (Hermes grant style / handoff).
     handles = meta.get("file_handles") or meta.get("attachment_handles")
     if isinstance(handles, dict):
         for h, path in handles.items():
             add(str(h), str(path))
-    # metadata.files / form files
+    # Signed handoff entries when present
+    handoff = meta.get("handoff_manifest") or meta.get("path_b_manifest")
+    if isinstance(handoff, list):
+        for i, ent in enumerate(handoff, start=1):
+            if not isinstance(ent, dict):
+                continue
+            hid = ent.get("handle") or ent.get("id") or f"F{i:02d}"
+            name = ent.get("name") or ent.get("original") or ent.get("file_id") or hid
+            add(str(hid), str(name))
+    # metadata.files / form files (request attachment set)
     files = []
     if isinstance(meta.get("files"), list):
         files.extend(meta["files"])
@@ -77,14 +95,13 @@ def extract_attachment_handles(form_data: dict | None, metadata: dict | None) ->
         if not isinstance(f, dict):
             continue
         name = f.get("name") or f.get("filename") or f.get("id") or f"file{idx}"
-        # Prefer declared handle
         hid = f.get("handle") or f.get("alias")
         if not hid:
             hid = f"F{idx:02d}"
             idx += 1
         add(str(hid), str(name))
-    # <files> block in last user message (Path B)
-    if isinstance(form_data, dict):
+    # Path-B <files> block only if nothing better was found
+    if not rows and isinstance(form_data, dict):
         for msg in reversed(form_data.get("messages") or []):
             if not isinstance(msg, dict) or msg.get("role") != "user":
                 continue
@@ -98,9 +115,8 @@ def extract_attachment_handles(form_data: dict | None, metadata: dict | None) ->
                 )
             if "<files>" not in text and "<file " not in text:
                 break
-            # Count file tags for handles F01..
             n = len(re.findall(r"<file\b", text, flags=re.I))
-            if n and not rows:
+            if n:
                 for i in range(1, n + 1):
                     add(f"F{i:02d}", f"attachment-{i}")
             break
@@ -126,24 +142,56 @@ def _handles_in_text(text: str) -> list[str]:
 
 
 def _parse_tool_result_status(text: str) -> tuple[str, str]:
-    """Return (status, fact) from a tool result body."""
+    """Return (status, fact) from a tool result body.
+
+    Failures must not default to complete (Codex U2-r2 B1.4): binary refusal,
+    grant denial, access not granted, extraction_failed, explicit error JSON.
+    """
     fact = _fact_from_text(text)
     if not text:
-        return "failed", fact
+        return "failed", fact or "empty_result"
     try:
         data = json.loads(text)
         if isinstance(data, dict):
             if data.get("error") or data.get("extraction_failed"):
                 return "failed", fact or str(data.get("error") or "error")[:80]
-            report = str(data.get("report_as") or data.get("coverage") or "")
+            if data.get("success") is False:
+                return "failed", fact or str(data.get("error") or "success=false")[:80]
+            report = str(data.get("report_as") or data.get("coverage") or "").lower()
+            if report in {"unreadable", "failed", "error"}:
+                return "failed", fact or report
             if report == "partial" or data.get("truncated"):
                 return "partial", fact or str(data.get("content") or "")[:80]
             if data.get("content") is not None or data.get("extracted_document"):
                 return "complete", fact or str(data.get("content") or "")[:80]
+            # Unknown JSON shape with neither content nor error → failed (not complete)
+            return "failed", fact or "unknown_json_result"
     except (TypeError, ValueError, json.JSONDecodeError):
         pass
-    if "error" in text.lower()[:200] and "cannot" in text.lower()[:200]:
-        return "failed", fact
+    low = text.lower()[:400]
+    failure_markers = (
+        "cannot read",
+        "binary file",
+        "not granted",
+        "access not granted",
+        "permission denied",
+        "extraction failed",
+        "extraction_failed",
+        "unreadable",
+        "no such file",
+        "file not found",
+        "blocked:",
+        "error analyzing",
+        "error:",
+    )
+    if any(m in low for m in failure_markers):
+        return "failed", fact or "refusal_or_error"
+    if "truncated" in low or "partial" in low:
+        return "partial", fact
+    # Non-empty plain text without success markers is partial, not complete
+    # (avoid treating arbitrary error prose as full read).
+    if len(text.strip()) < 40:
+        return "partial", fact
     return "complete", fact
 
 
@@ -336,12 +384,11 @@ def build_read_coverage_manifest(
 
 
 def format_coverage_summary(manifest: dict[str, Any]) -> str:
-    """Bounded user/model-visible coverage block."""
+    """Bounded A-channel markdown block (renders in assistant body / reload)."""
     if not manifest or not manifest.get("attached"):
         return ""
     lines = [
         "",
-        COVERAGE_SUMMARY_BEGIN,
         COVERAGE_SUMMARY_TITLE,
         "",
         f"- attached: **{manifest['attached']}**",
@@ -372,8 +419,27 @@ def format_coverage_summary(manifest: dict[str, Any]) -> str:
             f"  - `{f['id']}` status={f.get('status')} reader={f.get('reader') or '-'} "
             f"extent={f.get('extent') or '-'} fact={fact}"
         )
-    lines.extend([COVERAGE_SUMMARY_END, ""])
+    lines.append("")
     return "\n".join(lines)
+
+
+def append_coverage_to_assistant_content(
+    content: str | None,
+    summary: str,
+) -> str:
+    """A-channel: append mechanism coverage to persisted assistant body.
+
+    Must run after model text is complete (post-tool-loop finalize). Model
+    cannot rewrite the section. Idempotent if title already present.
+    """
+    text = content if isinstance(content, str) else ("" if content is None else str(content))
+    if not summary or not summary.strip():
+        return text
+    if COVERAGE_SUMMARY_TITLE in text:
+        return text
+    if not text.strip():
+        return summary.strip() + "\n"
+    return text.rstrip() + "\n\n" + summary.strip() + "\n"
 
 
 def build_coverage_for_request(
@@ -396,7 +462,11 @@ def inject_coverage_into_messages(
     messages: list[dict],
     summary: str,
 ) -> list[dict]:
-    """Append coverage summary to the last user message (mechanism, not model)."""
+    """Deprecated for user-facing truth (advisory only). Prefer A-channel append.
+
+    Kept for tests that still exercise message injection; production A-channel
+    uses ``append_coverage_to_assistant_content`` on the assistant body.
+    """
     if not summary or not isinstance(messages, list) or not messages:
         return messages
     out = list(messages)
@@ -407,7 +477,7 @@ def inject_coverage_into_messages(
         msg = dict(msg)
         content = msg.get("content")
         if isinstance(content, str):
-            if COVERAGE_SUMMARY_BEGIN in content:
+            if COVERAGE_SUMMARY_TITLE in content:
                 return out
             msg["content"] = content.rstrip() + "\n\n" + summary
         elif isinstance(content, list):
@@ -425,6 +495,7 @@ __all__ = [
     "COVERAGE_SUMMARY_BEGIN",
     "COVERAGE_SUMMARY_END",
     "COVERAGE_SUMMARY_TITLE",
+    "append_coverage_to_assistant_content",
     "build_coverage_for_request",
     "build_read_coverage_manifest",
     "extract_attachment_handles",

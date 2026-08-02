@@ -2252,13 +2252,17 @@ def apply_outbound_history_controls(
     form_data: dict,
     metadata: dict | None = None,
 ) -> dict:
-    """Coverage manifest + budget-gated compact + final request body gate.
+    """Hermes-scoped budget compact + gate (initial + tool-loop re-entry).
 
-    Must be called after process_chat_payload has finished all injections.
-    Mutation target: removing this call from process_chat_payload must red tests.
+    Must be called:
+      * end of process_chat_payload (after all injections)
+      * every native tool-loop path immediately before generate_chat_completion
 
-    Pure orchestration lives in history_compact.apply_outbound_history_controls;
-    this wrapper maps HistoryPayloadTooLarge → HTTP 400 for the UI/API surface.
+    Coverage A-channel (assistant body) is applied at turn finalize via
+    ``attach_read_coverage_a_channel``, not here.
+
+    Mutation: live call sites must execute this function — dead-comment tokens
+    must not satisfy tests.
     """
     from open_webui.utils.history_compact import (
         HISTORY_OVERSIZE_USER_MESSAGE,
@@ -2278,6 +2282,31 @@ def apply_outbound_history_controls(
             status_code=400,
             detail=HISTORY_OVERSIZE_USER_MESSAGE,
         ) from exc
+
+
+def attach_read_coverage_a_channel(
+    content: str | None,
+    form_data: dict | None,
+    metadata: dict | None,
+) -> str:
+    """Append post-reader coverage to assistant content (Kimi A-channel).
+
+    Call only after this turn's tool results are in form_data.messages.
+    """
+    from open_webui.utils.history_compact import (
+        finalize_turn_read_coverage_a_channel,
+    )
+
+    compressed = bool(
+        isinstance(metadata, dict) and metadata.get('history_compressed')
+    )
+    text, _cov = finalize_turn_read_coverage_a_channel(
+        content,
+        form_data if isinstance(form_data, dict) else {},
+        metadata if isinstance(metadata, dict) else {},
+        compressed=compressed,
+    )
+    return text
 
 
 SKILL_MENTION_RE = re.compile(r'<\$([^|>]+)\|?[^>]*>')
@@ -5035,6 +5064,11 @@ async def streaming_chat_response_handler(response, ctx):
                                     }
                                 )
 
+                        # M-U2 B3: tool-loop re-entry must re-run outbound controls
+                        # (compact + Hermes budget) — same function as initial gate.
+                        new_form_data = apply_outbound_history_controls(
+                            new_form_data, metadata
+                        )
                         res = await generate_chat_completion(
                             request,
                             new_form_data,
@@ -5246,7 +5280,10 @@ async def streaming_chat_response_handler(response, ctx):
                                     ),
                                 ],
                             }
-
+                            # M-U2 B3: second tool-loop re-entry (code interpreter path)
+                            new_form_data = apply_outbound_history_controls(
+                                new_form_data, metadata
+                            )
                             res = await generate_chat_completion(
                                 request,
                                 new_form_data,
@@ -5272,9 +5309,40 @@ async def streaming_chat_response_handler(response, ctx):
                     if not metadata.get('chat_id', '').startswith('channel:')
                     else ''
                 )
+                # A-channel: mechanism appends post-reader coverage to assistant
+                # body before DB persist (Kimi delivery-channels §4). Must run
+                # after tool results exist in form_data.messages for this turn.
+                _final_content = serialize_output(output)
+                try:
+                    _cov_form = form_data if isinstance(form_data, dict) else {}
+                    # Include this turn's tool/assistant messages from output when present.
+                    try:
+                        from open_webui.utils.misc import convert_output_to_messages
+
+                        _extra = convert_output_to_messages(
+                            output, raw=True, reasoning_format=get_reasoning_format(model)
+                        )
+                        if _extra:
+                            _cov_form = {
+                                **_cov_form,
+                                'messages': [
+                                    *(_cov_form.get('messages') or []),
+                                    *_extra,
+                                ],
+                            }
+                    except Exception:
+                        pass
+                    _final_content = attach_read_coverage_a_channel(
+                        _final_content, _cov_form, metadata
+                    )
+                except Exception as _cov_a_err:
+                    log.debug(
+                        'A-channel coverage append skipped: %s',
+                        type(_cov_a_err).__name__,
+                    )
                 data = {
                     'done': True,
-                    'content': serialize_output(output),
+                    'content': _final_content,
                     'output': output,
                     'title': title,
                     **({'usage': usage} if usage else {}),
@@ -5288,7 +5356,7 @@ async def streaming_chat_response_handler(response, ctx):
                             metadata['message_id'],
                             {
                                 'done': True,
-                                'content': serialize_output(output),
+                                'content': _final_content,
                                 'output': output,
                                 **({'usage': usage} if usage else {}),
                             },
@@ -5297,13 +5365,17 @@ async def streaming_chat_response_handler(response, ctx):
                         await Chats.upsert_message_to_chat_by_id_and_message_id(
                             metadata['chat_id'],
                             metadata['message_id'],
-                            {'done': True, 'usage': usage},
+                            {
+                                'done': True,
+                                'usage': usage,
+                                'content': _final_content,
+                            },
                         )
                     else:
                         await Chats.upsert_message_to_chat_by_id_and_message_id(
                             metadata['chat_id'],
                             metadata['message_id'],
-                            {'done': True},
+                            {'done': True, 'content': _final_content},
                         )
 
                 # #16 runtime slice: a turn that finalized with NO rendered content is a
@@ -5313,7 +5385,7 @@ async def streaming_chat_response_handler(response, ctx):
                 # serialize_output(output) so legit tool/skip-rag turns are non-empty and do
                 # NOT flag. Stream has ended here, so done=True.
                 if not metadata.get('chat_id', '').startswith('channel:'):
-                    if should_flag_empty(serialize_output(output), True, task_active=False):
+                    if should_flag_empty(_final_content, True, task_active=False):
                         empty_error = build_error_payload(
                             metadata['chat_id'], metadata['message_id']
                         )

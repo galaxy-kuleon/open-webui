@@ -89,6 +89,55 @@ HISTORY_OVERSIZE_USER_MESSAGE = (
 
 # Mutation-sensitive wiring token — production must call this by name.
 OUTBOUND_BUDGET_GATE_FN = "enforce_outbound_request_budget"
+# Single entry used by initial process_chat_payload AND native tool-loop re-entry.
+OUTBOUND_CONTROLS_FN = "apply_outbound_history_controls"
+
+
+def is_hermes_outbound_context(
+    form_data: dict[str, Any] | None,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
+    """True when Hermes 10MB budget policy should apply (Path-B / hermes models).
+
+    Non-Hermes providers must not be forced through HERMES_MAX_REQUEST_BYTES
+    (Codex U2-r2 B2 scope defect).
+    """
+    meta = metadata if isinstance(metadata, dict) else {}
+    if meta.get("hermes_handoff") or meta.get("is_hermes_handoff"):
+        return True
+    if meta.get("path_b") or meta.get("handoff_message_id"):
+        return True
+    model = ""
+    if isinstance(form_data, dict):
+        model = str(form_data.get("model") or "")
+    if not model and isinstance(meta.get("model"), dict):
+        model = str(meta["model"].get("id") or "")
+    if not model:
+        model = str(meta.get("model_id") or meta.get("model") or "")
+    model_l = model.lower()
+    if "hermes" in model_l or model_l.startswith("origin"):
+        return True
+    # Env allowlist (comma-separated model id prefixes)
+    extra = os.environ.get("OWUI_HERMES_BUDGET_MODEL_PREFIXES", "")
+    for pref in extra.split(","):
+        p = pref.strip().lower()
+        if p and model_l.startswith(p):
+            return True
+    return False
+
+
+def resolve_outbound_budget_limit(
+    form_data: dict[str, Any] | None,
+    metadata: dict[str, Any] | None = None,
+    *,
+    limit_bytes: int | None = None,
+) -> int | None:
+    """Return byte limit for gate, or None to no-op (non-Hermes routes)."""
+    if limit_bytes is not None:
+        return int(limit_bytes)
+    if is_hermes_outbound_context(form_data, metadata):
+        return HERMES_MAX_REQUEST_BYTES
+    return None
 
 
 class HistoryPayloadTooLarge(Exception):
@@ -381,13 +430,20 @@ def enforce_outbound_request_budget(
     form_data: dict[str, Any],
     *,
     limit_bytes: int | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fail-closed gate on the provider-bound body after final assembly.
 
     1. If body over limit, selectively compact messages (reader payloads only).
     2. Re-measure full body; if still over or indeterminate → raise.
+
+    When *limit_bytes* is None and context is non-Hermes, returns form_data
+    unchanged (no Hermes 10MB policy on other providers).
     """
-    limit = HERMES_MAX_REQUEST_BYTES if limit_bytes is None else int(limit_bytes)
+    limit = resolve_outbound_budget_limit(form_data, metadata, limit_bytes=limit_bytes)
+    if limit is None:
+        return form_data
+
     if not isinstance(form_data, dict):
         raise HistoryPayloadTooLarge(bytes_len=-1, limit=limit)
 
@@ -423,63 +479,78 @@ def apply_outbound_history_controls(
     *,
     limit_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Production orchestration for M-U2 (testable pure core).
+    """Production outbound controls (testable pure core).
 
-    Order (critical for BLOCKING-1 + BLOCKING-3):
-      1. Observe reader outcomes + build coverage from *pre-compact* messages
-         so facts survive stubbing.
-      2. Fail-closed enforce_outbound_request_budget on fully assembled body.
-      3. Inject bounded coverage summary into last user message.
-      4. Re-gate after the (small) injection.
-      5. Persist coverage on metadata (mechanism, not model prose).
+    Budget gate only (Hermes-scoped). Coverage for **user truth** is NOT
+    injected into the user message here — that is A-channel (assistant body)
+    at turn finalize after readers have run (Codex U2-r2 B1 + Kimi §4).
 
-    Middleware must call this after all process_chat_payload injections.
-    Mutation removing that call must red ProductionWiringMutationTests.
+    Must be called:
+      * end of process_chat_payload (initial request)
+      * every native tool-loop re-entry before generate_chat_completion
+
+    Mutation removing live calls must red behavioral tests (not dead comments).
     """
-    # Local import avoids circular import at module load (read_coverage → hc).
-    from open_webui.utils.read_coverage import (
-        build_coverage_for_request,
-        format_coverage_summary,
-        inject_coverage_into_messages,
-    )
-
     if not isinstance(form_data, dict):
-        raise HistoryPayloadTooLarge(bytes_len=-1, limit=limit_bytes or HERMES_MAX_REQUEST_BYTES)
+        raise HistoryPayloadTooLarge(
+            bytes_len=-1,
+            limit=limit_bytes or HERMES_MAX_REQUEST_BYTES,
+        )
 
     meta = metadata if isinstance(metadata, dict) else {}
-
     try:
         before = estimate_request_body_bytes(form_data)
     except PayloadSizeIndeterminate:
         before = -1
 
-    # Coverage from pre-compact messages (reader facts must not depend on stubs).
-    pre_coverage = build_coverage_for_request(form_data, meta, compressed=False)
-
-    form_data = enforce_outbound_request_budget(form_data, limit_bytes=limit_bytes)
+    form_data = enforce_outbound_request_budget(
+        form_data, limit_bytes=limit_bytes, metadata=meta
+    )
 
     try:
         after = estimate_request_body_bytes(form_data)
     except PayloadSizeIndeterminate:
         after = before
     compressed = before > 0 and after >= 0 and after < before
-
-    coverage = dict(pre_coverage)
-    coverage["compressed"] = bool(compressed)
-    summary = format_coverage_summary(coverage)
-    if summary:
-        form_data = dict(form_data)
-        form_data["messages"] = inject_coverage_into_messages(
-            form_data.get("messages") or [],
-            summary,
+    if isinstance(metadata, dict):
+        metadata["history_compressed"] = bool(compressed)
+        metadata["outbound_budget_applied"] = (
+            resolve_outbound_budget_limit(form_data, meta, limit_bytes=limit_bytes)
+            is not None
         )
+    return form_data
+
+
+def finalize_turn_read_coverage_a_channel(
+    assistant_content: str | None,
+    form_data: dict[str, Any] | None,
+    metadata: dict[str, Any] | None,
+    *,
+    compressed: bool = False,
+) -> tuple[str, dict[str, Any] | None]:
+    """Build post-reader coverage and append to assistant body (A-channel).
+
+    Call only after this turn's tool results are present in *form_data.messages*
+    (or equivalent). Returns (content_with_footer, coverage_dict_or_None).
+    """
+    from open_webui.utils.read_coverage import (
+        append_coverage_to_assistant_content,
+        build_coverage_for_request,
+        format_coverage_summary,
+    )
+
+    if not isinstance(form_data, dict):
+        return (assistant_content or ""), None
+    meta = metadata if isinstance(metadata, dict) else {}
+    coverage = build_coverage_for_request(
+        form_data, meta, compressed=bool(compressed)
+    )
     if isinstance(metadata, dict):
         metadata["read_coverage"] = coverage
-        metadata["history_compressed"] = bool(compressed)
-
-    # Re-gate after injecting the (small) coverage summary.
-    form_data = enforce_outbound_request_budget(form_data, limit_bytes=limit_bytes)
-    return form_data
+    summary = format_coverage_summary(coverage)
+    if not summary:
+        return (assistant_content or ""), coverage
+    return append_coverage_to_assistant_content(assistant_content, summary), coverage
 
 
 def project_history_payload_stats(
@@ -530,6 +601,7 @@ __all__ = [
     "HISTORY_TOOL_OMISSION_TOKEN",
     "NON_REPLAYABLE_TOOL_EXAMPLES",
     "OUTBOUND_BUDGET_GATE_FN",
+    "OUTBOUND_CONTROLS_FN",
     "REPLAYABLE_READER_TOOLS",
     "HistoryPayloadTooLarge",
     "PayloadSizeIndeterminate",
@@ -540,6 +612,9 @@ __all__ = [
     "ensure_messages_within_budget",
     "estimate_messages_payload_bytes",
     "estimate_request_body_bytes",
+    "finalize_turn_read_coverage_a_channel",
+    "is_hermes_outbound_context",
     "is_replayable_reader_tool",
     "project_history_payload_stats",
+    "resolve_outbound_budget_limit",
 ]
