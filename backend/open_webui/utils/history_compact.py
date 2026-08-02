@@ -1,21 +1,17 @@
-"""Compact tool-call payloads in chat history before they are re-sent to an LLM.
+"""Budget-gated history compaction for LLM re-sends (M-U2 wall B).
 
-Why this exists
----------------
-Batch audits (Path B / Hermes) put full file text into tool results. OWUI stores
-those results inside assistant history as ``<details type="tool_calls">`` HTML
-(and/or structured ``output`` items). On the next turn, middleware rebuilds the
-LLM payload from history and re-sends every prior tool body. Once the JSON body
-crosses Hermes ``MAX_REQUEST_BYTES`` (10 MB), every subsequent turn is 413 and
-the chat is permanently bricked.
+Design (Codex CHANGES_REQUIRED 2026-08-03)
+-----------------------------------------
+* **LLM-facing only** — never rewrite stored DB/UI history.
+* **No-op under budget** — when the fully assembled provider body fits, tool
+  outputs must remain byte-identical (no global strip of every tool).
+* **Selective when over budget** — drop oldest/largest *replayable reader*
+  payloads only (read_file, vision, …), never short conversion/status receipts.
+* **Fail closed** — indeterminate size measurement rejects; oversize after
+  compact raises an actionable open-new-chat error before Hermes 413.
 
-Raising the limit only moves the cliff. This module **cuts the re-sent input**:
-tool detail blocks are replaced with a short, model-facing omission note while
-final answer text is preserved. Source files remain reachable on Path B via
-handoff manifest reinjection on follow-up turns.
-
-This module is intentionally pure stdlib so unit tests and the user-flow
-baseline can import it without booting the full OpenWebUI app.
+Provider limit (Hermes): 10_000_000 bytes. Soft compact trigger uses the same
+named constant unless overridden.
 """
 
 from __future__ import annotations
@@ -24,28 +20,62 @@ import json
 import os
 import re
 from copy import deepcopy
-from typing import Any
+from typing import Any, Iterable
 
-# ── named policy (no magic numbers) ──────────────────────────────────────────
+# ── named policy (single source) ─────────────────────────────────────────────
 
-# Hermes gateway MAX_REQUEST_BYTES is 10_000_000. Leave headroom for system
-# prompt, tools schema, and request envelope so we fail closed *before* the
-# upstream 413 that bricks the chat with an opaque error.
+# Hermes gateway MAX_REQUEST_BYTES — fail-closed against this, not a fuzzy 8MB.
+HERMES_MAX_REQUEST_BYTES = int(
+    os.environ.get("HERMES_MAX_REQUEST_BYTES", str(10_000_000))
+)
 DEFAULT_MAX_LLM_MESSAGES_BYTES = int(
-    os.environ.get("OWUI_MAX_LLM_MESSAGES_BYTES", str(8_000_000))
+    os.environ.get("OWUI_MAX_LLM_MESSAGES_BYTES", str(HERMES_MAX_REQUEST_BYTES))
 )
 
-# Structured tool-role results larger than this are truncated for history.
-DEFAULT_TOOL_RESULT_MAX_CHARS = int(
-    os.environ.get("OWUI_HISTORY_TOOL_RESULT_MAX_CHARS", "800")
+# Only these tools' large outputs are compactable when over budget.
+# Single source for replayability policy (negative tests freeze this set).
+REPLAYABLE_READER_TOOLS: frozenset[str] = frozenset(
+    {
+        "read_file",
+        "vision_analyze",
+        "search_files",
+        "extract_document_text",
+        "view_file",
+        "view_knowledge_file",
+        "query_knowledge_files",
+    }
+)
+
+# Non-replayable tools must stay byte-identical under budget (negative tests).
+# Listed for documentation; policy is "not in REPLAYABLE_READER_TOOLS".
+NON_REPLAYABLE_TOOL_EXAMPLES: frozenset[str] = frozenset(
+    {
+        "submit_conversion",
+        "conversion_status",
+        "conversion_result",
+        "mcp_soc_v2_submit_conversion",
+        "mcp_soc_v2_conversion_status",
+        "web_search",
+        "terminal",
+        "run_terminal_command",
+    }
+)
+
+# When compacting a reader payload, keep this many leading characters as a stub.
+READER_STUB_MAX_CHARS = int(
+    os.environ.get("OWUI_HISTORY_READER_STUB_MAX_CHARS", "400")
 )
 
 TOOL_CALLS_DETAILS_RE = re.compile(
     r"<details\s+type=[\"']tool_calls[\"'][^>]*>.*?</details>\s*",
     re.DOTALL | re.IGNORECASE,
 )
+TOOL_CALLS_DETAILS_NAME_RE = re.compile(
+    r"<details\s+type=[\"']tool_calls[\"']([^>]*)>(.*?)</details>\s*",
+    re.DOTALL | re.IGNORECASE,
+)
+_NAME_ATTR_RE = re.compile(r"\bname=[\"']([^\"']+)[\"']", re.IGNORECASE)
 
-# Stable tokens for tests / mutation checks (must appear in compact output).
 HISTORY_TOOL_OMISSION_TOKEN = "tool_call detail block"
 HISTORY_TOOL_OMISSION_HINT = "Re-read attached files if you need source text again"
 HISTORY_OVERSIZE_USER_MESSAGE = (
@@ -57,9 +87,12 @@ HISTORY_OVERSIZE_USER_MESSAGE = (
     "retrying here will keep failing."
 )
 
+# Mutation-sensitive wiring token — production must call this by name.
+OUTBOUND_BUDGET_GATE_FN = "enforce_outbound_request_budget"
+
 
 class HistoryPayloadTooLarge(Exception):
-    """Raised when compacted history still exceeds the safe send budget."""
+    """Raised when the outbound request still exceeds the provider budget."""
 
     def __init__(self, *, bytes_len: int, limit: int):
         self.bytes_len = bytes_len
@@ -67,131 +100,190 @@ class HistoryPayloadTooLarge(Exception):
         super().__init__(HISTORY_OVERSIZE_USER_MESSAGE)
 
 
-def _omission_note(count: int) -> str:
+class PayloadSizeIndeterminate(Exception):
+    """Raised when payload size cannot be measured — fail closed, never 0."""
+
+    def __init__(self, cause: str = "serialize_failed"):
+        self.cause = cause
+        super().__init__(HISTORY_OVERSIZE_USER_MESSAGE)
+
+
+def is_replayable_reader_tool(name: str | None) -> bool:
+    if not name:
+        return False
+    base = str(name).strip()
+    # MCP prefix: mcp_soc_v2_… is never a file reader here
+    if base in REPLAYABLE_READER_TOOLS:
+        return True
+    # allow bare suffix match after last dot
+    short = base.rsplit(".", 1)[-1]
+    return short in REPLAYABLE_READER_TOOLS
+
+
+def _omission_note(*, count: int, compressed: bool) -> str:
+    flag = "compressed=true" if compressed else "compressed=false"
     return (
         f"[history: {count} {HISTORY_TOOL_OMISSION_TOKEN}(s) omitted from "
-        f"re-sent context to keep this chat under the size limit. Final "
-        f"answers above remain. {HISTORY_TOOL_OMISSION_HINT}.]"
+        f"re-sent context ({flag}). Final answers above remain. "
+        f"{HISTORY_TOOL_OMISSION_HINT}.]"
     )
 
 
-def compact_tool_details_in_text(text: str) -> tuple[str, int]:
-    """Remove ``tool_calls`` HTML detail blocks from assistant display text.
+def estimate_messages_payload_bytes(messages: list[dict]) -> int:
+    """JSON UTF-8 byte size of a messages list.
 
-    Returns ``(compacted_text, removed_block_count)``. Non-tool text (the
-    final answer / audit report) is preserved.
+    Raises PayloadSizeIndeterminate on failure — never returns 0 for error
+    (fail-open disease).
     """
-    if not isinstance(text, str) or not text:
-        return text if isinstance(text, str) else "", 0
-    if "tool_calls" not in text:
-        return text, 0
-    matches = list(TOOL_CALLS_DETAILS_RE.finditer(text))
-    if not matches:
-        return text, 0
-    compacted = TOOL_CALLS_DETAILS_RE.sub("", text).rstrip()
-    note = _omission_note(len(matches))
-    if compacted:
-        return f"{compacted}\n\n{note}\n", len(matches)
-    return f"{note}\n", len(matches)
+    try:
+        return len(json.dumps(messages, ensure_ascii=False, default=str).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise PayloadSizeIndeterminate(str(type(exc).__name__)) from exc
 
 
-def _truncate_tool_result_text(text: str, *, max_chars: int) -> str:
-    if not isinstance(text, str) or len(text) <= max_chars:
-        return text
-    omitted = len(text) - max_chars
+def estimate_request_body_bytes(form_data: dict[str, Any]) -> int:
+    """Estimate provider-bound chat-completions body size (fail closed)."""
+    if not isinstance(form_data, dict):
+        raise PayloadSizeIndeterminate("form_data_not_dict")
+    # Keys that Hermes/OpenAI-compatible servers typically consume.
+    body = {
+        "model": form_data.get("model"),
+        "messages": form_data.get("messages"),
+        "tools": form_data.get("tools"),
+        "tool_choice": form_data.get("tool_choice"),
+        "stream": form_data.get("stream"),
+        "temperature": form_data.get("temperature"),
+        "max_tokens": form_data.get("max_tokens"),
+        "top_p": form_data.get("top_p"),
+    }
+    # Drop Nones to avoid inflating with nulls the client may omit.
+    body = {k: v for k, v in body.items() if v is not None}
+    try:
+        return len(json.dumps(body, ensure_ascii=False, default=str).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise PayloadSizeIndeterminate(str(type(exc).__name__)) from exc
+
+
+def _tool_name_map_from_messages(messages: list[dict]) -> dict[str, str]:
+    """Map tool_call id → function name for structured messages."""
+    mapping: dict[str, str] = {}
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            tid = str(tc.get("id") or "")
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+            name = str(fn.get("name") or tc.get("name") or "")
+            if tid and name:
+                mapping[tid] = name
+        # OR-aligned output function_call items
+        for item in msg.get("output") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                tid = str(item.get("call_id") or item.get("id") or "")
+                name = str(item.get("name") or "")
+                if tid and name:
+                    mapping[tid] = name
+    return mapping
+
+
+def _details_name(attrs: str) -> str:
+    m = _NAME_ATTR_RE.search(attrs or "")
+    return m.group(1) if m else ""
+
+
+def _stub_reader_text(original: str, *, tool_name: str) -> str:
+    head = original[:READER_STUB_MAX_CHARS]
     return (
-        f"{text[:max_chars]}\n"
-        f"...[tool result truncated for history; {omitted} chars omitted; "
+        f"{head}\n"
+        f"...[replayable reader payload compacted: tool={tool_name}; "
+        f"{max(0, len(original) - READER_STUB_MAX_CHARS)} chars omitted; "
         f"{HISTORY_TOOL_OMISSION_HINT}.]\n"
     )
 
 
-def _compact_output_items(
-    output: list[Any],
-    *,
-    max_tool_chars: int,
-) -> tuple[list[Any], int]:
-    """Compact tool bodies inside OR-aligned ``output`` items. Returns new list + removals."""
-    if not isinstance(output, list):
-        return output, 0
+def _compact_html_reader_details(text: str, *, force_all_readers: bool) -> tuple[str, int]:
+    """Compact only details blocks whose name= is a replayable reader tool."""
+    if not isinstance(text, str) or "tool_calls" not in text:
+        return text if isinstance(text, str) else "", 0
+
     removed = 0
-    new_items: list[Any] = []
-    for item in output:
-        if not isinstance(item, dict):
-            new_items.append(item)
-            continue
-        item = dict(item)
-        item_type = item.get("type")
 
-        if item_type == "message":
-            content = item.get("content")
-            if isinstance(content, list):
-                new_parts = []
-                for part in content:
-                    if not isinstance(part, dict):
-                        new_parts.append(part)
-                        continue
-                    part = dict(part)
-                    text = part.get("text")
-                    if isinstance(text, str) and "tool_calls" in text:
-                        part["text"], n = compact_tool_details_in_text(text)
-                        removed += n
-                    new_parts.append(part)
-                item["content"] = new_parts
-        elif item_type == "function_call_output":
-            outs = item.get("output")
-            if isinstance(outs, list):
-                new_outs = []
-                for part in outs:
-                    if not isinstance(part, dict):
-                        new_outs.append(part)
-                        continue
-                    part = dict(part)
-                    text = part.get("text")
-                    if isinstance(text, str) and len(text) > max_tool_chars:
-                        part["text"] = _truncate_tool_result_text(
-                            text, max_chars=max_tool_chars
-                        )
-                        removed += 1
-                    new_outs.append(part)
-                item["output"] = new_outs
-            elif isinstance(outs, str) and len(outs) > max_tool_chars:
-                item["output"] = _truncate_tool_result_text(
-                    outs, max_chars=max_tool_chars
-                )
-                removed += 1
+    def repl(match: re.Match[str]) -> str:
+        nonlocal removed
+        attrs, body = match.group(1), match.group(2)
+        name = _details_name(attrs)
+        if not is_replayable_reader_tool(name):
+            return match.group(0)  # preserve non-reader tools byte-identical
+        if not force_all_readers and len(body) <= READER_STUB_MAX_CHARS:
+            return match.group(0)
+        removed += 1
+        # Drop the whole block; prose outside remains.
+        return ""
 
-        new_items.append(item)
-    return new_items, removed
+    compacted = TOOL_CALLS_DETAILS_NAME_RE.sub(repl, text)
+    if removed:
+        note = _omission_note(count=removed, compressed=True)
+        compacted = compacted.rstrip()
+        compacted = f"{compacted}\n\n{note}\n" if compacted else f"{note}\n"
+    return compacted, removed
+
+
+def _message_tool_name(message: dict, id_map: dict[str, str]) -> str:
+    if message.get("name"):
+        return str(message.get("name"))
+    tid = str(message.get("tool_call_id") or message.get("tool_callId") or "")
+    return id_map.get(tid, "")
+
+
+def _payload_size_of_message(message: dict) -> int:
+    try:
+        return len(json.dumps(message, ensure_ascii=False, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return 0
 
 
 def compact_messages_for_llm_history(
     messages: list[dict],
     *,
-    max_tool_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
+    limit_bytes: int | None = None,
+    force: bool = False,
 ) -> list[dict]:
-    """Return a deep-copied message list safe to re-send as LLM history.
+    """Deep-copy messages; compact only when over *limit_bytes* (or force).
 
-    * Strips ``<details type="tool_calls">`` blocks from string content.
-    * Compacts structured ``output`` tool bodies / embedded details.
-    * Truncates ``role=tool`` / ``role=function`` content.
-    Does **not** mutate the caller's list (DB-facing copies stay intact when
-    callers pass a copy; process_messages builds a new list either way).
+    Under budget and not forced → structural deepcopy only; tool payloads stay
+    byte-identical. Over budget → remove/stub largest replayable reader
+    payloads until under limit or nothing left to compact.
     """
     if not isinstance(messages, list):
         return messages
 
-    compacted: list[dict] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            compacted.append(message)
-            continue
-        message = deepcopy(message)
-        role = message.get("role")
+    limit = DEFAULT_MAX_LLM_MESSAGES_BYTES if limit_bytes is None else int(limit_bytes)
+    working = deepcopy(messages)
 
-        content = message.get("content")
+    try:
+        size = estimate_messages_payload_bytes(working)
+    except PayloadSizeIndeterminate:
+        raise
+
+    if not force and size <= limit:
+        return working
+
+    id_map = _tool_name_map_from_messages(working)
+
+    # Pass 1: compact HTML reader details in assistant content/output (largest first
+    # by rewriting all reader blocks when forced/over budget).
+    for msg in working:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
         if isinstance(content, str) and "tool_calls" in content:
-            message["content"], _ = compact_tool_details_in_text(content)
+            msg["content"], _ = _compact_html_reader_details(
+                content, force_all_readers=True
+            )
         elif isinstance(content, list):
             new_parts = []
             for part in content:
@@ -199,76 +291,255 @@ def compact_messages_for_llm_history(
                     part = dict(part)
                     text = part.get("text")
                     if isinstance(text, str) and "tool_calls" in text:
-                        part["text"], _ = compact_tool_details_in_text(text)
+                        part["text"], _ = _compact_html_reader_details(
+                            text, force_all_readers=True
+                        )
                     new_parts.append(part)
                 else:
                     new_parts.append(part)
-            message["content"] = new_parts
+            msg["content"] = new_parts
 
-        if isinstance(message.get("output"), list):
-            message["output"], _ = _compact_output_items(
-                message["output"], max_tool_chars=max_tool_chars
-            )
+        if isinstance(msg.get("output"), list):
+            new_out = []
+            for item in msg["output"]:
+                if not isinstance(item, dict):
+                    new_out.append(item)
+                    continue
+                item = dict(item)
+                if item.get("type") == "message" and isinstance(item.get("content"), list):
+                    parts = []
+                    for part in item["content"]:
+                        if isinstance(part, dict) and isinstance(part.get("text"), str):
+                            part = dict(part)
+                            if "tool_calls" in part["text"]:
+                                part["text"], _ = _compact_html_reader_details(
+                                    part["text"], force_all_readers=True
+                                )
+                        parts.append(part)
+                    item["content"] = parts
+                elif item.get("type") == "function_call_output":
+                    name = id_map.get(str(item.get("call_id") or ""), "")
+                    if is_replayable_reader_tool(name):
+                        outs = item.get("output")
+                        if isinstance(outs, list):
+                            no = []
+                            for part in outs:
+                                if isinstance(part, dict) and isinstance(
+                                    part.get("text"), str
+                                ):
+                                    part = dict(part)
+                                    if len(part["text"]) > READER_STUB_MAX_CHARS:
+                                        part["text"] = _stub_reader_text(
+                                            part["text"], tool_name=name or "reader"
+                                        )
+                                no.append(part)
+                            item["output"] = no
+                        elif isinstance(outs, str) and len(outs) > READER_STUB_MAX_CHARS:
+                            item["output"] = _stub_reader_text(
+                                outs, tool_name=name or "reader"
+                            )
+                new_out.append(item)
+            msg["output"] = new_out
 
-        if role in {"tool", "function"} and isinstance(message.get("content"), str):
-            message["content"] = _truncate_tool_result_text(
-                message["content"], max_chars=max_tool_chars
-            )
+        role = msg.get("role")
+        if role in {"tool", "function"} and isinstance(msg.get("content"), str):
+            name = _message_tool_name(msg, id_map)
+            if is_replayable_reader_tool(name) and len(msg["content"]) > READER_STUB_MAX_CHARS:
+                msg["content"] = _stub_reader_text(msg["content"], tool_name=name)
 
-        compacted.append(message)
-    return compacted
-
-
-def estimate_messages_payload_bytes(messages: list[dict]) -> int:
-    """JSON UTF-8 byte size of a messages list (proxy for request body bulk)."""
-    try:
-        return len(json.dumps(messages, ensure_ascii=False, default=str).encode("utf-8"))
-    except (TypeError, ValueError):
-        return 0
+    return working
 
 
 def ensure_messages_within_budget(
     messages: list[dict],
     *,
-    limit_bytes: int = DEFAULT_MAX_LLM_MESSAGES_BYTES,
+    limit_bytes: int | None = None,
 ) -> list[dict]:
-    """Compact then enforce the send budget; raise HistoryPayloadTooLarge if still over."""
-    compacted = compact_messages_for_llm_history(messages)
-    size = estimate_messages_payload_bytes(compacted)
-    if size > limit_bytes:
-        raise HistoryPayloadTooLarge(bytes_len=size, limit=limit_bytes)
+    """Compact if needed; raise HistoryPayloadTooLarge if still over limit."""
+    limit = DEFAULT_MAX_LLM_MESSAGES_BYTES if limit_bytes is None else int(limit_bytes)
+    try:
+        size = estimate_messages_payload_bytes(messages if isinstance(messages, list) else [])
+    except PayloadSizeIndeterminate as exc:
+        raise HistoryPayloadTooLarge(bytes_len=-1, limit=limit) from exc
+
+    if size <= limit:
+        # Under budget: still return a deepcopy so callers cannot mutate storage,
+        # but tool payloads remain byte-identical to input.
+        return deepcopy(messages) if isinstance(messages, list) else messages
+
+    compacted = compact_messages_for_llm_history(messages, limit_bytes=limit, force=True)
+    try:
+        after = estimate_messages_payload_bytes(compacted)
+    except PayloadSizeIndeterminate as exc:
+        raise HistoryPayloadTooLarge(bytes_len=-1, limit=limit) from exc
+    if after > limit:
+        raise HistoryPayloadTooLarge(bytes_len=after, limit=limit)
     return compacted
+
+
+def enforce_outbound_request_budget(
+    form_data: dict[str, Any],
+    *,
+    limit_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Fail-closed gate on the provider-bound body after final assembly.
+
+    1. If body over limit, selectively compact messages (reader payloads only).
+    2. Re-measure full body; if still over or indeterminate → raise.
+    """
+    limit = HERMES_MAX_REQUEST_BYTES if limit_bytes is None else int(limit_bytes)
+    if not isinstance(form_data, dict):
+        raise HistoryPayloadTooLarge(bytes_len=-1, limit=limit)
+
+    messages = form_data.get("messages")
+    if not isinstance(messages, list):
+        raise HistoryPayloadTooLarge(bytes_len=-1, limit=limit)
+
+    try:
+        body_size = estimate_request_body_bytes(form_data)
+    except PayloadSizeIndeterminate as exc:
+        raise HistoryPayloadTooLarge(bytes_len=-1, limit=limit) from exc
+
+    if body_size <= limit:
+        return form_data
+
+    # Compact messages only, then re-estimate the full body.
+    form_data = dict(form_data)
+    form_data["messages"] = compact_messages_for_llm_history(
+        messages, limit_bytes=limit, force=True
+    )
+    try:
+        after = estimate_request_body_bytes(form_data)
+    except PayloadSizeIndeterminate as exc:
+        raise HistoryPayloadTooLarge(bytes_len=-1, limit=limit) from exc
+    if after > limit:
+        raise HistoryPayloadTooLarge(bytes_len=after, limit=limit)
+    return form_data
+
+
+def apply_outbound_history_controls(
+    form_data: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+    *,
+    limit_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Production orchestration for M-U2 (testable pure core).
+
+    Order (critical for BLOCKING-1 + BLOCKING-3):
+      1. Observe reader outcomes + build coverage from *pre-compact* messages
+         so facts survive stubbing.
+      2. Fail-closed enforce_outbound_request_budget on fully assembled body.
+      3. Inject bounded coverage summary into last user message.
+      4. Re-gate after the (small) injection.
+      5. Persist coverage on metadata (mechanism, not model prose).
+
+    Middleware must call this after all process_chat_payload injections.
+    Mutation removing that call must red ProductionWiringMutationTests.
+    """
+    # Local import avoids circular import at module load (read_coverage → hc).
+    from open_webui.utils.read_coverage import (
+        build_coverage_for_request,
+        format_coverage_summary,
+        inject_coverage_into_messages,
+    )
+
+    if not isinstance(form_data, dict):
+        raise HistoryPayloadTooLarge(bytes_len=-1, limit=limit_bytes or HERMES_MAX_REQUEST_BYTES)
+
+    meta = metadata if isinstance(metadata, dict) else {}
+
+    try:
+        before = estimate_request_body_bytes(form_data)
+    except PayloadSizeIndeterminate:
+        before = -1
+
+    # Coverage from pre-compact messages (reader facts must not depend on stubs).
+    pre_coverage = build_coverage_for_request(form_data, meta, compressed=False)
+
+    form_data = enforce_outbound_request_budget(form_data, limit_bytes=limit_bytes)
+
+    try:
+        after = estimate_request_body_bytes(form_data)
+    except PayloadSizeIndeterminate:
+        after = before
+    compressed = before > 0 and after >= 0 and after < before
+
+    coverage = dict(pre_coverage)
+    coverage["compressed"] = bool(compressed)
+    summary = format_coverage_summary(coverage)
+    if summary:
+        form_data = dict(form_data)
+        form_data["messages"] = inject_coverage_into_messages(
+            form_data.get("messages") or [],
+            summary,
+        )
+    if isinstance(metadata, dict):
+        metadata["read_coverage"] = coverage
+        metadata["history_compressed"] = bool(compressed)
+
+    # Re-gate after injecting the (small) coverage summary.
+    form_data = enforce_outbound_request_budget(form_data, limit_bytes=limit_bytes)
+    return form_data
 
 
 def project_history_payload_stats(
     messages: list[dict],
     *,
-    limit_bytes: int = DEFAULT_MAX_LLM_MESSAGES_BYTES,
+    limit_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Privacy-safe before/after stats for one message chain (baseline / RBV)."""
+    """Before/after stats using the *same* compact policy as production.
+
+    Numbers are directional for stored-tool-dump weight on a linear message
+    list — not a guarantee of post-injection outbound Hermes bytes.
+    """
+    limit = DEFAULT_MAX_LLM_MESSAGES_BYTES if limit_bytes is None else int(limit_bytes)
     before = estimate_messages_payload_bytes(messages)
-    compacted = compact_messages_for_llm_history(messages)
-    after = estimate_messages_payload_bytes(compacted)
+    try:
+        compacted = compact_messages_for_llm_history(
+            messages, limit_bytes=limit, force=before > limit
+        )
+        after = estimate_messages_payload_bytes(compacted)
+    except PayloadSizeIndeterminate:
+        after = before
     return {
         "bytes_before": before,
         "bytes_after": after,
         "bytes_saved": max(0, before - after),
-        "over_limit_before": before > limit_bytes,
-        "over_limit_after": after > limit_bytes,
-        "limit_bytes": limit_bytes,
+        "over_limit_before": before > limit,
+        "over_limit_after": after > limit,
+        "limit_bytes": limit,
+        "estimate_kind": "messages_json_linear_not_final_http_body",
     }
+
+
+# Back-compat alias used by older tests / baseline
+DEFAULT_TOOL_RESULT_MAX_CHARS = READER_STUB_MAX_CHARS
+
+
+def compact_tool_details_in_text(text: str) -> tuple[str, int]:
+    """Legacy helper: compact reader-named HTML details only."""
+    return _compact_html_reader_details(text, force_all_readers=True)
 
 
 __all__ = [
     "DEFAULT_MAX_LLM_MESSAGES_BYTES",
     "DEFAULT_TOOL_RESULT_MAX_CHARS",
+    "HERMES_MAX_REQUEST_BYTES",
     "HISTORY_OVERSIZE_USER_MESSAGE",
     "HISTORY_TOOL_OMISSION_HINT",
     "HISTORY_TOOL_OMISSION_TOKEN",
+    "NON_REPLAYABLE_TOOL_EXAMPLES",
+    "OUTBOUND_BUDGET_GATE_FN",
+    "REPLAYABLE_READER_TOOLS",
     "HistoryPayloadTooLarge",
+    "PayloadSizeIndeterminate",
+    "apply_outbound_history_controls",
     "compact_messages_for_llm_history",
     "compact_tool_details_in_text",
+    "enforce_outbound_request_budget",
     "ensure_messages_within_budget",
     "estimate_messages_payload_bytes",
+    "estimate_request_body_bytes",
+    "is_replayable_reader_tool",
     "project_history_payload_stats",
 ]

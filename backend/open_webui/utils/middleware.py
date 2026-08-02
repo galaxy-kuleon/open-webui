@@ -2222,18 +2222,14 @@ def process_messages_with_output(
     For assistant messages with 'output' field, produces properly formatted
     OpenAI-style messages (tool_calls + tool results). Strips 'output' before LLM.
 
-    Before expansion, tool_call detail bodies (file full-text dumps) are
-    compacted so multi-turn re-sends cannot brick the chat at Hermes 10 MB
-    (see ``history_compact``). Compacted output is LLM-facing only; DB rows
-    are not rewritten here.
+    History compaction is **not** applied here (M-U2 BLOCKING-2): under-budget
+    requests must keep tool outputs byte-identical. Budget-gated selective
+    compact + final body measurement run in ``apply_outbound_history_controls``
+    after the full request is assembled.
     """
-    from open_webui.utils.history_compact import compact_messages_for_llm_history
-
-    # Compact first so convert_output_to_messages never re-hydrates full tool dumps.
-    messages = compact_messages_for_llm_history(messages or [])
     processed = []
 
-    for message in messages:
+    for message in messages or []:
         if message.get('role') == 'assistant' and message.get('output'):
             # Use output items for clean OpenAI-format messages
             output_messages = convert_output_to_messages(
@@ -2242,16 +2238,46 @@ def process_messages_with_output(
                 reasoning_format=reasoning_format,
             )
             if output_messages:
-                # convert can re-join message parts; compact again for safety.
-                processed.extend(compact_messages_for_llm_history(output_messages))
+                processed.extend(output_messages)
                 continue
 
         # Strip 'output' field before adding (LLM shouldn't see it)
         clean_message = {k: v for k, v in message.items() if k != 'output'}
         processed.append(clean_message)
 
-    # Final pass: tool-role rows produced by convert_output_to_messages.
-    return compact_messages_for_llm_history(processed)
+    return processed
+
+
+def apply_outbound_history_controls(
+    form_data: dict,
+    metadata: dict | None = None,
+) -> dict:
+    """Coverage manifest + budget-gated compact + final request body gate.
+
+    Must be called after process_chat_payload has finished all injections.
+    Mutation target: removing this call from process_chat_payload must red tests.
+
+    Pure orchestration lives in history_compact.apply_outbound_history_controls;
+    this wrapper maps HistoryPayloadTooLarge → HTTP 400 for the UI/API surface.
+    """
+    from open_webui.utils.history_compact import (
+        HISTORY_OVERSIZE_USER_MESSAGE,
+        HistoryPayloadTooLarge,
+        apply_outbound_history_controls as _apply_outbound_history_controls,
+    )
+
+    try:
+        return _apply_outbound_history_controls(form_data, metadata)
+    except HistoryPayloadTooLarge as exc:
+        log.warning(
+            'outbound history budget exceeded: bytes=%s limit=%s',
+            getattr(exc, 'bytes_len', -1),
+            getattr(exc, 'limit', -1),
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=HISTORY_OVERSIZE_USER_MESSAGE,
+        ) from exc
 
 
 SKILL_MENTION_RE = re.compile(r'<\$([^|>]+)\|?[^>]*>')
@@ -2462,33 +2488,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if regeneration_prompt:
         form_data['messages'].append({'role': 'user', 'content': regeneration_prompt})
 
-    # Process messages with OR-aligned output items for clean LLM messages
+    # Process messages with OR-aligned output items for clean LLM messages.
+    # Do NOT compact here — under-budget tool receipts must stay intact
+    # (M-U2 BLOCKING-2). Final budget gate runs after all injections.
     form_data['messages'] = process_messages_with_output(
         form_data.get('messages', []),
         reasoning_format=get_reasoning_format(model),
     )
-
-    # Fail closed before Hermes 413: if history is still over budget after
-    # compacting tool dumps, tell the user to open a new chat (never brick
-    # them with silent endless body_too_large retries on this chat).
-    from open_webui.utils.history_compact import (
-        HISTORY_OVERSIZE_USER_MESSAGE,
-        HistoryPayloadTooLarge,
-        ensure_messages_within_budget,
-    )
-
-    try:
-        form_data['messages'] = ensure_messages_within_budget(form_data.get('messages', []))
-    except HistoryPayloadTooLarge as exc:
-        log.warning(
-            'history payload still over budget after compact: bytes=%s limit=%s',
-            exc.bytes_len,
-            exc.limit,
-        )
-        raise HTTPException(
-            status_code=400,
-            detail=HISTORY_OVERSIZE_USER_MESSAGE,
-        ) from exc
 
     system_message = get_system_message(form_data.get('messages', []))
     if system_message:  # Chat Controls/User Settings
@@ -3085,6 +3091,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # Merge any duplicate system messages into a single message at position 0
     # to prevent template parsing errors with strict chat templates (e.g. Qwen)
     form_data['messages'] = merge_system_messages(form_data.get('messages', []))
+
+    # M-U2 final outbound controls (after all injections):
+    # coverage manifest + selective compact only when over Hermes budget +
+    # fail-closed measurement of the provider-bound body.
+    form_data = apply_outbound_history_controls(form_data, metadata)
 
     return form_data, metadata, events
 
