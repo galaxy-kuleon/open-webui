@@ -2221,7 +2221,16 @@ def process_messages_with_output(
 
     For assistant messages with 'output' field, produces properly formatted
     OpenAI-style messages (tool_calls + tool results). Strips 'output' before LLM.
+
+    Before expansion, tool_call detail bodies (file full-text dumps) are
+    compacted so multi-turn re-sends cannot brick the chat at Hermes 10 MB
+    (see ``history_compact``). Compacted output is LLM-facing only; DB rows
+    are not rewritten here.
     """
+    from open_webui.utils.history_compact import compact_messages_for_llm_history
+
+    # Compact first so convert_output_to_messages never re-hydrates full tool dumps.
+    messages = compact_messages_for_llm_history(messages or [])
     processed = []
 
     for message in messages:
@@ -2233,14 +2242,16 @@ def process_messages_with_output(
                 reasoning_format=reasoning_format,
             )
             if output_messages:
-                processed.extend(output_messages)
+                # convert can re-join message parts; compact again for safety.
+                processed.extend(compact_messages_for_llm_history(output_messages))
                 continue
 
         # Strip 'output' field before adding (LLM shouldn't see it)
         clean_message = {k: v for k, v in message.items() if k != 'output'}
         processed.append(clean_message)
 
-    return processed
+    # Final pass: tool-role rows produced by convert_output_to_messages.
+    return compact_messages_for_llm_history(processed)
 
 
 SKILL_MENTION_RE = re.compile(r'<\$([^|>]+)\|?[^>]*>')
@@ -2456,6 +2467,28 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         form_data.get('messages', []),
         reasoning_format=get_reasoning_format(model),
     )
+
+    # Fail closed before Hermes 413: if history is still over budget after
+    # compacting tool dumps, tell the user to open a new chat (never brick
+    # them with silent endless body_too_large retries on this chat).
+    from open_webui.utils.history_compact import (
+        HISTORY_OVERSIZE_USER_MESSAGE,
+        HistoryPayloadTooLarge,
+        ensure_messages_within_budget,
+    )
+
+    try:
+        form_data['messages'] = ensure_messages_within_budget(form_data.get('messages', []))
+    except HistoryPayloadTooLarge as exc:
+        log.warning(
+            'history payload still over budget after compact: bytes=%s limit=%s',
+            exc.bytes_len,
+            exc.limit,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=HISTORY_OVERSIZE_USER_MESSAGE,
+        ) from exc
 
     system_message = get_system_message(form_data.get('messages', []))
     if system_message:  # Chat Controls/User Settings
