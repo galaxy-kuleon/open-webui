@@ -109,6 +109,14 @@ DOCLING_DIRECT_EXTS: frozenset[str] = frozenset({
 # Extensions handled by the dedicated email parser before docling/fallback
 EMAIL_EXTS: frozenset[str] = frozenset({'eml'})
 
+# Outlook compound-file email. Docling has no CFBF reader, so every .msg used
+# to fall through to the unknown-extension branch, spend ~2s on a doomed
+# docling round-trip and come back empty (`empty_conversion`). Handled by the
+# stdlib CFBF reader in skiprag/msg.py instead. A malformed .msg still reaches
+# the caller's generic Loader fallback and surfaces as `fallback_empty`, which
+# is a distinguishable failure kind rather than the old silent docling miss.
+MSG_EXTS: frozenset[str] = frozenset({'msg'})
+
 # Extensions that are just plain text — read directly
 PLAINTEXT_EXTS: frozenset[str] = frozenset({'md', 'txt'})
 
@@ -590,6 +598,12 @@ def _convert_uncached(raw_bytes: bytes, filename: str, ext: str, request=None) -
     Dedicated `.eml` parsing has priority over Docling and fallback loaders.
     Raises on failure (caller handles).
     """
+    if ext in MSG_EXTS:
+        from open_webui.skiprag.msg import extract_msg_text_from_bytes
+
+        log.info('skip-rag: converting .msg via stdlib CFBF reader')
+        return extract_msg_text_from_bytes(raw_bytes)
+
     if ext in EMAIL_EXTS:
         from open_webui.skiprag.email import eml_to_markdown
 

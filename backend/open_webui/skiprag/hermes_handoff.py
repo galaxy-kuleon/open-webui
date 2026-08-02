@@ -216,6 +216,28 @@ def _file_id_from_item(file_item: dict) -> str:
     return str(file_id or '')
 
 
+def _normalised_file_items(value: object, *, source: str) -> list:
+    """Coerce a file-items field to a list, distinguishing absent from invalid.
+
+    ``None`` means "no files" and normalises silently — it is what an omitted
+    request field becomes. Anything else that is not a list is a schema
+    violation: it is still treated as no files so one malformed field cannot
+    strand a user's whole upload, but it is logged so a bad payload does not
+    masquerade as an ordinary fileless turn. Truthiness is deliberately not
+    used: `False` and `0` are violations, not empty collections.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    log.warning(
+        'hermes-handoff: %s is %s, not a list — treating as no files',
+        source,
+        type(value).__name__,
+    )
+    return []
+
+
 def _current_turn_file_items(metadata: dict, all_files: list[dict]) -> list[dict]:
     """
     Return file items attached to the current user message only.
@@ -224,11 +246,18 @@ def _current_turn_file_items(metadata: dict, all_files: list[dict]) -> list[dict
     historical chat files plus the current upload. For Hermes Path B, the
     persisted user_message.files field is the authoritative current-turn set.
     Legacy/direct callers without user_message metadata fall back to all files.
+
+    ``all_files`` is normalised here as well as at the call site because this
+    helper is reachable directly and its contract — never raise on a missing
+    file list — should not depend on which caller reached it.
     """
+    all_files = _normalised_file_items(all_files, source='all_files')
     user_message = metadata.get('user_message')
     if isinstance(user_message, dict):
         if 'files' in user_message:
-            current_files = user_message.get('files') or []
+            current_files = _normalised_file_items(
+                user_message.get('files'), source='user_message.files'
+            )
             return [
                 f for f in current_files
                 if isinstance(f, dict) and f.get('type', 'file') == 'file'
@@ -622,8 +651,26 @@ async def run_hermes_handoff(
     body: the modified form_data body (file items removed from
           metadata.files; last user message has <files> block appended).
     """
-    metadata = body.get('metadata', {})
-    files = metadata.get('files', [])
+    metadata = body.get('metadata')
+    if not isinstance(metadata, dict):
+        # Without metadata there is no user/chat scope to sign a handoff
+        # against, so there is nothing safe to do. Say so instead of
+        # half-working: the no-file branch below writes back into
+        # body['metadata'], which would raise on a non-dict anyway.
+        log.warning(
+            'hermes-handoff: request metadata is %s, not a dict — skipping Path B',
+            type(metadata).__name__,
+        )
+        return body
+
+    # `.get(key, default)` only substitutes an ABSENT key, so a stored None
+    # flowed into the list comprehensions below and aborted the whole handoff
+    # with a TypeError; the caller then forwarded the turn with no file
+    # context at all. `process_chat_payload` now normalises at the producer —
+    # this is defence in depth for direct callers, and it normalises None
+    # only. A non-list is a schema violation and must stay visible rather
+    # than being coerced into a plausible-looking empty turn.
+    files = _normalised_file_items(metadata.get('files'), source='metadata.files')
 
     user_id = _user_id_from_user(user)
     chat_id: str = _safe_segment(metadata.get('chat_id') or body.get('chat_id'), 'nochat')
@@ -649,6 +696,17 @@ async def run_hermes_handoff(
         )
         if entries:
             _inject_transiently(body, _build_files_block(entries))
+        # Positive signal for the no-upload turn. Without it the only evidence
+        # that a follow-up turn carried file context was the ABSENCE of an
+        # ERROR line, so a silent continuity loss looked exactly like a normal
+        # fileless chat message.
+        log.info(
+            'hermes-handoff: Path B continuity — 0 new file(s), %d manifest '
+            'entr%s reinjected (manifest=%s)',
+            len(entries),
+            'y' if len(entries) == 1 else 'ies',
+            'on' if use_manifest else 'off',
+        )
         return body
 
     # Determine the handoff subdir from user/chat/message context. User/chat
