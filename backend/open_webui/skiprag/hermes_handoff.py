@@ -736,8 +736,49 @@ async def run_hermes_handoff(
     turn_entries: list[dict[str, str]] = []
 
     for idx, file_item in enumerate(file_items, start=1):
-        filename = file_item.get('name', 'file')
+        # Chat-completions often pass only {"type":"file","id":...} with no
+        # name. Falling back to the literal "file" strips the extension and
+        # breaks SOCv2 submit_conversion (unsupported extension ''). Prefer
+        # the DB filename / meta.name / storage path basename when present.
+        filename = (
+            file_item.get('name')
+            or file_item.get('filename')
+            or file_item.get('file', {}).get('name')
+            or file_item.get('file', {}).get('filename')
+            or ''
+        )
         file_id = _file_id_from_item(file_item)
+        if (not filename or filename == 'file') and file_id:
+            try:
+                from open_webui.models.files import Files
+
+                file_model = await Files.get_file_by_id(file_id)
+                if file_model:
+                    meta = file_model.meta or {}
+                    if isinstance(meta, str):
+                        import json as _json
+
+                        try:
+                            meta = _json.loads(meta)
+                        except Exception:
+                            meta = {}
+                    filename = (
+                        getattr(file_model, 'filename', None)
+                        or (meta.get('name') if isinstance(meta, dict) else None)
+                        or (
+                            Path(file_model.path).name
+                            if getattr(file_model, 'path', None)
+                            else None
+                        )
+                        or filename
+                    )
+            except Exception as exc:
+                log.warning(
+                    'hermes-handoff: could not resolve filename for %s: %s',
+                    file_id,
+                    exc,
+                )
+        filename = filename or 'file'
 
         # 1. Resolve raw bytes
         raw_bytes = await _resolve_raw_bytes(file_item, filename)
