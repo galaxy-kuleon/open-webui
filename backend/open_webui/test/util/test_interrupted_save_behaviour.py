@@ -102,6 +102,8 @@ def _run(chats_returns, output_items, emitter_raises=False):
         "log_empty_turn": failure_surface.log_empty_turn,
         "PHASE_INTERRUPTED": failure_surface.PHASE_INTERRUPTED,
         "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
+        "NOTICE_WRITTEN": failure_surface.NOTICE_WRITTEN,
+        "NOTICE_UNDELIVERED": failure_surface.NOTICE_UNDELIVERED,
     }
     marker_lines = []
     handler = logging.Handler()
@@ -169,6 +171,26 @@ class InterruptedSaveBehaviourTests(unittest.TestCase):
         self.assertEqual([], log.markers,
                          "an answered turn filed an empty-turn marker")
 
+    def test_a_banner_that_never_reached_the_user_is_not_reported_as_shown(self):
+        """`notice=` must be measured, not assumed.
+
+        The banner write and the socket emit live inside a try/except here, so
+        "we surfaced it" is an outcome that may not have occurred. The report
+        counts a blank-with-an-explanation and a blank-with-nothing in different
+        columns, and if this line lied the operator would read the second as the
+        first -- the failure looking better than it was, which is the direction
+        that never gets caught by anyone.
+        """
+        log, chats, events = _run([{"id": "c-1"}, {"id": "c-1"}],
+                                  [dict(i) for i in THINKING_ONLY],
+                                  emitter_raises=True)
+        self.assertEqual(1, len(log.markers), log.markers)
+        self.assertIn("notice=undelivered", log.markers[0],
+                      "a banner the socket never delivered was filed as shown")
+        # ...and the failure is still filed as an empty turn, with its trace.
+        self.assertTrue(log.markers[0].startswith("empty_reply service=owui "),
+                        log.markers[0])
+
     def test_the_trace_the_user_is_told_to_quote_is_the_trace_ops_can_find(self):
         """The defect this closes, stated as a test.
 
@@ -194,6 +216,8 @@ class InterruptedSaveBehaviourTests(unittest.TestCase):
                         f"marker is not in the ledger's grammar: {marker}")
         self.assertIn("phase=interrupted", marker,
                       "a cancelled turn was filed as a clean finalize")
+        self.assertIn("notice=written", marker,
+                      "the banner reached the user and the marker does not say so")
         # M4: ids and closed-vocabulary labels only. THINKING_ONLY carries the
         # model's reasoning text; none of it may reach a line ops greps.
         for item in THINKING_ONLY:

@@ -77,6 +77,8 @@ from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.failure_surface import (
+    NOTICE_UNDELIVERED,
+    NOTICE_WRITTEN,
     PHASE_FINALIZED,
     PHASE_INTERRUPTED,
     build_error_payload,
@@ -4214,6 +4216,11 @@ async def streaming_chat_response_handler(response, ctx):
                         empty_error = build_error_payload(
                             metadata['chat_id'], metadata['message_id']
                         )
+                        # Tracked, not assumed. A blank turn WITH a banner and a
+                        # blank turn with nothing are different failures to the
+                        # person reading the report, and this is the only place
+                        # that knows which one happened.
+                        notice = NOTICE_UNDELIVERED
                         try:
                             await Chats.upsert_message_to_chat_by_id_and_message_id(
                                 metadata['chat_id'],
@@ -4224,6 +4231,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 {'type': 'chat:message:error',
                                  'data': {'error': empty_error}}
                             )
+                            notice = NOTICE_WRITTEN
                         except Exception:
                             log.warning('empty-turn error surface not delivered')
                         # Emitted from failure_surface's own logger, not this one: the
@@ -4234,6 +4242,7 @@ async def streaming_chat_response_handler(response, ctx):
                         log_empty_turn(
                             empty_error, PHASE_INTERRUPTED,
                             metadata['chat_id'], metadata['message_id'],
+                            notice,
                         )
 
             try:
@@ -5518,9 +5527,13 @@ async def streaming_chat_response_handler(response, ctx):
                             {'type': 'chat:message:error', 'data': {'error': empty_error}}
                         )
                         # See the interrupted path above for why this is not `log.info`.
+                        # NOTICE_WRITTEN unconditionally here, and honestly so: the
+                        # upsert and the emit above are awaited without a guard, so
+                        # reaching this line means both succeeded.
                         log_empty_turn(
                             empty_error, PHASE_FINALIZED,
                             metadata['chat_id'], metadata['message_id'],
+                            NOTICE_WRITTEN,
                         )
                     else:
                         # #17 + Path-A fail-closed: annotate a finalized file-heavy answer with a

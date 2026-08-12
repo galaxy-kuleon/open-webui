@@ -65,6 +65,16 @@ PHASE_FINALIZED = "finalized"
 PHASE_INTERRUPTED = "interrupted"
 ALLOWED_PHASES = frozenset({PHASE_FINALIZED, PHASE_INTERRUPTED})
 
+# Whether the BANNER reached the user, which is a different fact from whether the
+# turn was blank. A blank turn that explained itself and a blank turn that said
+# nothing are different failures to whoever reads the report, and only the caller
+# knows which happened -- the interrupted path writes the error inside a try/except,
+# so "we surfaced it" is an outcome that may not have occurred. The reader must not
+# have to infer this from the service name.
+NOTICE_WRITTEN = "written"
+NOTICE_UNDELIVERED = "undelivered"
+ALLOWED_NOTICES = frozenset({NOTICE_WRITTEN, NOTICE_UNDELIVERED})
+
 # Bucketed, DB-signal-derivable cause label (mirrors chat_triage CAUSES['db_stream_flush']).
 CAUSE_EMPTY_FINALIZED = "db_stream_flush"
 
@@ -156,7 +166,8 @@ def assert_privacy_safe(payload: dict) -> dict:
     return payload
 
 
-def build_marker(payload: dict, phase: str, chat_id: str, message_id: str) -> str:
+def build_marker(payload: dict, phase: str, chat_id: str, message_id: str,
+                 notice: str) -> str:
     """The ledger line for an empty turn: closed vocabulary, ids only, no content.
 
     Separated from ``log_empty_turn`` so a test can assert the exact bytes without a
@@ -165,6 +176,8 @@ def build_marker(payload: dict, phase: str, chat_id: str, message_id: str) -> st
     """
     if phase not in ALLOWED_PHASES:
         raise ValueError("phase {!r} is not canonical; allowed: {}".format(phase, sorted(ALLOWED_PHASES)))
+    if notice not in ALLOWED_NOTICES:
+        raise ValueError("notice {!r} is not canonical; allowed: {}".format(notice, sorted(ALLOWED_NOTICES)))
     assert_privacy_safe(payload)
     # `_KV_RE` in journey_ledger splits on whitespace, so a value containing a space would
     # silently truncate the record. Every value here is an opaque id or a label from a
@@ -174,14 +187,15 @@ def build_marker(payload: dict, phase: str, chat_id: str, message_id: str) -> st
         if val != "".join(val.split()):
             raise ValueError("marker field {!r} contains whitespace: {!r}".format(key, val))
     return (
-        "{} service=owui phase={} cause={} trace={} chat={} msg={}".format(
-            MARKER_EMPTY_REPLY, phase, payload["cause"], payload["trace_id"],
+        "{} service=owui phase={} notice={} cause={} trace={} chat={} msg={}".format(
+            MARKER_EMPTY_REPLY, phase, notice, payload["cause"], payload["trace_id"],
             chat_id or "-", message_id or "-",
         )
     )
 
 
-def log_empty_turn(payload: dict, phase: str, chat_id: str, message_id: str) -> str:
+def log_empty_turn(payload: dict, phase: str, chat_id: str, message_id: str,
+                   notice: str) -> str:
     """Emit the empty-turn marker. THE ONLY LOGGING CALL IN THIS MODULE -- see the module
     docstring: the ledger's identity trust in this logger rests on that being true, and its
     self-test fails if a second one appears.
@@ -191,10 +205,15 @@ def log_empty_turn(payload: dict, phase: str, chat_id: str, message_id: str) -> 
     WARNING, through the same single call.
     """
     try:
-        line = build_marker(payload, phase, chat_id, message_id)
+        line = build_marker(payload, phase, chat_id, message_id, notice)
         level = logging.INFO
     except Exception as exc:  # noqa: BLE001 -- see docstring
-        line = "{} service=owui phase=marker_unbuildable cause={} trace=- chat=- msg=- err={}".format(
+        # `notice=unknown`: the marker could not be built, so this line must not
+        # claim the user was told anything. A value outside ALLOWED_NOTICES on
+        # purpose -- the reader treats an unknown notice as not-explained, which
+        # is the safe direction.
+        line = ("{} service=owui phase=marker_unbuildable notice=unknown cause={} "
+                "trace=- chat=- msg=- err={}").format(
             MARKER_EMPTY_REPLY, CAUSE_EMPTY_FINALIZED, type(exc).__name__
         )
         level = logging.WARNING
