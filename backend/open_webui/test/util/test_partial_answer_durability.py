@@ -200,6 +200,63 @@ class PartialAnswerDurabilityTests(unittest.TestCase):
                         "in-progress items are closed after the state is "
                         "serialised, so the saved copy still says Thinking…")
 
+    def test_the_durable_write_happens_before_any_notification(self):
+        """Round 15 B1. The save used to `await event_emitter(...)` first, and
+        the real emitter's first act is `sio.emit` — an external I/O boundary.
+        With Socket.IO or Redis briefly unavailable that await raised, the
+        boundary swallowed it, and ZERO content was persisted: the exact loss
+        this path exists to prevent, reached through the notification about
+        it."""
+        fn = [n for n in ast.walk(self.tree)
+              if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+              and n.name == "save_interrupted_state"][0]
+        first_write = min(
+            (n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+             and getattr(n.func, "attr", "")
+             == "upsert_message_to_chat_by_id_and_message_id"),
+            default=None)
+        first_emit = min(
+            (n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", "") == "event_emitter"),
+            default=None)
+        self.assertIsNotNone(first_write, "the save never writes to the chat")
+        self.assertIsNotNone(first_emit, "the save never notifies anyone")
+        self.assertLess(
+            first_write, first_emit,
+            "a notification is attempted before the durable write; if the "
+            "socket is down the user's text is never persisted at all")
+
+    def test_a_failed_persist_is_never_silent(self):
+        fn = [n for n in ast.walk(self.tree)
+              if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+              and n.name == "save_interrupted_state"][0]
+        self.assertIn(
+            "assistant_turn_interrupted_persist_failed", ast.unparse(fn),
+            "a durability failure that looks like success is worse than the "
+            "interruption itself")
+
+    def test_the_emptiness_decision_uses_the_snapshot_that_was_SAVED(self):
+        """Round 15 B2. The write took `full_output()` while the detector read
+        bare `output`, so a tool continuation that died before its first new
+        delta saved the answer already on screen and then filed a "nothing was
+        delivered" banner over the top of it."""
+        fn = [n for n in ast.walk(self.tree)
+              if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+              and n.name == "save_interrupted_state"][0]
+        flags = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", "") == "should_flag_empty"]
+        self.assertTrue(flags, "nothing decides emptiness any more")
+        for call in flags:
+            arg = ast.unparse(call.args[0]) if call.args else ""
+            self.assertNotIn(
+                "serialize_output(output)", arg,
+                "the emptiness check reads bare `output` while the save wrote "
+                "full_output() — a recovered answer gets a blank-screen banner")
+            self.assertNotIn(
+                "(output)", arg,
+                f"the emptiness check argument {arg!r} is not the saved "
+                f"snapshot")
+
     def test_the_name_does_not_promise_only_cancellation(self):
         stale = [n for n in ast.walk(self.tree)
                  if (isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))

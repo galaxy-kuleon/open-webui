@@ -4075,72 +4075,116 @@ async def streaming_chat_response_handler(response, ctx):
                 # server ended it; 'stream_failed' means the provider body
                 # broke. Reporting a transport failure as a user cancellation
                 # is how a fault disappears from every count that matters.
-                # CLOSE THE SPINNER IN THE SAVED STATE, not just in the UI.
-                # A reasoning item left `in_progress` serialises to
+                #
+                # ORDER IS THE WHOLE POINT HERE. The durable write goes first.
+                # This used to `await event_emitter(...)` before touching the
+                # database -- and the real emitter's first act is `sio.emit`,
+                # an external I/O boundary. With Redis or Socket.IO briefly
+                # unavailable, that await raised, `consume_stream_durably`
+                # swallowed it, and ZERO content was ever persisted: the exact
+                # loss this whole path exists to prevent, reached through the
+                # notification about it. Notifications are best-effort;
+                # durability is not.
+                #
+                # CLOSE THE SPINNER IN THE SAVED STATE, not just in the UI. A
+                # reasoning item left `in_progress` serialises to
                 # `<details type="reasoning" done="false"><summary>Thinking…`,
                 # so a message rescued from a dead stream reloads as one that
                 # is still thinking -- for ever. The normal end of the turn
                 # marks these completed; an interrupted end skipped it, and
                 # re-raising past the loop (rather than breaking out of it)
-                # means it will keep skipping it. Persisted state that
-                # misrepresents itself is the same disease as a log that lies.
+                # means it will keep skipping it.
                 for _item in full_output():
                     if _item.get('status') == 'in_progress':
                         _item['status'] = 'completed'
-                await event_emitter({'type': 'chat:tasks:cancel'})
-                log.info(
-                    'assistant_turn_interrupted reason=%s chat=%s',
-                    reason if reason in ('cancelled', 'stream_failed') else 'unknown',
-                    metadata.get('chat_id', ''),
-                )
+
+                # ONE snapshot, used for the write AND the emptiness decision.
+                # They used to disagree: the write took `full_output()` while
+                # the detector read bare `output`, so a tool continuation that
+                # died before its first new delta saved the answer already on
+                # screen and then filed a "nothing was delivered" banner over
+                # the top of it.
+                snapshot = full_output()
+                serialized = serialize_output(snapshot)
+
+                persisted = False
                 if not metadata.get('chat_id', '').startswith('channel:'):
-                    if not ENABLE_REALTIME_CHAT_SAVE:
-                        await Chats.upsert_message_to_chat_by_id_and_message_id(
-                            metadata['chat_id'],
-                            metadata['message_id'],
-                            {
-                                # done=True only closes the task/spinner. It is
-                                # NOT a claim that the answer is complete --
-                                # the error persisted alongside it says
-                                # otherwise, and nothing may read this flag as
-                                # "finished successfully".
-                                'done': True,
-                                # full_output(), not `output`. During a tool or
-                                # code-interpreter continuation the earlier
-                                # visible content is moved into `prior_output`
-                                # and restored only after the continuation
-                                # returns -- so a failure inside one would drop
-                                # exactly the tool history the user had already
-                                # read.
-                                'content': serialize_output(full_output()),
-                                'output': full_output(),
-                            },
-                        )
-                    else:
-                        await Chats.upsert_message_to_chat_by_id_and_message_id(
-                            metadata['chat_id'],
-                            metadata['message_id'],
-                            {'done': True},
+                    try:
+                        if not ENABLE_REALTIME_CHAT_SAVE:
+                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                metadata['chat_id'],
+                                metadata['message_id'],
+                                {
+                                    # done=True only closes the task/spinner. It
+                                    # is NOT a claim that the answer is complete
+                                    # -- the error persisted alongside it says
+                                    # otherwise, and nothing may read this flag
+                                    # as "finished successfully".
+                                    'done': True,
+                                    'content': serialized,
+                                    'output': snapshot,
+                                },
+                            )
+                        else:
+                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                metadata['chat_id'],
+                                metadata['message_id'],
+                                {'done': True},
+                            )
+                        persisted = True
+                    except Exception:
+                        # Never silent. A durability failure that looks like
+                        # success is worse than the interruption itself.
+                        # Marker and `service=` on ONE literal: split across
+                        # two, neither a log grep nor the collector's producer
+                        # scan can see the pair, and an unparsed marker is a
+                        # signal nobody reads.
+                        log.exception(
+                            'assistant_turn_interrupted_persist_failed service=owui'
+                            ' reason=%s chat=%s',
+                            reason if reason in ('cancelled', 'stream_failed')
+                            else 'unknown',
+                            metadata.get('chat_id', ''),
                         )
 
-                    # #16 runtime slice: a cancelled turn that kept partial content has a
-                    # non-empty serialize_output → NOT flagged (A5: leave the partial for
-                    # recovery). Only a truly-EMPTY cancelled turn is surfaced as an error
+                log.info(
+                    'assistant_turn_interrupted service=owui'
+                    ' reason=%s persisted=%s chat=%s',
+                    reason if reason in ('cancelled', 'stream_failed') else 'unknown',
+                    'yes' if persisted else 'no',
+                    metadata.get('chat_id', ''),
+                )
+
+                # Best-effort notifications, each guarded on its own: the user
+                # already has their text on disk by now.
+                try:
+                    await event_emitter({'type': 'chat:tasks:cancel'})
+                except Exception:
+                    log.warning('interrupted-turn cancel event not delivered')
+
+                if not metadata.get('chat_id', '').startswith('channel:'):
+                    # #16 runtime slice: an interrupted turn that KEPT content has a
+                    # non-empty serialization → NOT flagged (A5: leave the partial for
+                    # recovery). Only a truly-EMPTY one is surfaced as an error
                     # (bucketed cause + opaque trace; no raw content — M4).
-                    if should_flag_empty(serialize_output(output), True, task_active=False):
+                    if should_flag_empty(serialized, True, task_active=False):
                         empty_error = build_error_payload(
                             metadata['chat_id'], metadata['message_id']
                         )
-                        await Chats.upsert_message_to_chat_by_id_and_message_id(
-                            metadata['chat_id'],
-                            metadata['message_id'],
-                            {'error': empty_error},
-                        )
-                        await event_emitter(
-                            {'type': 'chat:message:error', 'data': {'error': empty_error}}
-                        )
+                        try:
+                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                metadata['chat_id'],
+                                metadata['message_id'],
+                                {'error': empty_error},
+                            )
+                            await event_emitter(
+                                {'type': 'chat:message:error',
+                                 'data': {'error': empty_error}}
+                            )
+                        except Exception:
+                            log.warning('empty-turn error surface not delivered')
                         log.info(
-                            'empty-assistant-turn surfaced (cancelled) %s',
+                            'empty-assistant-turn surfaced (interrupted) %s',
                             json.dumps(
                                 {
                                     'chat_id': metadata['chat_id'],
