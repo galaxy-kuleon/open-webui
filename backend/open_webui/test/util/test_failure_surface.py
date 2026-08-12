@@ -209,3 +209,64 @@ class MarkerEmissionIsBestEffortTests(unittest.TestCase):
                                  fs.NOTICE_WRITTEN)
         self.assertIn("phase=marker_unbuildable", line,
                       f"a whitespace-bearing id produced a normal record: {line}")
+
+
+class FailureKindFromTypeTests(unittest.TestCase):
+    """The producer-owned enum round 33 asked for, tested at its own boundary."""
+
+    def test_known_transport_errors_classify(self):
+        class TransferEncodingError(Exception):
+            pass
+
+        class LineTooLong(Exception):
+            pass
+
+        self.assertEqual("stream_truncated",
+                         fs.classify_exception(TransferEncodingError()))
+        self.assertEqual("sse_line_too_long", fs.classify_exception(LineTooLong()))
+
+    def test_a_subclass_still_classifies(self):
+        """aiohttp and httpx both subclass their own base errors."""
+        class TransferEncodingError(Exception):
+            pass
+
+        class VendorSpecific(TransferEncodingError):
+            pass
+
+        self.assertEqual("stream_truncated", fs.classify_exception(VendorSpecific()))
+
+    def test_an_unknown_type_is_unclassified_not_guessed(self):
+        class SomethingNew(Exception):
+            pass
+
+        self.assertEqual("unclassified", fs.classify_exception(SomethingNew()))
+
+    def test_the_MESSAGE_can_never_classify(self):
+        """The whole reason this exists.
+
+        A ValueError whose text quotes a truncation is not a truncation. Text
+        matching both misses real failures spelled differently and lets a chat
+        ABOUT an outage manufacture one; classifying on the type cannot do
+        either.
+        """
+        self.assertEqual(
+            "unclassified",
+            fs.classify_exception(ValueError(
+                "Response payload is not completed: <TransferEncodingError: 400, "
+                "message='Not enough data to satisfy transfer length'>")))
+
+    def test_the_marker_carries_it_and_refuses_a_non_canonical_one(self):
+        payload = fs.build_error_payload("chat-aaaaaaaa", "msg-bbbbbbbb")
+        line = fs.build_marker(payload, fs.PHASE_INTERRUPTED, "chat-aaaaaaaa",
+                               "msg-bbbbbbbb", fs.NOTICE_WRITTEN,
+                               "stream_truncated")
+        self.assertIn("failure=stream_truncated", line)
+        with self.assertRaises(ValueError):
+            fs.build_marker(payload, fs.PHASE_INTERRUPTED, "chat-aaaaaaaa",
+                            "msg-bbbbbbbb", fs.NOTICE_WRITTEN, "made up")
+
+    def test_default_is_unclassified_so_an_unwired_caller_cannot_claim_a_cause(self):
+        payload = fs.build_error_payload("chat-aaaaaaaa", "msg-bbbbbbbb")
+        line = fs.build_marker(payload, fs.PHASE_FINALIZED, "chat-aaaaaaaa",
+                               "msg-bbbbbbbb", fs.NOTICE_WRITTEN)
+        self.assertIn("failure=unclassified", line)

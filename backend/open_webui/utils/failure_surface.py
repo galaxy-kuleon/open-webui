@@ -87,6 +87,57 @@ NOTICE_WRITTEN = "written"
 NOTICE_UNDELIVERED = "undelivered"
 ALLOWED_NOTICES = frozenset({NOTICE_WRITTEN, NOTICE_UNDELIVERED})
 
+# WHY the stream died, decided from the EXCEPTION TYPE rather than from its text.
+#
+# The ops report classifies truncations by grepping the stored error string, and
+# adversarial review round 33 showed both failure directions of that: a genuine
+# truncation spelled differently (httpx ``RemoteProtocolError``, aiohttp
+# ``ServerDisconnectedError``) stays generic, and ordinary assistant prose quoting
+# an error can fabricate one. It said the honest fix is a producer-owned closed
+# enum chosen from the caught exception, and this is it.
+#
+# Keys are exception CLASS NAMES, matched against the raised type and its bases,
+# so no message text is ever consulted. Unknown types get ``unclassified`` --
+# which is the point: an unfamiliar failure must read as unfamiliar, not as the
+# nearest label that happens to match a substring.
+FAILURE_KIND_BY_EXCEPTION = {
+    # the wire ended mid-body: the user watched an answer stop
+    "TransferEncodingError": "stream_truncated",
+    "ContentLengthError": "stream_truncated",
+    "RemoteProtocolError": "stream_truncated",          # httpx
+    "IncompleteRead": "stream_truncated",               # http.client
+    "ClientPayloadError": "stream_truncated",
+    # one line was too big for the reader; the wire was fine
+    "LineTooLong": "sse_line_too_long",
+    # the peer went away
+    "ServerDisconnectedError": "peer_disconnected",
+    "ConnectionResetError": "peer_disconnected",
+    "ClientConnectionError": "peer_disconnected",
+    # it never finished in time
+    "TimeoutError": "upstream_timeout",
+    "ServerTimeoutError": "upstream_timeout",
+    "ReadTimeout": "upstream_timeout",
+}
+FAILURE_KIND_UNCLASSIFIED = "unclassified"
+ALLOWED_FAILURE_KINDS = frozenset(
+    set(FAILURE_KIND_BY_EXCEPTION.values()) | {FAILURE_KIND_UNCLASSIFIED})
+
+
+def classify_exception(exc) -> str:
+    """Closed failure label for a caught exception, from its TYPE only.
+
+    Walks the MRO so a subclass of a known error still classifies. Never reads
+    ``str(exc)``: the message can contain provider text, user content echoed back,
+    or a quoted error from a previous turn -- all three are how a text-matching
+    classifier gets fabricated input (round 33).
+    """
+    for klass in type(exc).__mro__:
+        kind = FAILURE_KIND_BY_EXCEPTION.get(klass.__name__)
+        if kind:
+            return kind
+    return FAILURE_KIND_UNCLASSIFIED
+
+
 # Bucketed, DB-signal-derivable cause label (mirrors chat_triage CAUSES['db_stream_flush']).
 CAUSE_EMPTY_FINALIZED = "db_stream_flush"
 
@@ -179,7 +230,7 @@ def assert_privacy_safe(payload: dict) -> dict:
 
 
 def build_marker(payload: dict, phase: str, chat_id: str, message_id: str,
-                 notice: str) -> str:
+                 notice: str, failure: str = FAILURE_KIND_UNCLASSIFIED) -> str:
     """The ledger line for an empty turn: closed vocabulary, ids only, no content.
 
     Separated from ``log_empty_turn`` so a test can assert the exact bytes without a
@@ -190,6 +241,9 @@ def build_marker(payload: dict, phase: str, chat_id: str, message_id: str,
         raise ValueError("phase {!r} is not canonical; allowed: {}".format(phase, sorted(ALLOWED_PHASES)))
     if notice not in ALLOWED_NOTICES:
         raise ValueError("notice {!r} is not canonical; allowed: {}".format(notice, sorted(ALLOWED_NOTICES)))
+    if failure not in ALLOWED_FAILURE_KINDS:
+        raise ValueError("failure {!r} is not canonical; allowed: {}".format(
+            failure, sorted(ALLOWED_FAILURE_KINDS)))
     assert_privacy_safe(payload)
     # `_KV_RE` in journey_ledger splits on whitespace, so a value containing a space would
     # silently truncate the record. Every value here is an opaque id or a label from a
@@ -199,15 +253,15 @@ def build_marker(payload: dict, phase: str, chat_id: str, message_id: str,
         if val != "".join(val.split()):
             raise ValueError("marker field {!r} contains whitespace: {!r}".format(key, val))
     return (
-        "{} service=owui phase={} notice={} cause={} trace={} chat={} msg={}".format(
-            MARKER_EMPTY_REPLY, phase, notice, payload["cause"], payload["trace_id"],
-            chat_id or "-", message_id or "-",
+        "{} service=owui phase={} notice={} failure={} cause={} trace={} chat={} msg={}".format(
+            MARKER_EMPTY_REPLY, phase, notice, failure, payload["cause"],
+            payload["trace_id"], chat_id or "-", message_id or "-",
         )
     )
 
 
 def log_empty_turn(payload: dict, phase: str, chat_id: str, message_id: str,
-                   notice: str) -> str:
+                   notice: str, failure: str = FAILURE_KIND_UNCLASSIFIED) -> str:
     """Emit the empty-turn marker. THE ONLY LOGGING CALL IN THIS MODULE -- see the module
     docstring: the ledger's identity trust in this logger rests on that being true, and its
     self-test fails if a second one appears.
@@ -228,15 +282,15 @@ def log_empty_turn(payload: dict, phase: str, chat_id: str, message_id: str,
     read as "no empty turn happened".
     """
     try:
-        line = build_marker(payload, phase, chat_id, message_id, notice)
+        line = build_marker(payload, phase, chat_id, message_id, notice, failure)
         level = logging.INFO
     except Exception as exc:  # noqa: BLE001 -- see docstring
         # `notice=unknown`: the marker could not be built, so this line must not
         # claim the user was told anything. A value outside ALLOWED_NOTICES on
         # purpose -- the reader treats an unknown notice as not-explained, which
         # is the safe direction.
-        line = ("{} service=owui phase=marker_unbuildable notice=unknown cause={} "
-                "trace=- chat=- msg=- err={}").format(
+        line = ("{} service=owui phase=marker_unbuildable notice=unknown "
+                "failure=unclassified cause={} trace=- chat=- msg=- err={}").format(
             MARKER_EMPTY_REPLY, CAUSE_EMPTY_FINALIZED, type(exc).__name__
         )
         level = logging.WARNING

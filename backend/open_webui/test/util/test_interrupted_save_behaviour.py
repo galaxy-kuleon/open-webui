@@ -104,6 +104,8 @@ def _run(chats_returns, output_items, emitter_raises=False):
         "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
         "NOTICE_WRITTEN": failure_surface.NOTICE_WRITTEN,
         "NOTICE_UNDELIVERED": failure_surface.NOTICE_UNDELIVERED,
+        "FAILURE_KIND_UNCLASSIFIED": failure_surface.FAILURE_KIND_UNCLASSIFIED,
+        "classify_exception": failure_surface.classify_exception,
     }
     marker_lines = []
     handler = logging.Handler()

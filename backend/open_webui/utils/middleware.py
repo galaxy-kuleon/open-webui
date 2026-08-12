@@ -77,11 +77,13 @@ from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.failure_surface import (
+    FAILURE_KIND_UNCLASSIFIED,
     NOTICE_UNDELIVERED,
     NOTICE_WRITTEN,
     PHASE_FINALIZED,
     PHASE_INTERRUPTED,
     build_error_payload,
+    classify_exception,
     log_empty_turn,
     should_flag_empty,
 )
@@ -4080,9 +4082,14 @@ async def streaming_chat_response_handler(response, ctx):
                 try:
                     await stream_body_handler(resp, fd)
                 except Exception as exc:
+                    # Classified from the exception TYPE here, where the object
+                    # still exists. Downstream all anyone has is a rendered
+                    # string, and matching on that both misses real truncations
+                    # spelled differently and lets a chat ABOUT an error
+                    # manufacture one (round 33).
                     try:
-                        await asyncio.shield(
-                            save_interrupted_state('stream_failed'))
+                        await asyncio.shield(save_interrupted_state(
+                            'stream_failed', classify_exception(exc)))
                     except (asyncio.CancelledError, Exception):
                         pass
                     raise StreamBodyInterrupted(exc) from exc
@@ -4096,7 +4103,9 @@ async def streaming_chat_response_handler(response, ctx):
             # invisible to the sibling `except Exception` -- a NameError the
             # surrounding guard would have swallowed, leaving nothing saved
             # and no trace of why.
-            async def save_interrupted_state(reason: str = 'cancelled'):
+            async def save_interrupted_state(
+                    reason: str = 'cancelled',
+                    failure: str = FAILURE_KIND_UNCLASSIFIED):
                 # `reason` is a CLOSED set: 'cancelled' means the user or the
                 # server ended it; 'stream_failed' means the provider body
                 # broke. Reporting a transport failure as a user cancellation
@@ -4242,7 +4251,7 @@ async def streaming_chat_response_handler(response, ctx):
                         log_empty_turn(
                             empty_error, PHASE_INTERRUPTED,
                             metadata['chat_id'], metadata['message_id'],
-                            notice,
+                            notice, failure,
                         )
 
             try:
