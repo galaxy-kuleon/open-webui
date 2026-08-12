@@ -116,7 +116,16 @@ FAILURE_KIND_BY_EXCEPTION = {
     ("httpcore", "RemoteProtocolError"): "stream_truncated",
     # one line was too big for the reader; the wire was fine
     ("aiohttp", "LineTooLong"): "sse_line_too_long",
-    # the peer went away
+    # The peer went away. HONEST NOTE, measured 2026-08-13 with
+    # `scripts/ops/owui_transport_classifier_probe.sh`: a disconnect BEFORE the
+    # response headers raises ServerDisconnectedError at the REQUEST, not at the
+    # body read, so it never reaches the adapter and is `unclassified` by design
+    # -- the read boundary correctly declines to speak for a failure that
+    # happened before it. A disconnect mid-body surfaces as ClientPayloadError
+    # instead. So `peer_disconnected` may be unreachable through this path; the
+    # entries stay because they cost nothing and a future direct client would
+    # use them, but nobody should read a zero there as "no peer ever
+    # disconnected".
     ("aiohttp", "ServerDisconnectedError"): "peer_disconnected",
     ("aiohttp", "ClientConnectionError"): "peer_disconnected",
     ("builtins", "ConnectionResetError"): "peer_disconnected",
