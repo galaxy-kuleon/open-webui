@@ -257,6 +257,47 @@ class PartialAnswerDurabilityTests(unittest.TestCase):
                 f"the emptiness check argument {arg!r} is not the saved "
                 f"snapshot")
 
+    def test_reasoning_alone_is_not_treated_as_an_answer(self):
+        """The named class, arriving through the check meant to catch it.
+
+        `should_flag_empty` measures serialized markup length, and a reasoning
+        item serializes to a `<details>` block whether or not the model ever
+        replied. Measured against the deployed detector:
+
+            nothing at all                 -> flagged_empty=True
+            empty reasoning block          -> flagged_empty=False
+            reasoning with text, no answer -> flagged_empty=False   <-- the hole
+
+        So a turn that thought for twenty-six seconds and said nothing reached
+        the user as a collapsed "Thought for N seconds", no answer beside it,
+        no error to explain it. Both decision sites must therefore ask about
+        ANSWERABLE output, not everything that renders."""
+        sites = [n for n in ast.walk(self.tree) if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", "") == "should_flag_empty"]
+        self.assertGreaterEqual(len(sites), 2,
+                                "expected the interrupted and the normal end")
+        for call in sites:
+            arg = ast.unparse(call.args[0]) if call.args else ""
+            self.assertIn(
+                "answerable_output", arg,
+                f"emptiness is decided on {arg!r}, which counts a reasoning "
+                f"block as content — a thinking model that never answers goes "
+                f"unflagged")
+
+    def test_answerable_output_keeps_tool_work_and_drops_only_reasoning(self):
+        """A tool-only turn is legitimately non-empty; that was always the
+        point of keying this on serialized output. Only reasoning comes out."""
+        fn = [n for n in ast.walk(self.tree)
+              if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+              and n.name == "answerable_output"][0]
+        body = ast.unparse(fn)
+        self.assertIn("'reasoning'", body)
+        for kept in ("tool", "code_interpreter", "message"):
+            self.assertNotIn(
+                f"!= '{kept}'", body,
+                f"answerable_output also drops {kept} items; a tool-only turn "
+                f"would then be reported as empty")
+
     def test_the_name_does_not_promise_only_cancellation(self):
         stale = [n for n in ast.walk(self.tree)
                  if (isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))

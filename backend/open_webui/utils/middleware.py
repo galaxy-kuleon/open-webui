@@ -4004,6 +4004,27 @@ async def streaming_chat_response_handler(response, ctx):
             def full_output():
                 return prior_output + output if prior_output else output
 
+            def answerable_output(items=None):
+                """Everything the user could read AS AN ANSWER — reasoning is
+                not an answer.
+
+                `should_flag_empty` measures the length of serialized markup,
+                and a reasoning item serializes to a `<details>` block whether
+                or not the model ever said anything. So a turn that thought for
+                twenty-six seconds and produced no reply came out non-empty,
+                was never flagged, and reached the user as a collapsed
+                "Thought for N seconds" with no answer beside it and no error
+                to explain it. That is the exact 'finished without any content'
+                experience, arriving through the check meant to catch it.
+
+                Tool calls and code-interpreter blocks stay in: a tool-only
+                turn is legitimately non-empty, and that was always the point
+                of keying this on the serialized output rather than a bare
+                string.
+                """
+                return [item for item in (full_output() if items is None else items)
+                        if item.get('type') != 'reasoning']
+
             reasoning_tags_param = metadata.get('params', {}).get('reasoning_tags')
             DETECT_REASONING_TAGS = reasoning_tags_param is not False
 
@@ -4167,7 +4188,9 @@ async def streaming_chat_response_handler(response, ctx):
                     # non-empty serialization → NOT flagged (A5: leave the partial for
                     # recovery). Only a truly-EMPTY one is surfaced as an error
                     # (bucketed cause + opaque trace; no raw content — M4).
-                    if should_flag_empty(serialized, True, task_active=False):
+                    # Reasoning is not an answer -- see answerable_output().
+                    if should_flag_empty(serialize_output(answerable_output(snapshot)),
+                                         True, task_active=False):
                         empty_error = build_error_payload(
                             metadata['chat_id'], metadata['message_id']
                         )
@@ -5463,7 +5486,8 @@ async def streaming_chat_response_handler(response, ctx):
                 # serialize_output(output) so legit tool/skip-rag turns are non-empty and do
                 # NOT flag. Stream has ended here, so done=True.
                 if not metadata.get('chat_id', '').startswith('channel:'):
-                    if should_flag_empty(serialize_output(output), True, task_active=False):
+                    if should_flag_empty(serialize_output(answerable_output()),
+                                         True, task_active=False):
                         empty_error = build_error_payload(
                             metadata['chat_id'], metadata['message_id']
                         )
