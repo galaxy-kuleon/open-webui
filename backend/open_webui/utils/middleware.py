@@ -4132,7 +4132,7 @@ async def streaming_chat_response_handler(response, ctx):
                 if not metadata.get('chat_id', '').startswith('channel:'):
                     try:
                         if not ENABLE_REALTIME_CHAT_SAVE:
-                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                            written = await Chats.upsert_message_to_chat_by_id_and_message_id(
                                 metadata['chat_id'],
                                 metadata['message_id'],
                                 {
@@ -4147,12 +4147,29 @@ async def streaming_chat_response_handler(response, ctx):
                                 },
                             )
                         else:
-                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                            written = await Chats.upsert_message_to_chat_by_id_and_message_id(
                                 metadata['chat_id'],
                                 metadata['message_id'],
                                 {'done': True},
                             )
-                        persisted = True
+                        # THE RETURN VALUE IS THE ANSWER, not the absence of an
+                        # exception. `Chats.upsert_...` returns None for a chat
+                        # that is gone -- deleted between stream start and
+                        # interruption, or losing a delete race on the final
+                        # update -- and raises nothing at all. Setting
+                        # persisted=True regardless logged `persisted=yes` over
+                        # a row that was never written: the one remaining path
+                        # where this code could claim the user's text reached
+                        # disk when it did not.
+                        persisted = written is not None
+                        if not persisted:
+                            log.warning(
+                                'assistant_turn_interrupted_persist_failed service=owui'
+                                ' reason=%s chat=%s cause=chat_absent',
+                                reason if reason in ('cancelled', 'stream_failed')
+                                else 'unknown',
+                                metadata.get('chat_id', ''),
+                            )
                     except Exception:
                         # Never silent. A durability failure that looks like
                         # success is worse than the interruption itself.
