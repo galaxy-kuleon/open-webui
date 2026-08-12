@@ -105,6 +105,7 @@ def _run(chats_returns, output_items, emitter_raises=False):
         "NOTICE_WRITTEN": failure_surface.NOTICE_WRITTEN,
         "NOTICE_UNDELIVERED": failure_surface.NOTICE_UNDELIVERED,
         "FAILURE_KIND_UNCLASSIFIED": failure_surface.FAILURE_KIND_UNCLASSIFIED,
+        "ALLOWED_FAILURE_KINDS": failure_surface.ALLOWED_FAILURE_KINDS,
         "classify_exception": failure_surface.classify_exception,
     }
     marker_lines = []
@@ -340,3 +341,127 @@ class FinalizedEmptyTurnTests(unittest.TestCase):
         self.assertIn("notice=undelivered", markers[0])
         # ...and the original exception is NOT swallowed by the observability.
         self.assertIsNotNone(raised, "the DB failure was silently absorbed")
+
+
+def _lift_consume_catch():
+    """The `try/except StreamReadFailure/except Exception` around the handler.
+
+    Round 36 proved this branch mattered and no test touched it: reverting it to
+    classify EVERY exception escaping the handler left the whole suite green,
+    which is how a `TimeoutError` from a UI event emitter came to be reported as
+    `upstream_timeout` from the model.
+    """
+    src = MIDDLEWARE.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        names = [getattr(h.type, "id", "") for h in node.handlers]
+        if "StreamReadFailure" in names:
+            block = textwrap.dedent(
+                "".join(src.splitlines(True)[node.lineno - 1:node.end_lineno]))
+            return "async def _probe():\n" + textwrap.indent(block, "    ")
+    raise AssertionError("the consume-stream catch is no longer findable")
+
+
+class ReadBoundaryClassificationTests(unittest.TestCase):
+    def _run(self, raiser):
+        seen = {}
+
+        async def save_interrupted_state(reason, failure=None):
+            seen["reason"] = reason
+            seen["failure"] = failure
+
+        async def stream_body_handler(resp, fd):
+            raise raiser
+
+        ns = {
+            "asyncio": asyncio,
+            "stream_body_handler": stream_body_handler,
+            "save_interrupted_state": save_interrupted_state,
+            "StreamReadFailure": failure_surface.StreamReadFailure,
+            "StreamBodyInterrupted": type("StreamBodyInterrupted", (Exception,), {}),
+            "FAILURE_KIND_UNCLASSIFIED": failure_surface.FAILURE_KIND_UNCLASSIFIED,
+            "resp": object(), "fd": object(),
+        }
+        exec(compile(_lift_consume_catch(), "<lifted-catch>", "exec"), ns)
+        with self.assertRaises(ns["StreamBodyInterrupted"]):
+            asyncio.run(ns["_probe"]())
+        return seen
+
+    def test_a_classified_READ_failure_keeps_its_label(self):
+        klass = type("TransferEncodingError", (Exception,), {})
+        klass.__module__ = "aiohttp.http_exceptions"
+        seen = self._run(failure_surface.StreamReadFailure("stream_truncated", klass()))
+        self.assertEqual("stream_failed", seen["reason"])
+        self.assertEqual("stream_truncated", seen["failure"])
+
+    def test_a_failure_from_ANYWHERE_ELSE_is_unclassified(self):
+        """A TimeoutError from a UI emitter is not an upstream timeout.
+
+        Same class, different fact. This is the one that would send an operator
+        to the provider for a failure in our own notification path.
+        """
+        seen = self._run(TimeoutError("event_emitter flush timed out"))
+        self.assertEqual("stream_failed", seen["reason"])
+        self.assertEqual("unclassified", seen["failure"])
+
+
+class BodyReadsGoThroughTheAdapterTests(unittest.TestCase):
+    """A SMOKE ALARM, and labelled as one.
+
+    Bypassing `classified_body_reads` loses every transport classification
+    silently — the field stays present and reads `unclassified` forever, which
+    looks exactly like a quiet week. The behavioural tests above cannot see it:
+    they supply their own `stream_body_handler`, and the real iteration lives
+    inside a 600-line function that does not lift.
+
+    So this reads the source, which is weaker than executing it, and says so.
+    The durable version is the typed read adapter being the ONLY way to obtain
+    the body — not achievable without restructuring that function.
+    """
+
+    def test_the_response_body_is_iterated_through_the_adapter(self):
+        src = MIDDLEWARE.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        # Not every body_iterator in this file is the user's stream.
+        # `chat_completion_tools_handler.get_content_from_response` drains a
+        # NON-streaming tool response whose failures are not transport failures
+        # of anyone's answer. Naming it is the difference between an allow-list
+        # and a hole: if a second raw site appears, this goes red.
+        _ALLOWED_RAW = {"get_content_from_response"}
+        # INNERMOST enclosing function. Walking each function and recursing
+        # reported the OUTER `chat_completion_tools_handler` for a loop that
+        # actually lives in its nested `get_content_from_response`, so the
+        # allow-list missed and this failed on correct code. A containment test
+        # that names the wrong container is not a stricter test.
+        raw, adapted = [], []
+        _owner = {}
+
+        def _mark(node, name):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    _mark(child, child.name)
+                else:
+                    _owner[id(child)] = name
+                    _mark(child, name)
+
+        _mark(tree, "<module>")
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFor):
+                continue
+            it = node.iter
+            owner = _owner.get(id(node), "<module>")
+            if isinstance(it, ast.Attribute) and it.attr == "body_iterator":
+                if owner not in _ALLOWED_RAW:
+                    raw.append(f"{owner}:{node.lineno}")
+            if (isinstance(it, ast.Call)
+                    and getattr(it.func, "id", "") == "_classified_body_reads"):
+                adapted.append(node.lineno)
+        self.assertTrue(adapted,
+                        "no async-for iterates the body through "
+                        "_classified_body_reads; transport failures can no "
+                        "longer be classified at the read")
+        self.assertEqual([], raw,
+                         f"the response body is iterated RAW at line(s) {raw}; "
+                         f"failures there reach the outer catch unclassified")

@@ -100,41 +100,92 @@ ALLOWED_NOTICES = frozenset({NOTICE_WRITTEN, NOTICE_UNDELIVERED})
 # so no message text is ever consulted. Unknown types get ``unclassified`` --
 # which is the point: an unfamiliar failure must read as unfamiliar, not as the
 # nearest label that happens to match a substring.
+# (module prefix, class name) -> label. The MODULE half is not decoration: keying
+# on the bare name accepted any foreign class that happened to share it, so an
+# unrelated `TransferEncodingError` from some business-rule module classified as
+# a transport truncation without anyone reading a message. Round 36 built exactly
+# that collision. A prefix rather than an exact module so aiohttp/httpx moving a
+# class between submodules does not silently blind this.
 FAILURE_KIND_BY_EXCEPTION = {
     # the wire ended mid-body: the user watched an answer stop
-    "TransferEncodingError": "stream_truncated",
-    "ContentLengthError": "stream_truncated",
-    "RemoteProtocolError": "stream_truncated",          # httpx
-    "IncompleteRead": "stream_truncated",               # http.client
-    "ClientPayloadError": "stream_truncated",
+    ("aiohttp", "TransferEncodingError"): "stream_truncated",
+    ("aiohttp", "ContentLengthError"): "stream_truncated",
+    ("aiohttp", "ClientPayloadError"): "stream_truncated",
+    ("httpx", "RemoteProtocolError"): "stream_truncated",
+    ("http.client", "IncompleteRead"): "stream_truncated",
+    ("httpcore", "RemoteProtocolError"): "stream_truncated",
     # one line was too big for the reader; the wire was fine
-    "LineTooLong": "sse_line_too_long",
+    ("aiohttp", "LineTooLong"): "sse_line_too_long",
     # the peer went away
-    "ServerDisconnectedError": "peer_disconnected",
-    "ConnectionResetError": "peer_disconnected",
-    "ClientConnectionError": "peer_disconnected",
+    ("aiohttp", "ServerDisconnectedError"): "peer_disconnected",
+    ("aiohttp", "ClientConnectionError"): "peer_disconnected",
+    ("builtins", "ConnectionResetError"): "peer_disconnected",
     # it never finished in time
-    "TimeoutError": "upstream_timeout",
-    "ServerTimeoutError": "upstream_timeout",
-    "ReadTimeout": "upstream_timeout",
+    ("builtins", "TimeoutError"): "upstream_timeout",
+    ("asyncio", "TimeoutError"): "upstream_timeout",
+    ("aiohttp", "ServerTimeoutError"): "upstream_timeout",
+    ("httpx", "ReadTimeout"): "upstream_timeout",
+    ("httpcore", "ReadTimeout"): "upstream_timeout",
 }
 FAILURE_KIND_UNCLASSIFIED = "unclassified"
 ALLOWED_FAILURE_KINDS = frozenset(
     set(FAILURE_KIND_BY_EXCEPTION.values()) | {FAILURE_KIND_UNCLASSIFIED})
 
 
+class StreamReadFailure(Exception):
+    """A failure raised while READING the upstream body, already classified.
+
+    Exists so the read boundary can state where the failure happened and the
+    handler above can stop guessing. Everything else escaping that handler --
+    filters, DB writes, serialization, the notification path -- is deliberately
+    NOT one of these and stays `unclassified`.
+    """
+
+    def __init__(self, failure_kind: str, cause: BaseException):
+        super().__init__(failure_kind)
+        self.failure_kind = failure_kind
+        self.__cause__ = cause
+
+
+async def classified_body_reads(body_iterator):
+    """Yield from `body_iterator`, tagging read failures with a closed label.
+
+    The whole point is WHERE, not what: a TimeoutError from the model's body and
+    a TimeoutError from a UI event emitter are the same class and completely
+    different facts. Round 36 caught the second being reported as the first,
+    which would send an operator to stare at a provider that had answered fine.
+
+    `StopAsyncIteration` ends the loop normally and is not a failure.
+    """
+    iterator = body_iterator.__aiter__()
+    while True:
+        try:
+            chunk = await iterator.__anext__()
+        except StopAsyncIteration:
+            return
+        except Exception as exc:  # noqa: BLE001 -- classified and re-raised
+            raise StreamReadFailure(classify_exception(exc), exc) from exc
+        yield chunk
+
+
 def classify_exception(exc) -> str:
     """Closed failure label for a caught exception, from its TYPE only.
 
-    Walks the MRO so a subclass of a known error still classifies. Never reads
-    ``str(exc)``: the message can contain provider text, user content echoed back,
-    or a quoted error from a previous turn -- all three are how a text-matching
-    classifier gets fabricated input (round 33).
+    Walks the MRO so a subclass of a known error still classifies, and matches on
+    (module, qualname) rather than the bare class name: round 36 showed a foreign
+    class merely NAMED ``TransferEncodingError`` classified as a real truncation.
+
+    Never reads ``str(exc)``: the message can contain provider text, user content
+    echoed back, or a quoted error from a previous turn -- all three are how a
+    text-matching classifier gets fabricated input (round 33).
     """
     for klass in type(exc).__mro__:
-        kind = FAILURE_KIND_BY_EXCEPTION.get(klass.__name__)
-        if kind:
-            return kind
+        module = (getattr(klass, "__module__", "") or "").split(".")
+        for depth in range(len(module), 0, -1):
+            kind = FAILURE_KIND_BY_EXCEPTION.get(
+                (".".join(module[:depth]), klass.__qualname__))
+            if kind:
+                return kind
     return FAILURE_KIND_UNCLASSIFIED
 
 

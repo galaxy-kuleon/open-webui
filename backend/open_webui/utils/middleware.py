@@ -77,13 +77,15 @@ from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.failure_surface import (
+    ALLOWED_FAILURE_KINDS,
     FAILURE_KIND_UNCLASSIFIED,
     NOTICE_UNDELIVERED,
     NOTICE_WRITTEN,
     PHASE_FINALIZED,
     PHASE_INTERRUPTED,
     build_error_payload,
-    classify_exception,
+    StreamReadFailure,
+    classified_body_reads as _classified_body_reads,
     log_empty_turn,
     should_flag_empty,
 )
@@ -4081,15 +4083,24 @@ async def streaming_chat_response_handler(response, ctx):
                 """
                 try:
                     await stream_body_handler(resp, fd)
-                except Exception as exc:
-                    # Classified from the exception TYPE here, where the object
-                    # still exists. Downstream all anyone has is a rendered
-                    # string, and matching on that both misses real truncations
-                    # spelled differently and lets a chat ABOUT an error
-                    # manufacture one (round 33).
+                except StreamReadFailure as exc:
+                    # Already classified AT THE READ. Unwrapped so downstream
+                    # sees the original exception, exactly as before.
                     try:
                         await asyncio.shield(save_interrupted_state(
-                            'stream_failed', classify_exception(exc)))
+                            'stream_failed', exc.failure_kind))
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise StreamBodyInterrupted(exc.__cause__ or exc) from exc
+                except Exception as exc:
+                    # Anything that did NOT come from the read: filters, DB
+                    # writes, serialization, the notification path. Still a
+                    # failed turn, but nothing here knows what KIND, and saying
+                    # `unclassified` is the honest answer rather than borrowing
+                    # a transport label that happens to share a class name.
+                    try:
+                        await asyncio.shield(save_interrupted_state(
+                            'stream_failed', FAILURE_KIND_UNCLASSIFIED))
                     except (asyncio.CancelledError, Exception):
                         pass
                     raise StreamBodyInterrupted(exc) from exc
@@ -4199,10 +4210,22 @@ async def streaming_chat_response_handler(response, ctx):
                             metadata.get('chat_id', ''),
                         )
 
+                # `failure` rides HERE too, and this is the population that
+                # actually answers "what killed the stream". The empty-turn
+                # marker only fires when the turn rendered nothing, so a
+                # truncation that arrived AFTER readable text carried no
+                # classification at all -- round 36 showed the enum described
+                # empty interrupted turns rather than transport failures, which
+                # is narrower than the name suggests.
+                #
+                # These two markers must never be summed as attempts: an empty
+                # interrupted turn emits both.
                 log.info(
                     'assistant_turn_interrupted service=owui'
-                    ' reason=%s persisted=%s chat=%s',
+                    ' reason=%s failure=%s persisted=%s chat=%s',
                     reason if reason in ('cancelled', 'stream_failed') else 'unknown',
+                    failure if failure in ALLOWED_FAILURE_KINDS
+                    else FAILURE_KIND_UNCLASSIFIED,
                     'yes' if persisted else 'no',
                     metadata.get('chat_id', ''),
                 )
@@ -4302,7 +4325,18 @@ async def streaming_chat_response_handler(response, ctx):
                             delta_count = 0
                             last_delta_data = None
 
-                    async for line in response.body_iterator:
+                    # THE READ BOUNDARY OWNS THE FACT. Only failures raised
+                    # while pulling the upstream body may be classified as
+                    # transport failures. The outer catch wraps this whole
+                    # handler -- filters, DB writes, UI events -- so a
+                    # TimeoutError from the FINAL event_emitter flush was being
+                    # labelled `upstream_timeout` while the model had answered
+                    # perfectly. Round 36 traced that path; the enum was closed
+                    # and privacy-safe and causally false, which is the worst of
+                    # the three because an operator would go and stare at the
+                    # provider.
+                    async for line in _classified_body_reads(
+                            response.body_iterator):
                         line = line.decode('utf-8', 'replace') if isinstance(line, bytes) else line
                         data = line
 

@@ -4,6 +4,7 @@ Loads the module BY FILE PATH so it runs with bare ``python3 -m unittest`` — n
 package import (which needs container deps), no live stack — mirroring the slice-1/part-4
 ``--self-test`` discipline. Pure-function coverage of the grilled decisions.
 """
+import asyncio
 import importlib.util
 import logging
 import os
@@ -214,26 +215,55 @@ class MarkerEmissionIsBestEffortTests(unittest.TestCase):
 class FailureKindFromTypeTests(unittest.TestCase):
     """The producer-owned enum round 33 asked for, tested at its own boundary."""
 
-    def test_known_transport_errors_classify(self):
-        class TransferEncodingError(Exception):
-            pass
+    @staticmethod
+    def _exc(module, name, base=Exception):
+        """An exception standing in for a real library class, module and all.
 
-        class LineTooLong(Exception):
-            pass
+        The module half is the point. These tests used to declare LOCAL classes
+        called `TransferEncodingError` and then assert they classified -- which
+        made the suite agree with the defect: bare-name matching accepted any
+        foreign class that shared a name. Round 36 built that collision
+        deliberately, and these tests would have blessed it.
+        """
+        klass = type(name, (base,), {})
+        klass.__module__ = module
+        return klass
 
-        self.assertEqual("stream_truncated",
-                         fs.classify_exception(TransferEncodingError()))
-        self.assertEqual("sse_line_too_long", fs.classify_exception(LineTooLong()))
+    def test_the_real_library_classes_classify(self):
+        for module, name, want in (
+            ("aiohttp.http_exceptions", "TransferEncodingError", "stream_truncated"),
+            ("aiohttp.http_exceptions", "LineTooLong", "sse_line_too_long"),
+            ("aiohttp.client_exceptions", "ServerDisconnectedError", "peer_disconnected"),
+            ("httpx", "RemoteProtocolError", "stream_truncated"),
+            ("http.client", "IncompleteRead", "stream_truncated"),
+        ):
+            with self.subTest(cls=f"{module}.{name}"):
+                self.assertEqual(want, fs.classify_exception(
+                    self._exc(module, name)()))
+
+    def test_builtin_timeouts_classify(self):
+        self.assertEqual("upstream_timeout", fs.classify_exception(TimeoutError()))
+        self.assertEqual("peer_disconnected",
+                         fs.classify_exception(ConnectionResetError()))
 
     def test_a_subclass_still_classifies(self):
         """aiohttp and httpx both subclass their own base errors."""
-        class TransferEncodingError(Exception):
-            pass
+        base = self._exc("aiohttp.http_exceptions", "TransferEncodingError")
+        vendor = type("VendorSpecific", (base,), {})
+        vendor.__module__ = "some.vendor.shim"
+        self.assertEqual("stream_truncated", fs.classify_exception(vendor()))
 
-        class VendorSpecific(TransferEncodingError):
-            pass
+    def test_a_FOREIGN_class_with_a_known_NAME_does_not_classify(self):
+        """Round 36's collision, as a standing control.
 
-        self.assertEqual("stream_truncated", fs.classify_exception(VendorSpecific()))
+        An unrelated `TransferEncodingError` from a business-rule module is not a
+        transport truncation. Bare-name matching said it was, without reading a
+        single character of any message.
+        """
+        self.assertEqual("unclassified", fs.classify_exception(
+            self._exc("synthetic.business_rule", "TransferEncodingError")()))
+        self.assertEqual("unclassified", fs.classify_exception(
+            self._exc("synthetic.cache", "TimeoutError")()))
 
     def test_an_unknown_type_is_unclassified_not_guessed(self):
         class SomethingNew(Exception):
@@ -270,3 +300,57 @@ class FailureKindFromTypeTests(unittest.TestCase):
         line = fs.build_marker(payload, fs.PHASE_FINALIZED, "chat-aaaaaaaa",
                                "msg-bbbbbbbb", fs.NOTICE_WRITTEN)
         self.assertIn("failure=unclassified", line)
+
+
+class ReadBoundaryOwnsTheFactTests(unittest.TestCase):
+    """Only a failure raised WHILE READING the body may be called a transport failure.
+
+    Round 36 traced a `TimeoutError` from the final `event_emitter` flush through
+    the whole-handler catch and out as `upstream_timeout` — a closed,
+    privacy-safe, causally FALSE label that would send an operator to stare at a
+    provider which had answered perfectly.
+    """
+
+    @staticmethod
+    def _run(agen):
+        async def drain():
+            out = []
+            async for chunk in agen:
+                out.append(chunk)
+            return out
+        return asyncio.run(drain())
+
+    def test_a_clean_body_passes_through_untouched(self):
+        async def body():
+            for chunk in (b"a", b"b", b"c"):
+                yield chunk
+        self.assertEqual([b"a", b"b", b"c"],
+                         self._run(fs.classified_body_reads(body())))
+
+    def test_a_read_failure_is_classified_and_typed(self):
+        klass = type("TransferEncodingError", (Exception,), {})
+        klass.__module__ = "aiohttp.http_exceptions"
+
+        async def body():
+            yield b"partial"
+            raise klass()
+
+        with self.assertRaises(fs.StreamReadFailure) as caught:
+            self._run(fs.classified_body_reads(body()))
+        self.assertEqual("stream_truncated", caught.exception.failure_kind)
+        self.assertIsInstance(caught.exception.__cause__, klass)
+
+    def test_a_read_failure_of_an_unknown_type_is_unclassified(self):
+        async def body():
+            raise ValueError("Response payload is not completed: TransferEncodingError")
+            yield  # pragma: no cover
+
+        with self.assertRaises(fs.StreamReadFailure) as caught:
+            self._run(fs.classified_body_reads(body()))
+        self.assertEqual("unclassified", caught.exception.failure_kind)
+
+    def test_StopAsyncIteration_is_an_ending_not_a_failure(self):
+        async def body():
+            return
+            yield  # pragma: no cover
+        self.assertEqual([], self._run(fs.classified_body_reads(body())))
