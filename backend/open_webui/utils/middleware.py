@@ -1257,6 +1257,23 @@ async def terminal_event_handler(
         )
 
 
+class StreamBodyInterrupted(Exception):
+    """A provider stream died while we were consuming it.
+
+    Typed on purpose. The tool-loop and code-interpreter continuations each sit
+    inside a broad `except Exception` written for SETUP errors, and those
+    catches used to swallow a dying stream too -- after which the turn fell
+    through to the normal `done=True` finalisation and the partial answer the
+    user had already read was never persisted. A distinct type lets those
+    handlers re-raise this one case without giving up the errors they exist
+    for.
+    """
+
+    def __init__(self, cause):
+        self.cause = cause
+        super().__init__(str(cause))
+
+
 async def chat_completion_tools_handler(
     request: Request, body: dict, extra_params: dict, user: UserModel, models, tools
 ) -> tuple[dict, dict]:
@@ -4017,6 +4034,33 @@ async def streaming_chat_response_handler(response, ctx):
                 else:
                     reasoning_tags = DEFAULT_REASONING_TAGS
 
+            async def consume_stream_durably(resp, fd):
+                """The ONE place a provider body is consumed.
+
+                Persistence belongs at this boundary, not at the top of the
+                handler. There are THREE consumption sites -- the initial
+                response, the tool-loop continuation and the code-interpreter
+                continuation -- and the two continuations sit inside their own
+                broad `except Exception`, which swallowed the failure long
+                before any outer handler could see it. A tool-using turn is the
+                ordinary case, not an exotic branch, so two thirds of real
+                traffic kept losing the text the user had already read while a
+                whole-handler catch looked like it covered everything.
+
+                Raising a TYPED failure lets those inner catches re-raise this
+                one case while keeping their existing handling for the setup
+                errors they were actually written for.
+                """
+                try:
+                    await stream_body_handler(resp, fd)
+                except Exception as exc:
+                    try:
+                        await asyncio.shield(
+                            save_interrupted_state('stream_failed'))
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise StreamBodyInterrupted(exc) from exc
+
             # Named for what it now does. It began as save_cancelled_state,
             # then a second caller arrived: a stream that DIED is not a stream
             # that was cancelled, and a reader who trusts the old name will
@@ -4026,17 +4070,38 @@ async def streaming_chat_response_handler(response, ctx):
             # invisible to the sibling `except Exception` -- a NameError the
             # surrounding guard would have swallowed, leaving nothing saved
             # and no trace of why.
-            async def save_interrupted_state():
+            async def save_interrupted_state(reason: str = 'cancelled'):
+                # `reason` is a CLOSED set: 'cancelled' means the user or the
+                # server ended it; 'stream_failed' means the provider body
+                # broke. Reporting a transport failure as a user cancellation
+                # is how a fault disappears from every count that matters.
                 await event_emitter({'type': 'chat:tasks:cancel'})
+                log.info(
+                    'assistant_turn_interrupted reason=%s chat=%s',
+                    reason if reason in ('cancelled', 'stream_failed') else 'unknown',
+                    metadata.get('chat_id', ''),
+                )
                 if not metadata.get('chat_id', '').startswith('channel:'):
                     if not ENABLE_REALTIME_CHAT_SAVE:
                         await Chats.upsert_message_to_chat_by_id_and_message_id(
                             metadata['chat_id'],
                             metadata['message_id'],
                             {
+                                # done=True only closes the task/spinner. It is
+                                # NOT a claim that the answer is complete --
+                                # the error persisted alongside it says
+                                # otherwise, and nothing may read this flag as
+                                # "finished successfully".
                                 'done': True,
-                                'content': serialize_output(output),
-                                'output': output,
+                                # full_output(), not `output`. During a tool or
+                                # code-interpreter continuation the earlier
+                                # visible content is moved into `prior_output`
+                                # and restored only after the continuation
+                                # returns -- so a failure inside one would drop
+                                # exactly the tool history the user had already
+                                # read.
+                                'content': serialize_output(full_output()),
+                                'output': full_output(),
                             },
                         )
                     else:
@@ -4680,7 +4745,7 @@ async def streaming_chat_response_handler(response, ctx):
                             tool_calls.append(_split_tool_calls(responses_api_tool_calls))
 
                 try:
-                    await stream_body_handler(response, form_data)
+                    await consume_stream_durably(response, form_data)
                 finally:
                     if response.background:
                         await response.background()
@@ -5075,11 +5140,17 @@ async def streaming_chat_response_handler(response, ctx):
                                 if not msg_parts or (len(msg_parts) == 1 and not msg_parts[0].get('text', '').strip()):
                                     prior_output.pop()
                             output = []
-                            await stream_body_handler(res, new_form_data)
+                            await consume_stream_durably(res, new_form_data)
                             output[:0] = prior_output
                             prior_output = []
                         else:
                             break
+                    except StreamBodyInterrupted:
+                        # Same reason as the code-interpreter
+                        # continuation: this handler is for setup
+                        # errors, and a tool-using turn is the ordinary
+                        # case, not an exotic branch.
+                        raise
                     except Exception as e:
                         log.debug(e)
                         break
@@ -5268,9 +5339,19 @@ async def streaming_chat_response_handler(response, ctx):
                             )
 
                             if isinstance(res, StreamingResponse):
-                                await stream_body_handler(res, new_form_data)
+                                await consume_stream_durably(res, new_form_data)
                             else:
                                 break
+                        except StreamBodyInterrupted:
+                            # A DYING STREAM IS NOT A SETUP ERROR. This
+                            # catch exists for the errors around the
+                            # continuation -- building the request,
+                            # parsing a tool result. Swallowing a broken
+                            # provider body here sent the turn on to the
+                            # normal done=True finalisation, and the text
+                            # the user had already read was never saved.
+                            # The boundary already persisted it; let it out.
+                            raise
                         except Exception as e:
                             log.debug(e)
                             break
@@ -5460,37 +5541,10 @@ async def streaming_chat_response_handler(response, ctx):
 
 
                 try:
-                    await asyncio.shield(save_interrupted_state())
+                    await asyncio.shield(save_interrupted_state('cancelled'))
                 except (asyncio.CancelledError, Exception):
                     pass
                 raise  # re-raise CancelledError for proper propagation
-
-            except Exception:
-                # THE STREAM DIED IN A WAY NOBODY WAS SAVING FOR.
-                #
-                # Only CancelledError was handled here, and it is the branch
-                # that persists partial output. Every other failure -- an
-                # upstream that truncates its chunked transfer, a provider
-                # dropping mid-answer -- escaped to the outer handler in
-                # main.py, which writes ONLY {'parentId', 'error'}. It does not
-                # write `content` and it does not set `done`.
-                #
-                # ENABLE_REALTIME_CHAT_SAVE defaults to False, so nothing was
-                # persisted during the stream either: `flush_pending_delta_data`
-                # emits a socket event and touches no database. So the user
-                # watched an answer arrive, the upstream broke, and the text
-                # they had already read was never anywhere but their browser.
-                # Reload, and it is gone -- with an error where their partial
-                # answer used to be.
-                #
-                # Same shape as the cancelled branch, for the same reason:
-                # whatever reached the user is theirs to keep. The exception is
-                # re-raised so the outer handler still records what broke.
-                try:
-                    await asyncio.shield(save_interrupted_state())
-                except (asyncio.CancelledError, Exception):
-                    pass
-                raise
 
             if response.background is not None:
                 await response.background()
