@@ -151,6 +151,92 @@ class TestVocabularySingleSourced(unittest.TestCase):
                          "ALLOWED_CAUSES drifted from triage.CAUSES: {}".format(sorted(drift)))
 
 
+
+class TestCauseMatchesPhase(unittest.TestCase):
+    """An empty turn's cause must describe how it ended.
+
+    Reproduced live on 8083 before this existed: the interrupted branch logged
+    `phase=interrupted` two statements after building a banner that took the
+    finalized default, so the user was told "cause: db_stream_flush" for a turn
+    they had stopped. The phase was known the whole time; the banner had no
+    vocabulary for it, and one deletable default is all it took.
+    """
+
+    def test_each_phase_has_its_own_cause_and_they_differ(self):
+        interrupted = fs.cause_for_phase(fs.PHASE_INTERRUPTED)
+        finalized = fs.cause_for_phase(fs.PHASE_FINALIZED)
+        self.assertEqual(fs.CAUSE_EMPTY_INTERRUPTED, interrupted)
+        self.assertEqual(fs.CAUSE_EMPTY_FINALIZED, finalized)
+        self.assertNotEqual(
+            interrupted, finalized,
+            "an interrupted turn and a finalized-but-empty turn are different "
+            "failures and must not render the same cause")
+
+    def test_every_allowed_phase_maps_to_an_allowed_cause(self):
+        for phase in fs.ALLOWED_PHASES:
+            self.assertIn(fs.cause_for_phase(phase), fs.ALLOWED_CAUSES, phase)
+
+    def test_an_unknown_phase_falls_back_rather_than_raising(self):
+        # A banner is the last thing between a user and a blank box; it must not
+        # be the thing that fails.
+        self.assertEqual(fs.CAUSE_EMPTY_FINALIZED, fs.cause_for_phase("nonsense"))
+
+    def test_the_banner_carries_the_interrupted_cause_end_to_end(self):
+        payload = fs.build_error_payload(
+            "chat-1234", "msg-5678", fs.cause_for_phase(fs.PHASE_INTERRUPTED))
+        self.assertEqual(fs.CAUSE_EMPTY_INTERRUPTED, payload["cause"])
+        self.assertIn(fs.CAUSE_EMPTY_INTERRUPTED, payload["content"])
+        self.assertNotIn(fs.CAUSE_EMPTY_FINALIZED, payload["content"])
+        fs.assert_privacy_safe(payload)
+
+
+class TestMiddlewareDerivesCauseFromPhase(unittest.TestCase):
+    """The two empty-turn sites must each pass THEIR OWN phase.
+
+    Source-level on purpose, and honest about it: driving the middleware's
+    empty-turn branches needs a full request pipeline, while the defect this
+    guards is textual -- one site logging PHASE_INTERRUPTED while building its
+    banner from the finalized default. That drift is exactly what a source
+    assertion can see, and it is what actually happened.
+    """
+
+    MIDDLEWARE = os.path.normpath(os.path.join(
+        _HERE, "..", "..", "utils", "middleware.py"))
+
+    def _source(self):
+        with open(self.MIDDLEWARE, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_no_empty_turn_banner_takes_the_default_cause(self):
+        src = self._source()
+        # Every build_error_payload call in the empty-turn paths must name a
+        # cause. A bare two-argument call silently inherits the finalized
+        # default, which is the bug.
+        bare = src.count("build_error_payload(\n"
+                         "                            metadata['chat_id'], "
+                         "metadata['message_id']\n"
+                         "                        )")
+        self.assertEqual(
+            0, bare,
+            "an empty-turn banner is taking the DEFAULT cause instead of "
+            "deriving it from its phase")
+
+    def test_each_phase_appears_with_its_own_derivation(self):
+        src = self._source()
+        self.assertIn("cause_for_phase(PHASE_INTERRUPTED)", src)
+        self.assertIn("cause_for_phase(PHASE_FINALIZED)", src)
+
+    def test_the_interrupted_site_does_not_derive_the_finalized_cause(self):
+        """The precise regression: the interrupted branch quietly using the
+        finalized cause. Anchored on the marker call that names the phase."""
+        src = self._source()
+        i = src.find("cause_for_phase(PHASE_INTERRUPTED)")
+        self.assertGreater(i, 0)
+        # ...and the marker logged in that same block says INTERRUPTED too, so
+        # the banner and the marker cannot disagree about one turn again.
+        block = src[i:i + 2000]
+        self.assertIn("PHASE_INTERRUPTED", block.split("log_empty_turn", 1)[-1][:200])
+
 if __name__ == "__main__":
     unittest.main()
 

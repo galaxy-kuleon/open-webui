@@ -84,6 +84,7 @@ from open_webui.utils.failure_surface import (
     PHASE_FINALIZED,
     PHASE_INTERRUPTED,
     build_error_payload,
+    cause_for_phase,
     StreamReadFailure,
     classified_body_reads as _classified_body_reads,
     log_empty_turn,
@@ -4257,8 +4258,15 @@ async def streaming_chat_response_handler(response, ctx):
                     # Reasoning is not an answer -- see answerable_output().
                     if should_flag_empty(serialize_output(answerable_output(snapshot)),
                                          True, task_active=False):
+                        # The cause comes from the PHASE, not from the default.
+                        # This block logged PHASE_INTERRUPTED two statements
+                        # below while the banner took the finalized default, so
+                        # a user who stopped a turn -- or whose client went away
+                        # -- was told "cause: db_stream_flush" and sent to the
+                        # database for something the database never touched.
                         empty_error = build_error_payload(
-                            metadata['chat_id'], metadata['message_id']
+                            metadata['chat_id'], metadata['message_id'],
+                            cause_for_phase(PHASE_INTERRUPTED),
                         )
                         # Tracked, not assumed. A blank turn WITH a banner and a
                         # blank turn with nothing are different failures to the
@@ -5570,8 +5578,11 @@ async def streaming_chat_response_handler(response, ctx):
                 if not metadata.get('chat_id', '').startswith('channel:'):
                     if should_flag_empty(serialize_output(answerable_output()),
                                          True, task_active=False):
+                        # Same derivation as the interrupted path, so the two
+                        # sites cannot drift apart again.
                         empty_error = build_error_payload(
-                            metadata['chat_id'], metadata['message_id']
+                            metadata['chat_id'], metadata['message_id'],
+                            cause_for_phase(PHASE_FINALIZED),
                         )
                         # The marker is TERMINAL, in a `finally`. Written straight
                         # through, a raise from either await jumped clean over the

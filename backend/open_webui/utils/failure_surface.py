@@ -208,7 +208,35 @@ CAUSE_EMPTY_FINALIZED = "db_stream_flush"
 # additionally enforced at TEST time (``test_failure_surface`` cross-checks this set against
 # ``triage.CAUSES`` and fails on divergence) — the owui container cannot import the
 # parent-repo ops script, so an import-time cross-check here is not possible.
-ALLOWED_CAUSES = frozenset({CAUSE_EMPTY_FINALIZED})
+# ...and the cause for a turn that ended EARLY. Without this the closed grammar
+# had exactly one cause, so an interrupted empty turn had no vocabulary to
+# describe itself and was told to the user as `db_stream_flush` -- a
+# persistence story for what was an interruption. Reproduced live on 8083:
+# the producer logged `phase=interrupted failure=unclassified` and the banner
+# said "cause: db_stream_flush" in the same breath. The phase was known; the
+# banner just could not say it, which sends the reader to the database for
+# something the database never touched.
+CAUSE_EMPTY_INTERRUPTED = "stream_interrupted"
+
+ALLOWED_CAUSES = frozenset({CAUSE_EMPTY_FINALIZED, CAUSE_EMPTY_INTERRUPTED})
+
+#: The cause each phase is allowed to report. Derived, never passed in beside
+#: the phase, so the two cannot disagree -- which is exactly how they came to
+#: disagree in the first place.
+CAUSE_FOR_PHASE = {
+    PHASE_FINALIZED: CAUSE_EMPTY_FINALIZED,
+    PHASE_INTERRUPTED: CAUSE_EMPTY_INTERRUPTED,
+}
+
+
+def cause_for_phase(phase: str) -> str:
+    """The cause label that matches an empty turn's phase.
+
+    An unknown phase falls back to the finalized cause rather than raising: a
+    banner is the last thing standing between a user and a blank box, and it
+    must not be the thing that fails. The phase itself is validated elsewhere.
+    """
+    return CAUSE_FOR_PHASE.get(phase, CAUSE_EMPTY_FINALIZED)
 
 # The ONLY keys permitted in an assistant-message ``error`` payload that crosses the
 # privacy boundary (M4). Anything else is a fail-loud bug.

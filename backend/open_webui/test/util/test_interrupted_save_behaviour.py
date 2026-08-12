@@ -99,6 +99,12 @@ def _run(chats_returns, output_items, emitter_raises=False):
         # production, so a change that breaks either is a red test rather than a
         # blank screen with an unresolvable trace id.
         "build_error_payload": failure_surface.build_error_payload,
+        # The lifted block derives its banner cause from its phase, so the
+        # lifted namespace has to carry the derivation too. Without it the
+        # block raises NameError and every test here fails for a reason that
+        # has nothing to do with what it is testing.
+        "cause_for_phase": failure_surface.cause_for_phase,
+        "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
         "log_empty_turn": failure_surface.log_empty_turn,
         "PHASE_INTERRUPTED": failure_surface.PHASE_INTERRUPTED,
         "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
