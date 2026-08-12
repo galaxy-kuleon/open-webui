@@ -230,3 +230,111 @@ class InterruptedSaveBehaviourTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _lift_finalized_empty_block():
+    """Compile the FINALIZED empty-turn block out of middleware.py.
+
+    The interrupted path is a nested function and lifts whole; the finalized one
+    lives inside `response_handler`, 1900 lines of it, so the unit here is the
+    `try/finally` STATEMENT rather than a function. Same principle: real
+    production source, synthetic collaborators, no stack.
+
+    Round 28 proved why this needed to exist. Written straight through, a raise
+    from either await jumped clean over the marker, so the worst version of the
+    failure -- the one where we could not even tell the user -- was the one that
+    left no record. Only the interrupted path had a behavioural suite; this
+    branch had none at all.
+    """
+    src = MIDDLEWARE.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for parent in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            siblings = getattr(parent, field, None)
+            if not isinstance(siblings, list):
+                continue
+            for i, node in enumerate(siblings):
+                if not isinstance(node, ast.Try) or not node.finalbody:
+                    continue
+                if "PHASE_FINALIZED" not in ast.dump(
+                        ast.Module(body=node.finalbody, type_ignores=[])):
+                    continue
+                # Start from the statement BEFORE the try, because
+                # `notice = NOTICE_UNDELIVERED` lives there and is
+                # load-bearing: it is the value the marker reports when the
+                # try body never reaches its own reassignment. Lifting from
+                # `try:` alone made both failure fixtures die on NameError
+                # while the happy path passed -- a lift that quietly tested
+                # only the branch that cannot fail.
+                start = siblings[i - 1] if i else node
+                block = textwrap.dedent(
+                    "".join(src.splitlines(True)[start.lineno - 1:node.end_lineno]))
+                return "async def _probe():\n" + textwrap.indent(block, "    ")
+    raise AssertionError("the finalized empty-turn block is no longer findable")
+
+
+class FinalizedEmptyTurnTests(unittest.TestCase):
+    """Three fixtures, because there are three outcomes and they must differ."""
+
+    def _run_finalized(self, upsert_raises=False, emit_raises=False):
+        markers = []
+        handler = logging.Handler()
+        handler.emit = lambda rec: markers.append(rec.getMessage())
+        marker_log = logging.getLogger("open_webui.utils.failure_surface")
+        marker_log.addHandler(handler)
+        marker_log.setLevel(logging.INFO)
+
+        class _Chats:
+            calls = []
+
+            async def upsert_message_to_chat_by_id_and_message_id(self, c, m, p):
+                if upsert_raises:
+                    raise RuntimeError("the database is gone")
+                return {"id": c}
+
+        async def event_emitter(evt):
+            if emit_raises:
+                raise RuntimeError("socket.io is down")
+
+        ns = {
+            "Chats": _Chats(), "event_emitter": event_emitter,
+            "metadata": {"chat_id": "c-final", "message_id": "m-final"},
+            "empty_error": failure_surface.build_error_payload("c-final", "m-final"),
+            "log_empty_turn": failure_surface.log_empty_turn,
+            "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
+            "NOTICE_WRITTEN": failure_surface.NOTICE_WRITTEN,
+            "NOTICE_UNDELIVERED": failure_surface.NOTICE_UNDELIVERED,
+        }
+        raised = None
+        try:
+            exec(compile(_lift_finalized_empty_block(), "<lifted-final>", "exec"), ns)
+            asyncio.run(ns["_probe"]())
+        except Exception as exc:
+            raised = exc
+        finally:
+            marker_log.removeHandler(handler)
+        return markers, raised
+
+    def test_both_succeeded_is_reported_as_written(self):
+        markers, raised = self._run_finalized()
+        self.assertIsNone(raised)
+        self.assertEqual(1, len(markers), markers)
+        self.assertIn("notice=written", markers[0])
+        self.assertIn("phase=finalized", markers[0])
+
+    def test_a_dead_socket_still_files_the_marker_and_says_undelivered(self):
+        markers, raised = self._run_finalized(emit_raises=True)
+        self.assertEqual(1, len(markers),
+                         f"the emit failed and took the record with it: {markers}")
+        self.assertIn("notice=undelivered", markers[0])
+
+    def test_a_dead_database_still_files_the_marker(self):
+        """The worst case: we could not even write the banner. Losing the marker
+        here means the failure that is hardest to explain is also the one with
+        no trace at all."""
+        markers, raised = self._run_finalized(upsert_raises=True)
+        self.assertEqual(1, len(markers),
+                         f"a DB failure produced no marker: {markers}")
+        self.assertIn("notice=undelivered", markers[0])
+        # ...and the original exception is NOT swallowed by the observability.
+        self.assertIsNotNone(raised, "the DB failure was silently absorbed")

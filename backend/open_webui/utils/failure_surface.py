@@ -203,6 +203,17 @@ def log_empty_turn(payload: dict, phase: str, chat_id: str, message_id: str,
     Never raises into the caller's path: an observability write must not be able to break a
     turn that already went wrong. A marker that cannot be built is itself reported, at
     WARNING, through the same single call.
+
+    That promise used to be FALSE, and adversarial review round 28 proved it with a
+    synthetic handler whose ``emit()`` raises: only marker CONSTRUCTION was guarded, while
+    the emit itself sat outside the ``try``, so a failing handler escaped into the
+    empty-turn finalizer -- the one code path whose entire job is to rescue a turn that
+    already went wrong. The delivery is now inside the guard too.
+
+    Which makes this honestly BEST-EFFORT, not guaranteed: when the sink itself is broken
+    there is no channel left to report that on, so the failure is invisible by
+    construction. Saying so here is the only thing that keeps a missing marker from being
+    read as "no empty turn happened".
     """
     try:
         line = build_marker(payload, phase, chat_id, message_id, notice)
@@ -217,7 +228,10 @@ def log_empty_turn(payload: dict, phase: str, chat_id: str, message_id: str,
             MARKER_EMPTY_REPLY, CAUSE_EMPTY_FINALIZED, type(exc).__name__
         )
         level = logging.WARNING
-    _MARKER_LOG.log(level, line)
+    try:
+        _MARKER_LOG.log(level, line)
+    except Exception:  # noqa: BLE001 -- a broken log sink must not break a turn
+        pass
     return line
 
 

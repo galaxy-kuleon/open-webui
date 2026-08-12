@@ -5,6 +5,7 @@ package import (which needs container deps), no live stack — mirroring the sli
 ``--self-test`` discipline. Pure-function coverage of the grilled decisions.
 """
 import importlib.util
+import logging
 import os
 import unittest
 
@@ -149,3 +150,62 @@ class TestVocabularySingleSourced(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MarkerEmissionIsBestEffortTests(unittest.TestCase):
+    """The emitter must not be able to break the turn it is describing.
+
+    Adversarial review round 28 proved the opposite with this exact probe: only
+    marker CONSTRUCTION was guarded, so a handler whose `emit()` raises escaped
+    into the empty-turn finalizer -- the one path whose whole job is rescuing a
+    turn that already went wrong.
+    """
+
+    def _with_broken_sink(self, fn):
+        log = logging.getLogger("open_webui.utils.failure_surface")
+
+        class _Exploding(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("synthetic sink failure")
+
+        h = _Exploding()
+        log.addHandler(h)
+        log.setLevel(logging.INFO)
+        try:
+            return fn()
+        finally:
+            log.removeHandler(h)
+
+    def test_a_broken_log_sink_cannot_break_the_turn(self):
+        payload = fs.build_error_payload("chat-aaaaaaaa", "msg-bbbbbbbb")
+        line = self._with_broken_sink(
+            lambda: fs.log_empty_turn(payload, fs.PHASE_FINALIZED,
+                                      "chat-aaaaaaaa", "msg-bbbbbbbb",
+                                      fs.NOTICE_WRITTEN))
+        self.assertIn("empty_reply service=owui", line,
+                      "the marker was not even built")
+
+    def test_an_unbuildable_marker_still_returns_and_says_so(self):
+        """A bad phase must not raise either -- and must not claim a trace."""
+        payload = fs.build_error_payload("chat-aaaaaaaa", "msg-bbbbbbbb")
+        line = fs.log_empty_turn(payload, "not-a-phase",
+                                 "chat-aaaaaaaa", "msg-bbbbbbbb",
+                                 fs.NOTICE_WRITTEN)
+        self.assertIn("phase=marker_unbuildable", line)
+        self.assertIn("notice=unknown", line,
+                      "an unbuildable marker claimed the user was told")
+        self.assertIn("trace=-", line,
+                      "an unresolvable row advertised a trace id")
+        # M4: the exception must contribute a CLASS NAME and nothing else.
+        self.assertIn("err=ValueError", line)
+
+    def test_a_whitespace_bearing_id_cannot_truncate_the_record(self):
+        """`_KV_RE` in the collector splits on whitespace, so a space inside an
+        id would silently drop every field after it. Message ids arrive from the
+        caller, so this is reachable input, not a hypothetical."""
+        payload = fs.build_error_payload("chat-aaaaaaaa", "msg bbbbbbbb")
+        line = fs.log_empty_turn(payload, fs.PHASE_FINALIZED,
+                                 "chat-aaaaaaaa", "msg bbbbbbbb",
+                                 fs.NOTICE_WRITTEN)
+        self.assertIn("phase=marker_unbuildable", line,
+                      f"a whitespace-bearing id produced a normal record: {line}")

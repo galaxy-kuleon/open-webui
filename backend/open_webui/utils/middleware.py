@@ -5518,23 +5518,33 @@ async def streaming_chat_response_handler(response, ctx):
                         empty_error = build_error_payload(
                             metadata['chat_id'], metadata['message_id']
                         )
-                        await Chats.upsert_message_to_chat_by_id_and_message_id(
-                            metadata['chat_id'],
-                            metadata['message_id'],
-                            {'error': empty_error},
-                        )
-                        await event_emitter(
-                            {'type': 'chat:message:error', 'data': {'error': empty_error}}
-                        )
-                        # See the interrupted path above for why this is not `log.info`.
-                        # NOTICE_WRITTEN unconditionally here, and honestly so: the
-                        # upsert and the emit above are awaited without a guard, so
-                        # reaching this line means both succeeded.
-                        log_empty_turn(
-                            empty_error, PHASE_FINALIZED,
-                            metadata['chat_id'], metadata['message_id'],
-                            NOTICE_WRITTEN,
-                        )
+                        # The marker is TERMINAL, in a `finally`. Written straight
+                        # through, a raise from either await jumped clean over the
+                        # emit and produced no marker at all -- so the single worst
+                        # version of this failure, the one where we could not even
+                        # tell the user, was also the one that left no record. The
+                        # notice reports how far we actually got; it is never
+                        # inferred from having reached a line.
+                        notice = NOTICE_UNDELIVERED
+                        try:
+                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                metadata['chat_id'],
+                                metadata['message_id'],
+                                {'error': empty_error},
+                            )
+                            await event_emitter(
+                                {'type': 'chat:message:error',
+                                 'data': {'error': empty_error}}
+                            )
+                            notice = NOTICE_WRITTEN
+                        finally:
+                            # See the interrupted path above for why this is not
+                            # `log.info`.
+                            log_empty_turn(
+                                empty_error, PHASE_FINALIZED,
+                                metadata['chat_id'], metadata['message_id'],
+                                notice,
+                            )
                     else:
                         # #17 + Path-A fail-closed: annotate a finalized file-heavy answer with a
                         # non-blocking, COUNTS-ONLY warning (never raw names/content/paths — M4).
