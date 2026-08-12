@@ -10,6 +10,8 @@ import logging
 import os
 import unittest
 
+import pytest
+
 _HERE = os.path.dirname(__file__)
 _MOD = os.path.normpath(os.path.join(_HERE, "..", "..", "utils", "failure_surface.py"))
 _spec = importlib.util.spec_from_file_location("failure_surface", _MOD)
@@ -354,3 +356,56 @@ class ReadBoundaryOwnsTheFactTests(unittest.TestCase):
             return
             yield  # pragma: no cover
         self.assertEqual([], self._run(fs.classified_body_reads(body())))
+
+
+class RealLibraryClassesTests(unittest.TestCase):
+    """The ACTUAL installed exception classes, imported.
+
+    The tests above hand-author stand-ins with the right `__module__`, which
+    proves the mapping SHAPE and nothing about the dependencies. Round 37: that
+    test can agree with a future wrong guess exactly as the previous local-class
+    test agreed with bare-name matching. These import the real classes, so a
+    library moving one between submodules turns this red instead of silently
+    reclassifying live failures as `unclassified`.
+
+    Skipped rather than failed when a dependency is absent: this suite also runs
+    on a bare host, and a missing optional library is not a mapping defect.
+    """
+
+    def test_aiohttp_transport_errors(self):
+        """Imported from the SUBMODULES that define them.
+
+        My first version used `getattr(aiohttp, name)` and skipped when it
+        returned None — and `TransferEncodingError` is not exported at
+        aiohttp's top level, so the test reported SKIPPED and I read it as
+        covered. Absence taken for success, in the test written to stop exactly
+        that. A missing class is now a FAILURE: it means the library moved
+        something and live failures would be silently reclassified.
+        """
+        he = pytest.importorskip("aiohttp.http_exceptions")
+        ce = pytest.importorskip("aiohttp.client_exceptions")
+        for mod, name, want in (
+            (he, "TransferEncodingError", "stream_truncated"),
+            (he, "ContentLengthError", "stream_truncated"),
+            (he, "LineTooLong", "sse_line_too_long"),
+            (ce, "ClientPayloadError", "stream_truncated"),
+            (ce, "ServerDisconnectedError", "peer_disconnected"),
+            (ce, "ClientConnectionError", "peer_disconnected"),
+            (ce, "ServerTimeoutError", "upstream_timeout"),
+        ):
+            klass = getattr(mod, name, None)
+            self.assertIsNotNone(
+                klass, f"{mod.__name__}.{name} no longer exists — the mapping "
+                       f"is stale and real failures would classify as unclassified")
+            with self.subTest(cls=f"{klass.__module__}.{klass.__qualname__}"):
+                self.assertEqual(want, fs.classify_exception(klass.__new__(klass)))
+
+    def test_stdlib_incomplete_read(self):
+        import http.client
+        self.assertEqual("stream_truncated",
+                         fs.classify_exception(http.client.IncompleteRead(b"")))
+
+    def test_builtin_timeout_and_reset(self):
+        self.assertEqual("upstream_timeout", fs.classify_exception(TimeoutError()))
+        self.assertEqual("peer_disconnected",
+                         fs.classify_exception(ConnectionResetError()))
