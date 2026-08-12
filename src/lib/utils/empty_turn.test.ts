@@ -76,9 +76,21 @@ describe('trace id', () => {
 });
 
 describe('safeCause (M4 render guard)', () => {
-	test('passes a canonical cause', () => {
+	test('passes every canonical cause', () => {
 		expect(safeCause(EMPTY_TURN_CAUSE)).toBe('db_stream_flush');
-		expect(ALLOWED_CAUSES.has(EMPTY_TURN_CAUSE)).toBe(true);
+		expect(safeCause('stream_interrupted')).toBe('stream_interrupted');
+		expect(safeCause('legacy_empty_unknown')).toBe('legacy_empty_unknown');
+		for (const c of ALLOWED_CAUSES) {
+			expect(safeCause(c)).toBe(c);
+		}
+	});
+	test('the UI set matches the backend closed grammar it mirrors', () => {
+		// Hand-synced across runtimes, so the pairing is asserted rather than
+		// assumed: a backend cause absent from here is rendered `unknown` to the
+		// user while every log and the database record it correctly.
+		expect([...ALLOWED_CAUSES].sort()).toEqual(
+			['db_stream_flush', 'legacy_empty_unknown', 'stream_interrupted'].sort()
+		);
 	});
 	test('a non-canonical / raw cause collapses to "unknown" (never rendered raw)', () => {
 		expect(safeCause(RAW)).toBe('unknown');
@@ -142,11 +154,31 @@ describe('emptyTurnView (no raw content ever reaches the UI)', () => {
 		expect(v.traceId).not.toBe('t-deadbeef-feedface');
 	});
 
-	test('case 2 (derived): default canonical cause + synthesized trace', () => {
+	test('case 2 (derived): says what is KNOWN, not a borrowed producer cause', () => {
+		// This row proves only "empty and no longer active". It used to claim
+		// `db_stream_flush`, which asserts the answer completed and the write did
+		// not -- evidence this row does not carry. An interrupted or crashed turn
+		// from before the producer existed lands here too.
 		const v = emptyTurnView({ id: 'msg45678aaaa', role: 'assistant', content: '', done: false }, 'chat1234bbbb');
-		expect(v.cause).toBe('db_stream_flush');
+		expect(v.cause).toBe('legacy_empty_unknown');
+		expect(v.cause).not.toBe('db_stream_flush');
 		expect(v.traceId).toBe('t-chat1234-msg45678');
-		expect(v.banner).toContain('db_stream_flush');
+		expect(v.banner).toContain('legacy_empty_unknown');
 		expect(v.banner).toContain('t-chat1234-msg45678');
+	});
+
+	test('a backend-recorded interruption survives to the banner', () => {
+		// The whole point of the backend cause split dies here if the frontend
+		// downgrades it: the browser rebuilds the banner, so a cause missing from
+		// ALLOWED_CAUSES becomes `unknown` at the only place a user looks.
+		const v = emptyTurnView(
+			{ id: 'msg45678aaaa', role: 'assistant', content: '', done: true,
+			  error: { cause: 'stream_interrupted' } },
+			'chat1234bbbb'
+		);
+		expect(v.cause).toBe('stream_interrupted');
+		expect(v.banner).toContain('stream_interrupted');
+		expect(v.banner).not.toContain('unknown');
+		expect(v.banner).not.toContain('db_stream_flush');
 	});
 });

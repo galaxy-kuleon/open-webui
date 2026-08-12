@@ -21,8 +21,27 @@
 // final assistant message is empty/done=false). Keep in sync by hand (separate runtimes).
 export const EMPTY_TURN_CAUSE = 'db_stream_flush';
 
+// The turn ended EARLY and delivered nothing: a stop, a lost client, a shutdown. Mirrors
+// failure_surface.CAUSE_EMPTY_INTERRUPTED. Without it here the backend could record the
+// cause correctly and the browser would still print `unknown`, because this file rebuilds
+// the banner rather than rendering the backend's string — so the whole distinction died on
+// the last hop, at the only place a user actually looks.
+export const EMPTY_TURN_CAUSE_INTERRUPTED = 'stream_interrupted';
+
+// Case 2 below (a persisted empty row with NO structured error) proves only "empty and no
+// longer active". It used to borrow `db_stream_flush`, which asserts the answer completed
+// and the write did not — evidence the row does not contain. An interrupted or crashed turn
+// from before the producer existed lands here too, so this says what is actually known.
+export const EMPTY_TURN_CAUSE_LEGACY = 'legacy_empty_unknown';
+
 // The ONLY cause labels the UI is permitted to render. Anything else → 'unknown' fallback.
-export const ALLOWED_CAUSES: ReadonlySet<string> = new Set([EMPTY_TURN_CAUSE]);
+// Widening this set is how a new backend cause reaches a user; trusting the backend's raw
+// string would not be (M4 — a raw value must never reach the UI).
+export const ALLOWED_CAUSES: ReadonlySet<string> = new Set([
+	EMPTY_TURN_CAUSE,
+	EMPTY_TURN_CAUSE_INTERRUPTED,
+	EMPTY_TURN_CAUSE_LEGACY
+]);
 
 export interface TurnLike {
 	role?: string;
@@ -94,7 +113,9 @@ export interface EmptyTurnView {
  */
 export const emptyTurnView = (message: TurnLike | null | undefined, chatId?: string): EmptyTurnView => {
 	const err = message?.error as { cause?: unknown; trace_id?: unknown } | undefined;
-	const cause = safeCause(err && typeof err === 'object' ? err.cause : EMPTY_TURN_CAUSE);
+	// No structured error means case 2: we know the turn is empty and inactive, and nothing
+	// more. Defaulting to a producer-owned cause here invented evidence the row never had.
+	const cause = safeCause(err && typeof err === 'object' ? err.cause : EMPTY_TURN_CAUSE_LEGACY);
 	// The trace is ALWAYS the value RECOMPUTED from the frontend-held ids — it is never a
 	// regex-trusted backend string. The backend `trace_id` is accepted ONLY when it EXACTLY
 	// equals the recomputed canonical id (then it is, by definition, that same id); any other

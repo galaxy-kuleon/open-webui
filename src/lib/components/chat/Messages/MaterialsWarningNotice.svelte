@@ -39,7 +39,7 @@
 
 		<div class="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
 			<span class="px-2 py-0.5 rounded-full bg-amber-500/10" data-testid="materials-warning-counts"
-				>{used}/{total} used · {unused} not delivered{#if skipped}
+				>{used}/{total} delivered · {unused} not delivered{#if skipped}
 					· {skipped} skipped{/if}{#if failed}
 					· {failed} failed{/if}</span
 			>
