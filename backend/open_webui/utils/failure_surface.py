@@ -49,8 +49,20 @@ from __future__ import annotations
 
 import logging
 
-# The one logger this module owns. `journey_ledger` trusts it by NAME for identity keys;
-# see the module docstring for what that trust rests on.
+# The one logger this module owns.
+#
+# The NAME here is very nearly decorative, and knowing that matters. Measured
+# 2026-08-12 in a disposable container off the running image
+# (`scripts/ops/owui_marker_wire_probe.sh`): owui's `InterceptHandler` walks to the
+# CALLER'S FRAME and never passes `record.name`, so the logger printed on the line the
+# collector reads is this MODULE's name, whatever string is passed below. Renaming it to
+# `totally.unrelated.name` still emitted `open_webui.utils.failure_surface`.
+#
+# So the ledger's identity trust is really "this code lives in THIS FILE", which is why a
+# second logging call here is the hazard and why another module calling
+# `getLogger("open_webui.utils.failure_surface")` cannot borrow the trust -- also measured,
+# as control 3 of that probe. The name is kept accurate anyway: the unit tests attach a
+# handler by it, and a wrong one would be a lie to the next reader.
 _MARKER_LOG = logging.getLogger("open_webui.utils.failure_surface")
 
 # The ledger's stream-marker vocabulary. `empty_reply` is the gateway's existing kind for
