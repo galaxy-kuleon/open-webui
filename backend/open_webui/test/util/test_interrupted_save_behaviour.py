@@ -15,11 +15,22 @@ synthetic collaborators. No live service, no database, no network.
 
 import ast
 import asyncio
+import importlib.util
+import logging
 import textwrap
 import unittest
 from pathlib import Path
 
 MIDDLEWARE = Path(__file__).resolve().parents[2] / "utils" / "middleware.py"
+
+# The REAL producer, not a stub. `failure_surface` is pure by design (no
+# `open_webui` imports), so it loads by path with no app and no stack -- and the
+# marker it emits is the only record of an empty turn that outlives the
+# container, so a stub here would test nothing that matters.
+_FS_PATH = Path(__file__).resolve().parents[2] / "utils" / "failure_surface.py"
+_fs_spec = importlib.util.spec_from_file_location("_fs_under_test", _FS_PATH)
+failure_surface = importlib.util.module_from_spec(_fs_spec)
+_fs_spec.loader.exec_module(failure_surface)
 
 
 def _lift(name):
@@ -83,11 +94,27 @@ def _run(chats_returns, output_items, emitter_raises=False):
         "ENABLE_REALTIME_CHAT_SAVE": False,
         "metadata": {"chat_id": "c-1", "message_id": "m-1"},
         "should_flag_empty": lambda s, *a, **k: not (s or "").strip(),
-        "build_error_payload": lambda c, m: {
-            "cause": "db_stream_flush", "trace_id": "t-x"},
+        # The real builder and the real emitter. The payload the banner is made
+        # from and the marker ops greps for are the same two objects here as in
+        # production, so a change that breaks either is a red test rather than a
+        # blank screen with an unresolvable trace id.
+        "build_error_payload": failure_surface.build_error_payload,
+        "log_empty_turn": failure_surface.log_empty_turn,
+        "PHASE_INTERRUPTED": failure_surface.PHASE_INTERRUPTED,
+        "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
     }
-    exec(compile(_lift("save_interrupted_state"), "<lifted>", "exec"), ns)
-    asyncio.run(ns["save_interrupted_state"]("stream_failed"))
+    marker_lines = []
+    handler = logging.Handler()
+    handler.emit = lambda rec: marker_lines.append(rec.getMessage())
+    marker_log = logging.getLogger("open_webui.utils.failure_surface")
+    marker_log.addHandler(handler)
+    marker_log.setLevel(logging.INFO)
+    try:
+        exec(compile(_lift("save_interrupted_state"), "<lifted>", "exec"), ns)
+        asyncio.run(ns["save_interrupted_state"]("stream_failed"))
+    finally:
+        marker_log.removeHandler(handler)
+    log.markers = marker_lines
     return log, chats, events
 
 
@@ -139,6 +166,42 @@ class InterruptedSaveBehaviourTests(unittest.TestCase):
         log, chats, events = _run([{"id": "c-1"}], ANSWER)
         self.assertNotIn("chat:message:error", events,
                          "a recovered partial answer got a blank-screen banner")
+        self.assertEqual([], log.markers,
+                         "an answered turn filed an empty-turn marker")
+
+    def test_the_trace_the_user_is_told_to_quote_is_the_trace_ops_can_find(self):
+        """The defect this closes, stated as a test.
+
+        On 2026-08-12 two users were shown "share trace t-... with ops" and the
+        id existed in exactly one place: the error blob in their own chat row.
+        Nothing logged it in a shape the journey ledger could read, the owui
+        container was recreated three hours later, and the trace resolved to
+        nothing. The banner and the marker have to carry the SAME id, or the
+        instruction on screen is a lie.
+        """
+        log, chats, events = _run([{"id": "c-1"}, {"id": "c-1"}],
+                                  [dict(i) for i in THINKING_ONLY])
+        written = [p["error"] for p in chats.calls if "error" in p]
+        self.assertEqual(1, len(written), "expected exactly one error write")
+        banner_trace = written[0]["trace_id"]
+
+        self.assertEqual(1, len(log.markers),
+                         f"expected one empty-turn marker, got {log.markers}")
+        marker = log.markers[0]
+        self.assertIn(f"trace={banner_trace}", marker,
+                      "the marker does not carry the id the user was shown")
+        self.assertTrue(marker.startswith("empty_reply service=owui "),
+                        f"marker is not in the ledger's grammar: {marker}")
+        self.assertIn("phase=interrupted", marker,
+                      "a cancelled turn was filed as a clean finalize")
+        # M4: ids and closed-vocabulary labels only. THINKING_ONLY carries the
+        # model's reasoning text; none of it may reach a line ops greps.
+        for item in THINKING_ONLY:
+            for part in item.get("content", []) or []:
+                text = (part.get("text") or "").strip()
+                if text:
+                    self.assertNotIn(text, marker,
+                                     "reasoning text leaked into the marker")
 
 
 if __name__ == "__main__":

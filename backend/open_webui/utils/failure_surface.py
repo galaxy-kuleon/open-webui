@@ -26,9 +26,44 @@ Single-sourcing note: ``CAUSE_EMPTY_FINALIZED`` mirrors
 ``scripts/ops/openwebui_8083_chat_triage.py`` ``CAUSES`` — ``db_stream_flush`` = "task ended
 but the final assistant message is empty/done=false". The owui container cannot import the
 parent-repo ops script, so the label is duplicated here by hand; keep the two in sync.
+
+Observability (added 2026-08-12, after a live miss): this module also OWNS the log
+marker for the event, and it is the only thing this module ever logs. Two real users
+hit ``db_stream_flush`` on a direct (non-hermes) model, so no gateway code was in the
+path and no gateway marker could fire; ``middleware`` logged the trace id as free-form
+JSON, which the journey ledger cannot parse, and the container was recreated three hours
+later. The banner had told those users to "share trace t-… with ops" — and ops, meaning
+me, then had nothing to grep. A promise the system cannot keep is worse than no promise.
+
+Why the emitter lives HERE and not in ``middleware``: ``journey_ledger`` trusts a logger,
+not a service. ``open_webui.utils.middleware`` is trusted COUNT-ONLY — it may say that a
+turn ended badly, never whose — because that module also logs provider text and exception
+strings, so a crafted upstream message beginning with our marker could inject ``chat=``
+and name a victim. This module logs NOTHING but the closed-vocabulary marker below, so it
+has no such channel, and the ledger can trust it with the trace/chat ids that make the
+banner's promise keepable. That property is mechanical, not a comment: ``journey_ledger``
+self-test parses this file and fails if any second logging call ever appears in it.
 """
 
 from __future__ import annotations
+
+import logging
+
+# The one logger this module owns. `journey_ledger` trusts it by NAME for identity keys;
+# see the module docstring for what that trust rests on.
+_MARKER_LOG = logging.getLogger("open_webui.utils.failure_surface")
+
+# The ledger's stream-marker vocabulary. `empty_reply` is the gateway's existing kind for
+# "the turn produced nothing"; an owui-side empty turn is the same fact observed at the
+# only layer that can see it when the gateway is not in the path.
+MARKER_EMPTY_REPLY = "empty_reply"
+
+# A turn can finalize empty on two paths, and they mean different things to whoever reads
+# the ledger: `finalized` = the stream ended by itself with nothing rendered; `interrupted`
+# = it was cancelled (user stop, deploy, disconnect) before anything was rendered.
+PHASE_FINALIZED = "finalized"
+PHASE_INTERRUPTED = "interrupted"
+ALLOWED_PHASES = frozenset({PHASE_FINALIZED, PHASE_INTERRUPTED})
 
 # Bucketed, DB-signal-derivable cause label (mirrors chat_triage CAUSES['db_stream_flush']).
 CAUSE_EMPTY_FINALIZED = "db_stream_flush"
@@ -119,6 +154,52 @@ def assert_privacy_safe(payload: dict) -> dict:
     if payload.get("content") != rebuilt:
         raise ValueError("error payload 'content' is not the fixed cause+trace banner (possible leak)")
     return payload
+
+
+def build_marker(payload: dict, phase: str, chat_id: str, message_id: str) -> str:
+    """The ledger line for an empty turn: closed vocabulary, ids only, no content.
+
+    Separated from ``log_empty_turn`` so a test can assert the exact bytes without a
+    logging handler, and so the ledger's parser can be exercised against the real
+    producer's output rather than a hand-copied string.
+    """
+    if phase not in ALLOWED_PHASES:
+        raise ValueError("phase {!r} is not canonical; allowed: {}".format(phase, sorted(ALLOWED_PHASES)))
+    assert_privacy_safe(payload)
+    # `_KV_RE` in journey_ledger splits on whitespace, so a value containing a space would
+    # silently truncate the record. Every value here is an opaque id or a label from a
+    # closed set, and this states that rather than assuming it.
+    for key, val in (("cause", payload["cause"]), ("trace", payload["trace_id"]),
+                     ("chat", chat_id or ""), ("msg", message_id or "")):
+        if val != "".join(val.split()):
+            raise ValueError("marker field {!r} contains whitespace: {!r}".format(key, val))
+    return (
+        "{} service=owui phase={} cause={} trace={} chat={} msg={}".format(
+            MARKER_EMPTY_REPLY, phase, payload["cause"], payload["trace_id"],
+            chat_id or "-", message_id or "-",
+        )
+    )
+
+
+def log_empty_turn(payload: dict, phase: str, chat_id: str, message_id: str) -> str:
+    """Emit the empty-turn marker. THE ONLY LOGGING CALL IN THIS MODULE -- see the module
+    docstring: the ledger's identity trust in this logger rests on that being true, and its
+    self-test fails if a second one appears.
+
+    Never raises into the caller's path: an observability write must not be able to break a
+    turn that already went wrong. A marker that cannot be built is itself reported, at
+    WARNING, through the same single call.
+    """
+    try:
+        line = build_marker(payload, phase, chat_id, message_id)
+        level = logging.INFO
+    except Exception as exc:  # noqa: BLE001 -- see docstring
+        line = "{} service=owui phase=marker_unbuildable cause={} trace=- chat=- msg=- err={}".format(
+            MARKER_EMPTY_REPLY, CAUSE_EMPTY_FINALIZED, type(exc).__name__
+        )
+        level = logging.WARNING
+    _MARKER_LOG.log(level, line)
+    return line
 
 
 def build_banner(cause: str, trace_id: str) -> str:

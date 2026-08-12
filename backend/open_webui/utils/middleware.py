@@ -77,7 +77,10 @@ from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.failure_surface import (
+    PHASE_FINALIZED,
+    PHASE_INTERRUPTED,
     build_error_payload,
+    log_empty_turn,
     should_flag_empty,
 )
 from open_webui.utils.file_coverage import (
@@ -4223,16 +4226,14 @@ async def streaming_chat_response_handler(response, ctx):
                             )
                         except Exception:
                             log.warning('empty-turn error surface not delivered')
-                        log.info(
-                            'empty-assistant-turn surfaced (interrupted) %s',
-                            json.dumps(
-                                {
-                                    'chat_id': metadata['chat_id'],
-                                    'msg_id': metadata['message_id'],
-                                    'trace_id': empty_error['trace_id'],
-                                    'cause': empty_error['cause'],
-                                }
-                            ),
+                        # Emitted from failure_surface's own logger, not this one: the
+                        # journey ledger trusts THIS module count-only (it may say a
+                        # turn ended badly, never whose), because it also logs provider
+                        # text. The trace id names a chat, so it has to come from the
+                        # marker-only logger or the ledger must throw it away.
+                        log_empty_turn(
+                            empty_error, PHASE_INTERRUPTED,
+                            metadata['chat_id'], metadata['message_id'],
                         )
 
             try:
@@ -5516,16 +5517,10 @@ async def streaming_chat_response_handler(response, ctx):
                         await event_emitter(
                             {'type': 'chat:message:error', 'data': {'error': empty_error}}
                         )
-                        log.info(
-                            'empty-assistant-turn surfaced %s',
-                            json.dumps(
-                                {
-                                    'chat_id': metadata['chat_id'],
-                                    'msg_id': metadata['message_id'],
-                                    'trace_id': empty_error['trace_id'],
-                                    'cause': empty_error['cause'],
-                                }
-                            ),
+                        # See the interrupted path above for why this is not `log.info`.
+                        log_empty_turn(
+                            empty_error, PHASE_FINALIZED,
+                            metadata['chat_id'], metadata['message_id'],
                         )
                     else:
                         # #17 + Path-A fail-closed: annotate a finalized file-heavy answer with a
