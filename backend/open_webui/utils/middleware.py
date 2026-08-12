@@ -4017,6 +4017,63 @@ async def streaming_chat_response_handler(response, ctx):
                 else:
                     reasoning_tags = DEFAULT_REASONING_TAGS
 
+            # Named for what it now does. It began as save_cancelled_state,
+            # then a second caller arrived: a stream that DIED is not a stream
+            # that was cancelled, and a reader who trusts the old name will
+            # assume the failure path has no durability story at all.
+            # Hoisted out of the CancelledError handler so BOTH failure
+            # branches can call it. Defined inside that handler, it was
+            # invisible to the sibling `except Exception` -- a NameError the
+            # surrounding guard would have swallowed, leaving nothing saved
+            # and no trace of why.
+            async def save_interrupted_state():
+                await event_emitter({'type': 'chat:tasks:cancel'})
+                if not metadata.get('chat_id', '').startswith('channel:'):
+                    if not ENABLE_REALTIME_CHAT_SAVE:
+                        await Chats.upsert_message_to_chat_by_id_and_message_id(
+                            metadata['chat_id'],
+                            metadata['message_id'],
+                            {
+                                'done': True,
+                                'content': serialize_output(output),
+                                'output': output,
+                            },
+                        )
+                    else:
+                        await Chats.upsert_message_to_chat_by_id_and_message_id(
+                            metadata['chat_id'],
+                            metadata['message_id'],
+                            {'done': True},
+                        )
+
+                    # #16 runtime slice: a cancelled turn that kept partial content has a
+                    # non-empty serialize_output → NOT flagged (A5: leave the partial for
+                    # recovery). Only a truly-EMPTY cancelled turn is surfaced as an error
+                    # (bucketed cause + opaque trace; no raw content — M4).
+                    if should_flag_empty(serialize_output(output), True, task_active=False):
+                        empty_error = build_error_payload(
+                            metadata['chat_id'], metadata['message_id']
+                        )
+                        await Chats.upsert_message_to_chat_by_id_and_message_id(
+                            metadata['chat_id'],
+                            metadata['message_id'],
+                            {'error': empty_error},
+                        )
+                        await event_emitter(
+                            {'type': 'chat:message:error', 'data': {'error': empty_error}}
+                        )
+                        log.info(
+                            'empty-assistant-turn surfaced (cancelled) %s',
+                            json.dumps(
+                                {
+                                    'chat_id': metadata['chat_id'],
+                                    'msg_id': metadata['message_id'],
+                                    'trace_id': empty_error['trace_id'],
+                                    'cause': empty_error['cause'],
+                                }
+                            ),
+                        )
+
             try:
                 for event in events:
                     await event_emitter(
@@ -5401,59 +5458,39 @@ async def streaming_chat_response_handler(response, ctx):
                     except (asyncio.CancelledError, Exception):
                         pass
 
-                async def save_cancelled_state():
-                    await event_emitter({'type': 'chat:tasks:cancel'})
-                    if not metadata.get('chat_id', '').startswith('channel:'):
-                        if not ENABLE_REALTIME_CHAT_SAVE:
-                            await Chats.upsert_message_to_chat_by_id_and_message_id(
-                                metadata['chat_id'],
-                                metadata['message_id'],
-                                {
-                                    'done': True,
-                                    'content': serialize_output(output),
-                                    'output': output,
-                                },
-                            )
-                        else:
-                            await Chats.upsert_message_to_chat_by_id_and_message_id(
-                                metadata['chat_id'],
-                                metadata['message_id'],
-                                {'done': True},
-                            )
-
-                        # #16 runtime slice: a cancelled turn that kept partial content has a
-                        # non-empty serialize_output → NOT flagged (A5: leave the partial for
-                        # recovery). Only a truly-EMPTY cancelled turn is surfaced as an error
-                        # (bucketed cause + opaque trace; no raw content — M4).
-                        if should_flag_empty(serialize_output(output), True, task_active=False):
-                            empty_error = build_error_payload(
-                                metadata['chat_id'], metadata['message_id']
-                            )
-                            await Chats.upsert_message_to_chat_by_id_and_message_id(
-                                metadata['chat_id'],
-                                metadata['message_id'],
-                                {'error': empty_error},
-                            )
-                            await event_emitter(
-                                {'type': 'chat:message:error', 'data': {'error': empty_error}}
-                            )
-                            log.info(
-                                'empty-assistant-turn surfaced (cancelled) %s',
-                                json.dumps(
-                                    {
-                                        'chat_id': metadata['chat_id'],
-                                        'msg_id': metadata['message_id'],
-                                        'trace_id': empty_error['trace_id'],
-                                        'cause': empty_error['cause'],
-                                    }
-                                ),
-                            )
 
                 try:
-                    await asyncio.shield(save_cancelled_state())
+                    await asyncio.shield(save_interrupted_state())
                 except (asyncio.CancelledError, Exception):
                     pass
                 raise  # re-raise CancelledError for proper propagation
+
+            except Exception:
+                # THE STREAM DIED IN A WAY NOBODY WAS SAVING FOR.
+                #
+                # Only CancelledError was handled here, and it is the branch
+                # that persists partial output. Every other failure -- an
+                # upstream that truncates its chunked transfer, a provider
+                # dropping mid-answer -- escaped to the outer handler in
+                # main.py, which writes ONLY {'parentId', 'error'}. It does not
+                # write `content` and it does not set `done`.
+                #
+                # ENABLE_REALTIME_CHAT_SAVE defaults to False, so nothing was
+                # persisted during the stream either: `flush_pending_delta_data`
+                # emits a socket event and touches no database. So the user
+                # watched an answer arrive, the upstream broke, and the text
+                # they had already read was never anywhere but their browser.
+                # Reload, and it is gone -- with an error where their partial
+                # answer used to be.
+                #
+                # Same shape as the cancelled branch, for the same reason:
+                # whatever reached the user is theirs to keep. The exception is
+                # re-raised so the outer handler still records what broke.
+                try:
+                    await asyncio.shield(save_interrupted_state())
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise
 
             if response.background is not None:
                 await response.background()
