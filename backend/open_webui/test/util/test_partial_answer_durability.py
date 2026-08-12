@@ -129,10 +129,19 @@ class PartialAnswerDurabilityTests(unittest.TestCase):
             for arg in call.args:
                 if isinstance(arg, ast.Constant):
                     reasons.add(arg.value)
+        # Three reasons since 2026-08-13, not two. `stream_failed` used to cover
+        # BOTH an upstream body failure and a failure in our own filters, DB
+        # writes or notification path, so the report called an OpenWebUI bug
+        # "transport-ended" and pointed the operator at the provider. The split
+        # strengthens the property this test protects: a transport failure is
+        # still never a cancellation, and now an INTERNAL failure is never a
+        # transport one either.
         self.assertEqual(
-            reasons, {"cancelled", "stream_failed"},
+            reasons,
+            {"cancelled", "upstream_read_failed", "stream_processing_failed"},
             f"callers pass {sorted(reasons)} — a transport failure counted as "
-            f"a user cancellation is a fault that disappears from every number "
+            f"a user cancellation, or an internal failure counted as a "
+            f"transport one, is a fault that disappears from every number "
             f"that matters",
         )
 

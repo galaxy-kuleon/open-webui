@@ -393,7 +393,10 @@ class ReadBoundaryClassificationTests(unittest.TestCase):
         klass = type("TransferEncodingError", (Exception,), {})
         klass.__module__ = "aiohttp.http_exceptions"
         seen = self._run(failure_surface.StreamReadFailure("stream_truncated", klass()))
-        self.assertEqual("stream_failed", seen["reason"])
+        # `upstream_read_failed`, not the shared `stream_failed`: the reason now
+        # says WHERE, so the report can stop calling an internal failure a
+        # transport one.
+        self.assertEqual("upstream_read_failed", seen["reason"])
         self.assertEqual("stream_truncated", seen["failure"])
 
     def test_a_failure_from_ANYWHERE_ELSE_is_unclassified(self):
@@ -403,7 +406,9 @@ class ReadBoundaryClassificationTests(unittest.TestCase):
         to the provider for a failure in our own notification path.
         """
         seen = self._run(TimeoutError("event_emitter flush timed out"))
-        self.assertEqual("stream_failed", seen["reason"])
+        # A DIFFERENT reason from the read failure above, which is the whole
+        # point: same exception class, different place, different operator.
+        self.assertEqual("stream_processing_failed", seen["reason"])
         self.assertEqual("unclassified", seen["failure"])
 
 

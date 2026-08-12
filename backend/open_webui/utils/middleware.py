@@ -4087,8 +4087,15 @@ async def streaming_chat_response_handler(response, ctx):
                     # Already classified AT THE READ. Unwrapped so downstream
                     # sees the original exception, exactly as before.
                     try:
+                        # `upstream_read_failed`, not the shared `stream_failed`:
+                        # the reader needs to tell an UPSTREAM body failure from a
+                        # failure in our own filters, DB writes or notification
+                        # path, and both used to arrive under one reason. The
+                        # report then called all of them "transport-ended" and
+                        # would send an operator to the provider for a bug in
+                        # OpenWebUI (round 38).
                         await asyncio.shield(save_interrupted_state(
-                            'stream_failed', exc.failure_kind))
+                            'upstream_read_failed', exc.failure_kind))
                     except (asyncio.CancelledError, Exception):
                         pass
                     raise StreamBodyInterrupted(exc.__cause__ or exc) from exc
@@ -4099,8 +4106,11 @@ async def streaming_chat_response_handler(response, ctx):
                     # `unclassified` is the honest answer rather than borrowing
                     # a transport label that happens to share a class name.
                     try:
+                        # Everything that is NOT the upstream body read. Named
+                        # for where it happened, since that is the only thing
+                        # this branch actually knows.
                         await asyncio.shield(save_interrupted_state(
-                            'stream_failed', FAILURE_KIND_UNCLASSIFIED))
+                            'stream_processing_failed', FAILURE_KIND_UNCLASSIFIED))
                     except (asyncio.CancelledError, Exception):
                         pass
                     raise StreamBodyInterrupted(exc) from exc
@@ -4223,7 +4233,9 @@ async def streaming_chat_response_handler(response, ctx):
                 log.info(
                     'assistant_turn_interrupted service=owui'
                     ' reason=%s failure=%s persisted=%s chat=%s',
-                    reason if reason in ('cancelled', 'stream_failed') else 'unknown',
+                    reason if reason in ('cancelled', 'upstream_read_failed',
+                                        'stream_processing_failed',
+                                        'stream_failed') else 'unknown',
                     failure if failure in ALLOWED_FAILURE_KINDS
                     else FAILURE_KIND_UNCLASSIFIED,
                     'yes' if persisted else 'no',
