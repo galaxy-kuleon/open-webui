@@ -4075,6 +4075,18 @@ async def streaming_chat_response_handler(response, ctx):
                 # server ended it; 'stream_failed' means the provider body
                 # broke. Reporting a transport failure as a user cancellation
                 # is how a fault disappears from every count that matters.
+                # CLOSE THE SPINNER IN THE SAVED STATE, not just in the UI.
+                # A reasoning item left `in_progress` serialises to
+                # `<details type="reasoning" done="false"><summary>Thinking…`,
+                # so a message rescued from a dead stream reloads as one that
+                # is still thinking -- for ever. The normal end of the turn
+                # marks these completed; an interrupted end skipped it, and
+                # re-raising past the loop (rather than breaking out of it)
+                # means it will keep skipping it. Persisted state that
+                # misrepresents itself is the same disease as a log that lies.
+                for _item in full_output():
+                    if _item.get('status') == 'in_progress':
+                        _item['status'] = 'completed'
                 await event_emitter({'type': 'chat:tasks:cancel'})
                 log.info(
                     'assistant_turn_interrupted reason=%s chat=%s',

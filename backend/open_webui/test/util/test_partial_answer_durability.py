@@ -170,6 +170,36 @@ class PartialAnswerDurabilityTests(unittest.TestCase):
             "answer; say so where it is set",
         )
 
+    def test_a_rescued_answer_does_not_reload_as_still_thinking(self):
+        """`serialize_output` renders an `in_progress` reasoning item as
+        `<details type="reasoning" done="false"><summary>Thinking…`. The normal
+        end of a turn marks in-progress items completed; an interrupted end
+        skipped that, so a message rescued from a dead stream reloaded as one
+        still thinking, for ever. Re-raising past the loop (rather than
+        breaking out of it) means the finalisation after the loop will keep
+        being skipped, so the save has to do it."""
+        fn = [n for n in ast.walk(self.tree)
+              if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+              and n.name == "save_interrupted_state"][0]
+        body = ast.unparse(fn)
+        self.assertIn("'in_progress'", body,
+                      "the interrupted save never closes in-progress items")
+        self.assertIn("'completed'", body,
+                      "the interrupted save never marks anything completed")
+        # and it must happen BEFORE the state is serialised
+        closes = min((n.lineno for n in ast.walk(fn)
+                      if isinstance(n, ast.Compare)
+                      and any(isinstance(c, ast.Constant) and c.value == "in_progress"
+                              for c in n.comparators)), default=None)
+        serials = min((n.lineno for n in ast.walk(fn)
+                       if isinstance(n, ast.Call)
+                       and getattr(n.func, "id", "") == "serialize_output"), default=None)
+        self.assertIsNotNone(closes)
+        self.assertIsNotNone(serials)
+        self.assertLess(closes, serials,
+                        "in-progress items are closed after the state is "
+                        "serialised, so the saved copy still says Thinking…")
+
     def test_the_name_does_not_promise_only_cancellation(self):
         stale = [n for n in ast.walk(self.tree)
                  if (isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
