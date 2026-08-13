@@ -2170,6 +2170,14 @@ async def chat_completion(
             log.error('Error processing chat payload: %s', error_detail)
             if metadata.get('chat_id') and metadata.get('message_id'):
                 # Update the chat message with the error
+                # PERSISTENCE AND NOTIFICATION ARE GUARDED SEPARATELY. They used
+                # to share one `try`, so an exception from the durable write
+                # jumped straight past both events and the person watching got
+                # NOTHING -- no answer, no error -- for a request that had
+                # definitely ended. A durability failure must not consume the
+                # notification: they are different promises to different
+                # audiences, and only one of them can still be kept when the
+                # database is unhappy.
                 try:
                     if not metadata.get('chat_id', '').startswith('local:') and not metadata.get(
                         'chat_id', ''
@@ -2197,13 +2205,20 @@ async def chat_completion(
                             },
                         )
                         if terminal_written is None:
-                            # The chat is gone. `upsert` returns None and raises
-                            # nothing, so "the await returned" is not "the row
-                            # exists" -- the same claim this stack retired
-                            # elsewhere today.
+                            # NOT "the chat is gone". `update_chat_by_id` folds
+                            # row-absent AND any read/commit/validation failure
+                            # into None -- including a normalized row that was
+                            # already written before the embedded write failed,
+                            # which leaves the two stores disagreeing about a
+                            # chat that very much exists. Report what was
+                            # observed: the write was not confirmed.
                             log.warning(
-                                'request failure terminal was not persisted (chat gone)')
+                                'request failure terminal not confirmed '
+                                '(upsert returned None)')
+                except Exception:
+                    log.warning('request failure terminal write raised')
 
+                try:
                     event_emitter = await get_event_emitter(metadata)
                     if event_emitter:
                         await event_emitter(
@@ -2215,7 +2230,6 @@ async def chat_completion(
                         await event_emitter(
                             {'type': 'chat:tasks:cancel'},
                         )
-
                 except Exception:
                     pass
             else:

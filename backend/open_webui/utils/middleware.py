@@ -3612,8 +3612,14 @@ async def non_streaming_chat_response_handler(response, ctx):
                         # wrote down today. Collecting failed-terminal writes is
                         # worth doing and is a whole grammar change: producer,
                         # ledger kind, dedup key, report consumer, fixture.
+                        #
+                        # NOT "chat gone": None also covers a commit or
+                        # validation failure after the normalized row was
+                        # already written, which leaves two stores disagreeing
+                        # about a chat that exists.
                         log.warning(
-                            'provider error terminal was not persisted (chat gone)')
+                            'provider error terminal not confirmed '
+                            '(upsert returned None)')
                 if isinstance(error, str) or isinstance(error, dict):
                     await event_emitter(
                         {

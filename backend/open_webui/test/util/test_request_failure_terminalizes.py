@@ -72,14 +72,41 @@ class RequestFailureTerminalizesTests(unittest.TestCase):
         a later event can still complete the turn. Marking it done would end a
         turn that is still running — the opposite defect, and the reason this is
         not a blanket "add done to every error write".
-        """
-        payloads = _upsert_payload_keys(_MIDDLEWARE)
-        error_only = [(ln, k) for ln, k in payloads if k == {"error"}]
 
-        self.assertTrue(
-            error_only,
-            "every error write in middleware now terminalizes; the streaming "
-            "path must not, because its loop continues afterwards")
+        BOUND TO THAT WRITE, not to any error-only write in the file. The first
+        version asserted only that SOME `{"error"}` payload existed anywhere in
+        middleware, and three unrelated ones satisfied it — so the exact
+        forbidden mutation survived the test that existed to forbid it.
+        """
+        tree = ast.parse(open(_MIDDLEWARE, encoding="utf-8").read())
+        guarded = []
+        for node in ast.walk(tree):
+            # The streaming site is the upsert in a block whose OWN body then
+            # continues the loop. `ast.walk` for the `continue` was too broad --
+            # it matched any large block containing one anywhere beneath it,
+            # including the newly-terminalized non-streaming write. Direct
+            # children only: the continue must be a sibling of the write.
+            if not isinstance(node, ast.If):
+                continue
+            if not any(isinstance(x, ast.Continue) for x in node.body):
+                continue
+            for call in ast.walk(node):
+                if (isinstance(call, ast.Call)
+                        and getattr(call.func, "attr", None)
+                        == "upsert_message_to_chat_by_id_and_message_id"):
+                    for arg in call.args:
+                        if isinstance(arg, ast.Dict):
+                            guarded.append({
+                                k.value for k in arg.keys
+                                if isinstance(k, ast.Constant)
+                                and isinstance(k.value, str)})
+
+        self.assertTrue(guarded, "could not locate the streaming error write")
+        for keys in guarded:
+            self.assertNotIn(
+                "done", keys,
+                "an upsert inside a block that CONTINUES the stream now marks "
+                "the turn done; that ends a turn which is still running")
 
     def test_the_terminal_write_checks_whether_the_row_exists(self):
         """`upsert` returns None for a vanished chat and raises nothing.
