@@ -4283,7 +4283,14 @@ async def streaming_chat_response_handler(response, ctx):
                         # that knows which one happened.
                         notice = NOTICE_UNDELIVERED
                         try:
-                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                            # THE RETURN VALUE IS THE ANSWER, again. `upsert`
+                            # returns None for a chat that is gone and raises
+                            # nothing, so "the await finished" was never proof
+                            # the banner persisted -- every `notice=written` on
+                            # the ledger was an unchecked claim. The partial-
+                            # answer path one screen up has always tested this;
+                            # these two empty-turn sites did not.
+                            surfaced = await Chats.upsert_message_to_chat_by_id_and_message_id(
                                 metadata['chat_id'],
                                 metadata['message_id'],
                                 {'error': empty_error},
@@ -4292,7 +4299,14 @@ async def streaming_chat_response_handler(response, ctx):
                                 {'type': 'chat:message:error',
                                  'data': {'error': empty_error}}
                             )
-                            notice = NOTICE_WRITTEN
+                            # Still not browser delivery -- `event_emitter`
+                            # returning is emit acceptance, not an
+                            # acknowledgement from anyone's tab. What this now
+                            # honestly means is "the row is on disk and the
+                            # event was accepted", and an unwritten row reads as
+                            # not-explained, which is the safe direction.
+                            if surfaced is not None:
+                                notice = NOTICE_WRITTEN
                         except Exception:
                             log.warning('empty-turn error surface not delivered')
                         # Emitted from failure_surface's own logger, not this one: the
@@ -5602,7 +5616,14 @@ async def streaming_chat_response_handler(response, ctx):
                         # inferred from having reached a line.
                         notice = NOTICE_UNDELIVERED
                         try:
-                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                            # THE RETURN VALUE IS THE ANSWER, again. `upsert`
+                            # returns None for a chat that is gone and raises
+                            # nothing, so "the await finished" was never proof
+                            # the banner persisted -- every `notice=written` on
+                            # the ledger was an unchecked claim. The partial-
+                            # answer path one screen up has always tested this;
+                            # these two empty-turn sites did not.
+                            surfaced = await Chats.upsert_message_to_chat_by_id_and_message_id(
                                 metadata['chat_id'],
                                 metadata['message_id'],
                                 {'error': empty_error},
@@ -5611,7 +5632,14 @@ async def streaming_chat_response_handler(response, ctx):
                                 {'type': 'chat:message:error',
                                  'data': {'error': empty_error}}
                             )
-                            notice = NOTICE_WRITTEN
+                            # Still not browser delivery -- `event_emitter`
+                            # returning is emit acceptance, not an
+                            # acknowledgement from anyone's tab. What this now
+                            # honestly means is "the row is on disk and the
+                            # event was accepted", and an unwritten row reads as
+                            # not-explained, which is the safe direction.
+                            if surfaced is not None:
+                                notice = NOTICE_WRITTEN
                         finally:
                             # See the interrupted path above for why this is not
                             # `log.info`.

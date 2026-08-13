@@ -596,3 +596,44 @@ class RealLibraryClassesTests(unittest.TestCase):
         self.assertEqual("upstream_timeout", fs.classify_exception(TimeoutError()))
         self.assertEqual("peer_disconnected",
                          fs.classify_exception(ConnectionResetError()))
+
+
+class NoticeMustBeObservedTests(unittest.TestCase):
+    """`notice=written` may not be claimed on an unwritten row.
+
+    Both empty-turn sites awaited the upsert and DISCARDED its result, then set
+    NOTICE_WRITTEN. `Chats.upsert_message_to_chat_by_id_and_message_id` returns
+    None for a chat that is gone and raises nothing, so "the await finished" was
+    never proof the banner persisted -- and every `notice=written` on the ledger
+    was an unchecked claim. The partial-answer path one screen up has always
+    tested this; these two did not.
+
+    Checked as source structure because the sites live inside a 6000-line async
+    handler that cannot be imported here. Weaker than executing them, and it is
+    the check that would have caught the defect.
+    """
+
+    def _sites(self):
+        import os
+        import re
+
+        path = os.path.normpath(os.path.join(
+            _HERE, "..", "..", "utils", "middleware.py"))
+        src = open(path, encoding="utf-8").read()
+        return src, [m.start() for m in re.finditer(
+            r"notice = NOTICE_WRITTEN", src)]
+
+    def test_every_notice_written_is_guarded_by_the_upsert_result(self):
+        src, sites = self._sites()
+        self.assertTrue(sites, "no NOTICE_WRITTEN assignment found at all")
+        for start in sites:
+            window = src[max(0, start - 1200):start]
+            self.assertIn("surfaced = await Chats.upsert_message", window)
+            self.assertIn("if surfaced is not None:", src[start - 200:start])
+
+    def test_the_default_stays_undelivered(self):
+        # The safe direction: a reader treats an unknown/undelivered notice as
+        # not-explained. A default of WRITTEN would make a failed surface read
+        # as a user who was told.
+        src, _ = self._sites()
+        self.assertIn("notice = NOTICE_UNDELIVERED", src)
