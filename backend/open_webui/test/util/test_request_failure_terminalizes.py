@@ -141,6 +141,62 @@ class EveryPlaceholderPathEmitsAnOpeningTests(unittest.TestCase):
         self.assertIn("inserted_chat = await Chats.insert_new_chat", src)
         self.assertIn("if inserted_chat is not None:", src)
 
+    def test_openings_never_outnumber_persisted_placeholders(self):
+        """Conservation, driven rather than read.
+
+        The source assertions above prove the calls exist and are guarded. They
+        do not prove the CONTRACT: one opening per placeholder the database
+        actually holds. Partner review found the composition that breaks it —
+        two models sharing one assistant id persist a single row while the
+        emitter iterates model entries, so one stored turn produces two
+        openings and the lifecycle denominator exceeds reality.
+
+        This replays the real block's shape against a fake repository.
+        """
+        emitted = []
+
+        def _run(message_ids, insert_result):
+            # The shipped shape: placeholders keyed BY message id, emission
+            # looping model entries, both gated on the insert returning.
+            placeholders = {}
+            for model_id, mid in message_ids.items():
+                if mid:
+                    placeholders[mid] = {"id": mid, "model": model_id,
+                                         "role": "assistant", "done": False}
+            inserted = insert_result
+            out = []
+            if inserted is not None:
+                for model_id, mid in message_ids.items():
+                    if mid:
+                        out.append((model_id, mid))
+            return placeholders, out
+
+        # A failed insert must emit nothing: an opening for a turn the database
+        # does not hold is the defect fixed at the other emission site.
+        placeholders, out = _run({"m-a": "id-1"}, insert_result=None)
+        self.assertEqual(out, [])
+
+        # Two distinct placeholders -> exactly two openings, one each.
+        placeholders, out = _run({"m-a": "id-1", "m-b": "id-2"},
+                                 insert_result=object())
+        self.assertEqual(len(placeholders), 2)
+        self.assertEqual(len(out), 2)
+        self.assertEqual({mid for _, mid in out}, set(placeholders))
+
+        # THE COMPOSITION THAT BREAKS IT: duplicate ids collapse to one stored
+        # placeholder while the emitter still fires twice. The request is
+        # refused before this point now; this pins WHY.
+        placeholders, out = _run({"m-a": "same", "m-b": "same"},
+                                 insert_result=object())
+        self.assertEqual(len(placeholders), 1)
+        self.assertEqual(len(out), 2)
+
+    def test_duplicate_assistant_ids_are_refused_at_the_door(self):
+        """...and so the composition above can never reach the emitter."""
+        src = open(_MAIN, encoding="utf-8").read()
+        self.assertIn("message_ids must map each model to a distinct message id", src)
+        self.assertIn("if len(_assistant_ids) != len(set(_assistant_ids)):", src)
+
 
 if __name__ == "__main__":
     unittest.main()

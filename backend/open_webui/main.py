@@ -1832,6 +1832,23 @@ async def chat_completion(
         else:
             form_data.pop('id', None)
 
+        # FAIL CLOSED ON DUPLICATE ASSISTANT IDS. `message_ids` arrives as a raw
+        # mapping with no uniqueness check. Placeholders are keyed BY message id,
+        # so two models sharing one id persist a single row -- while everything
+        # downstream still iterates the model entries. One stored turn, two
+        # openings, two tasks: a producer population larger than the durable one,
+        # which is the defect this stack fixed at the other emission site.
+        #
+        # The browser generates UUIDs and never does this; the authenticated API
+        # permits it, and a lifecycle denominator that can exceed reality is
+        # worth refusing at the door rather than reconciling afterwards.
+        _assistant_ids = [mid for mid in message_ids.values() if mid]
+        if len(_assistant_ids) != len(set(_assistant_ids)):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='message_ids must map each model to a distinct message id',
+            )
+
         user_message = form_data.pop('user_message', None) or form_data.pop('parent_message', None)
 
         # Drop tool_servers if caller lacks features.direct_tool_servers —
