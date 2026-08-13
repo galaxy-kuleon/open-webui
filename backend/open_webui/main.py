@@ -568,6 +568,7 @@ from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
 from open_webui.utils import failure_surface
+from open_webui.utils import restart_reconcile
 from open_webui.utils.embeddings import generate_embeddings
 from open_webui.utils.logger import start_logger
 from open_webui.utils.middleware import (
@@ -641,6 +642,80 @@ https://github.com/open-webui/open-webui
         print(f'Open WebUI v{VERSION} - building the best AI user interface.\nhttps://github.com/open-webui/open-webui')
 
 
+async def _reconcile_interrupted_turns(app: FastAPI) -> int:
+    """Terminalize turns the previous process abandoned. Never raises.
+
+    The whole safety argument is `sole_instance`: with Redis configured another
+    worker may be mid-answer on a turn this process can see, and marking that
+    turn interrupted would destroy a live answer. Not knowing is not permission,
+    so it declines and says so rather than doing the work.
+
+    Writes through `update_chat_by_id` rather than
+    `upsert_message_to_chat_by_id_and_message_id`, because that helper moves
+    `history.currentId` to whatever message it wrote -- sweeping with it would
+    reorder what a user sees when they open an old chat, a visible regression
+    traded for an invisible fix.
+    """
+    try:
+        if not restart_reconcile.sole_instance(app.state.redis is not None):
+            log.info(
+                'turn_reconcile_skipped service=owui reason=not_sole_instance')
+            return 0
+        now = time.time()
+        # `Chats.get_chats()` declares skip/limit and ignores both -- it returns
+        # every chat, ordered by `updated_at` DESC. So there is no silent cap to
+        # worry about, and no bound either. The lookback is the bound that
+        # matters: a chat untouched since before it cannot hold a turn this
+        # sweep may rewrite, so the scan stops at the first one.
+        chats = []
+        for chat in await Chats.get_chats():
+            updated = getattr(chat, 'updated_at', None)
+            if isinstance(updated, (int, float)) and (
+                    now - float(updated)
+                    > restart_reconcile.RECONCILE_LOOKBACK_SECONDS):
+                break
+            chats.append(chat)
+        planned = restart_reconcile.plan_reconciliation(chats, now)
+        if not planned:
+            return 0
+        by_chat: dict = {}
+        for chat_id, message_id, message in planned:
+            by_chat.setdefault(chat_id, []).append((message_id, message))
+        written = 0
+        for chat_id, items in by_chat.items():
+            chat = await Chats.get_chat_by_id(chat_id)
+            if chat is None:
+                continue
+            body = chat.chat
+            messages = ((body.get('history') or {}).get('messages') or {})
+            for message_id, message in items:
+                if message_id not in messages:
+                    continue
+                messages[message_id] = restart_reconcile.build_terminal_message(
+                    messages[message_id], chat_id, message_id)
+                written += 1
+                # One marker per turn, through the trusted emitter, so the
+                # ledger can count what this swept and an operator is not left
+                # inferring it from a changed row.
+                failure_surface.log_empty_turn(
+                    messages[message_id]['error'],
+                    failure_surface.PHASE_INTERRUPTED,
+                    chat_id, message_id,
+                    failure_surface.NOTICE_WRITTEN,
+                )
+            await Chats.update_chat_by_id(chat_id, body)
+        log.info(
+            'turn_reconcile_swept service=owui turns=%d chats=%d',
+            written, len(by_chat))
+        return written
+    except Exception as error:  # noqa: BLE001
+        # An observability sweep must never be the reason the app fails to
+        # start. A stack that will not boot is worse than a blank turn.
+        log.warning(
+            'turn_reconcile_failed service=owui error=%s', type(error).__name__)
+        return 0
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Store reference to main event loop for sync->async calls (e.g., embedding generation)
@@ -674,6 +749,11 @@ async def lifespan(app: FastAPI):
 
     if app.state.redis is not None:
         app.state.redis_task_command_listener = asyncio.create_task(redis_task_command_listener(app))
+
+    # FINISH WHAT THE LAST PROCESS DID NOT. Runs after the Redis client is
+    # resolved because that is the fact the safety check needs, and before any
+    # request can be served so a user never sees the half-state.
+    await _reconcile_interrupted_turns(app)
 
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()

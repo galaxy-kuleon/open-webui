@@ -242,6 +242,17 @@ CAUSE_EMPTY_FINALIZED = "finalized_no_answer"
 # as a specific diagnosis of the one boundary it might not have been.
 CAUSE_EMPTY_UNKNOWN = "empty_outcome_unknown"
 
+# The turn was still running when the process that served it went away. NOT a
+# guess: it is written by the startup reconciler, which only ever runs after a
+# previous process has ended, and only on turns that reached no outcome at all.
+#
+# Measured 2026-08-13: two blank turns landed 59s and 1m34s after I recreated
+# the owui container under a real user mid-conversation, and 46 replacements
+# were recorded in six days. On the direct-model path no gateway is in the
+# request, so nothing emitted a shutdown notice and nobody told the person
+# anything. This is what they are told now.
+CAUSE_INTERRUPTED_BY_RESTART = "interrupted_by_restart"
+
 #: Emitted by nothing; READ from historical rows. Every blank turn stored before
 #: 2026-08-13 carries it, and dropping it from the readable set would silently
 #: reclassify real history as unrecognised.
@@ -265,7 +276,7 @@ CAUSE_EMPTY_LEGACY_FLUSH = "db_stream_flush"
 CAUSE_EMPTY_INTERRUPTED = "stream_interrupted"
 
 ALLOWED_CAUSES = frozenset({CAUSE_EMPTY_FINALIZED, CAUSE_EMPTY_INTERRUPTED,
-                           CAUSE_EMPTY_UNKNOWN})
+                           CAUSE_EMPTY_UNKNOWN, CAUSE_INTERRUPTED_BY_RESTART})
 
 #: The cause each phase is allowed to report. Derived, never passed in beside
 #: the phase, so the two cannot disagree -- which is exactly how they came to

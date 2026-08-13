@@ -92,6 +92,10 @@ describe('safeCause (M4 render guard)', () => {
 			[
 				'finalized_no_answer',
 				'empty_outcome_unknown',
+				// The process serving the turn went away. Written at startup by the
+				// reconciler; before it existed such a turn stayed done=false forever
+				// and rendered as an empty bubble with no spinner and no notice.
+				'interrupted_by_restart',
 				'db_stream_flush',
 				'legacy_empty_unknown',
 				'stream_interrupted'
