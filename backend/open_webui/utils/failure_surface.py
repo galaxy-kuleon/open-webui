@@ -70,6 +70,25 @@ _MARKER_LOG = logging.getLogger("open_webui.utils.failure_surface")
 # only layer that can see it when the gateway is not in the path.
 MARKER_EMPTY_REPLY = "empty_reply"
 
+# THE OTHER HALF OF THE LIFECYCLE, and the reason it exists.
+#
+# Measured on the live 8083 database on 2026-08-13: of nine blank assistant turns
+# since the ledger began, FIVE carry no cause anywhere -- `done=False`, no error
+# on the row, and no ledger record of any kind. Four of those five belong to one
+# real user on the direct-model path.
+#
+# The reason is structural, not a missing field. Every marker this module emits
+# is written by the finalizer, so a turn that dies BEFORE the finalizer -- worker
+# death, container replacement, a socket that drops before terminalization --
+# emits nothing at all. Its absence is then indistinguishable from a turn that
+# never happened, and "we have no record" reads as "nothing went wrong".
+#
+# `turn_opened` is written when the assistant placeholder row is created, which
+# is the earliest moment the turn provably exists. An opened turn with no
+# terminal record is an UNTERMINATED turn: the population that was previously
+# invisible by construction.
+MARKER_TURN_OPENED = "turn_opened"
+
 # A turn can finalize empty on two paths, and they mean different things to whoever reads
 # the ledger: `finalized` = the stream ended by itself with nothing rendered; `interrupted`
 # = it was cancelled (user stop, deploy, disconnect) before anything was rendered.
@@ -382,10 +401,60 @@ def log_empty_turn(payload: dict, phase: str, chat_id: str, message_id: str,
             MARKER_EMPTY_REPLY, CAUSE_EMPTY_FINALIZED, type(exc).__name__
         )
         level = logging.WARNING
+    _emit(level, line)
+    return line
+
+
+def _emit(level: int, line: str) -> None:
+    """THE single logging call in this module -- see the module docstring.
+
+    Extracted rather than duplicated: the ledger's self-test walks this file's
+    AST and requires `_MARKER_LOG` to be touched exactly once, as `.log`. That
+    guard is what makes "any line on this logger came from this file" true, so a
+    second emitter has to funnel through here rather than sit beside it.
+    """
     try:
         _MARKER_LOG.log(level, line)
     except Exception:  # noqa: BLE001 -- a broken log sink must not break a turn
         pass
+
+
+def build_turn_opened_marker(chat_id: str, message_id: str, model: str) -> str:
+    """The ledger line for a turn that has provably begun. Ids and a model only.
+
+    `model` is a configured id from this deployment, never user text; it is
+    validated for whitespace like every other field because `_KV_RE` splits on
+    it and a space would silently truncate the record.
+    """
+    for key, val in (("chat", chat_id or ""), ("msg", message_id or ""),
+                     ("model", model or "")):
+        if val != "".join(val.split()):
+            raise ValueError("marker field {!r} contains whitespace: {!r}".format(key, val))
+    return "{} service=owui chat={} msg={} model={}".format(
+        MARKER_TURN_OPENED, chat_id or "-", message_id or "-", model or "-",
+    )
+
+
+def log_turn_opened(chat_id: str, message_id: str, model: str) -> str:
+    """Record that a turn began. Best-effort, and never raises into the caller.
+
+    Same promise as `log_empty_turn` and the same honest limit: when the sink
+    itself is broken there is no channel left to say so. The difference is which
+    direction the silence points. A missing empty-turn marker hides a failure; a
+    missing turn_opened marker hides a turn's EXISTENCE, which would make an
+    unterminated turn look like one that never started -- the exact confusion
+    this marker was added to end. So an unbuildable line is still emitted, with
+    the ids dropped, rather than the turn going unrecorded.
+    """
+    try:
+        line = build_turn_opened_marker(chat_id, message_id, model)
+        level = logging.INFO
+    except Exception as exc:  # noqa: BLE001 -- see docstring
+        line = "{} service=owui chat=- msg=- model=- err={}".format(
+            MARKER_TURN_OPENED, type(exc).__name__
+        )
+        level = logging.WARNING
+    _emit(level, line)
     return line
 
 

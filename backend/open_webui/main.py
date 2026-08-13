@@ -567,6 +567,7 @@ from open_webui.utils.chat import (
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
+from open_webui.utils import failure_surface
 from open_webui.utils.embeddings import generate_embeddings
 from open_webui.utils.logger import start_logger
 from open_webui.utils.middleware import (
@@ -2029,6 +2030,16 @@ async def chat_completion(
                                     'model': target_model_id,
                                     'timestamp': int(time.time()),
                                 },
+                            )
+                            # The turn provably exists from here: the row is
+                            # written. Everything else this stack records about
+                            # a turn is written by the finalizer, so a turn that
+                            # dies first leaves no trace at all -- five such
+                            # turns on live 8083 since 08-08, four of them one
+                            # real user. Best-effort by construction; it must
+                            # never be able to break the turn it is observing.
+                            failure_surface.log_turn_opened(
+                                chat_id, assistant_message_id, target_model_id
                             )
 
         request.state.metadata = metadata

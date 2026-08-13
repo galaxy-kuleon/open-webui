@@ -237,6 +237,74 @@ class TestMiddlewareDerivesCauseFromPhase(unittest.TestCase):
         block = src[i:i + 2000]
         self.assertIn("PHASE_INTERRUPTED", block.split("log_empty_turn", 1)[-1][:200])
 
+class TurnOpenedMarkerTests(unittest.TestCase):
+    """THE DEFECT: a turn that dies before the finalizer left no trace at all.
+
+    Measured on live 8083 on 2026-08-13 -- nine blank assistant turns since the
+    ledger began, five with no cause anywhere: `done=False`, no error on the row,
+    no ledger record of any kind. Every marker this module emitted was written by
+    the finalizer, so the turns that never reached it were invisible by
+    construction, and their absence read as "nothing happened".
+    """
+
+    def test_the_marker_names_the_turn_it_opened(self):
+        line = fs.build_turn_opened_marker("chat-aaaaaaaa", "msg-bbbbbbbb", "hermes-agent")
+
+        self.assertEqual(
+            line,
+            "turn_opened service=owui chat=chat-aaaaaaaa msg=msg-bbbbbbbb "
+            "model=hermes-agent",
+        )
+
+    def test_it_shares_the_join_key_with_the_empty_turn_marker(self):
+        # Without this the two halves of a lifecycle cannot be paired, and
+        # "opened but never terminated" stays uncomputable.
+        payload = fs.build_error_payload("chat-aaaaaaaa", "msg-bbbbbbbb")
+        closed = fs.build_marker(payload, fs.PHASE_FINALIZED, "chat-aaaaaaaa",
+                                 "msg-bbbbbbbb", fs.NOTICE_WRITTEN)
+        opened = fs.build_turn_opened_marker("chat-aaaaaaaa", "msg-bbbbbbbb", "m")
+
+        for field in ("chat=chat-aaaaaaaa", "msg=msg-bbbbbbbb"):
+            self.assertIn(field, opened)
+            self.assertIn(field, closed)
+
+    def test_whitespace_would_silently_truncate_the_record(self):
+        # `_KV_RE` in journey_ledger splits on whitespace: a model id with a
+        # space would file half a record and look like a complete one.
+        with self.assertRaises(ValueError):
+            fs.build_turn_opened_marker("chat-a", "msg-b", "two words")
+
+    def test_a_broken_log_sink_cannot_break_the_turn(self):
+        log = logging.getLogger("open_webui.utils.failure_surface")
+
+        class Exploding(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("sink is down")
+
+        h = Exploding()
+        log.addHandler(h)
+        try:
+            line = fs.log_turn_opened("chat-aaaaaaaa", "msg-bbbbbbbb", "m")
+        finally:
+            log.removeHandler(h)
+        self.assertIn("turn_opened service=owui", line)
+
+    def test_an_unbuildable_marker_is_still_emitted(self):
+        """Opposite direction from the empty-turn marker, on purpose.
+
+        A missing empty-turn marker hides a failure. A missing `turn_opened`
+        hides the turn's EXISTENCE, which turns an unterminated turn back into
+        one that looks like it never started -- exactly the confusion this
+        marker exists to end. So a bad field drops the ids and still records
+        that a turn began.
+        """
+        line = fs.log_turn_opened("chat-a", "msg-b", "two words")
+
+        self.assertTrue(line.startswith("turn_opened service=owui"))
+        self.assertIn("err=ValueError", line)
+        self.assertIn("chat=- msg=-", line)
+
+
 if __name__ == "__main__":
     unittest.main()
 

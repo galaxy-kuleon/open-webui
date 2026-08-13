@@ -4232,6 +4232,15 @@ async def streaming_chat_response_handler(response, ctx):
                 # These two markers must never be summed as attempts: an empty
                 # interrupted turn emits both.
                 log.info(
+                    # NO `msg=` HERE, deliberately. These 14 ledger records
+                    # carry no join key and I went to add one -- but this
+                    # logger is `count-only` precisely because this module also
+                    # logs provider text, so the ledger strips `chat`/`uid`
+                    # from it and would have to trust a message id from the
+                    # same untrusted line. The join key comes from
+                    # `turn_opened` on the identity-trusted marker logger
+                    # instead. Widening a trust boundary for a convenience is
+                    # how the boundary stops meaning anything.
                     'assistant_turn_interrupted service=owui'
                     ' reason=%s failure=%s persisted=%s chat=%s',
                     reason if reason in ('cancelled', 'upstream_read_failed',
