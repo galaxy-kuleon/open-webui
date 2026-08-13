@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { reconcileTasks } from '$lib/utils/task_reconcile';
 	import { v4 as uuidv4 } from 'uuid';
 	import { toast } from 'svelte-sonner';
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
@@ -1470,20 +1471,34 @@
 				// Reconcile active tasks with message state:
 				// If the response is already done, remaining tasks are just background
 				// work (follow-ups, title gen) that shouldn't block the input.
+				// THREE STATES, not two. `.catch(() => [])` turned "I could not ask"
+				// into "there are no tasks", and the else-branch below then marked an
+				// unfinished message done. Combined with the sibling probe above --
+				// whose own failure leaves the active-state map ABSENT, which
+				// ResponseMessage reads as still-active and so suppresses the empty-turn
+				// notice -- two independently defensive catches produce: no text, no
+				// spinner, no notice. Round 55 proved the combination
+				// (task_lookup_failure_becomes_empty, unknown_is_active).
+				//
+				// null means UNKNOWN and must never be reconciled into "finished".
 				const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, $chatId)
 					.then((res) => res?.task_ids ?? [])
-					.catch(() => []);
+					.catch(() => null);
 				const currentMessage = history.currentId ? history.messages[history.currentId] : null;
 				const responseComplete = currentMessage?.role === 'assistant' && currentMessage?.done;
 
-				if (pendingTaskIds.length > 0 && !responseComplete) {
-					taskIds = pendingTaskIds;
-				} else {
-					taskIds = null;
-					// No active tasks and message incomplete → generation was interrupted
-					if (currentMessage?.role === 'assistant' && !currentMessage.done) {
-						currentMessage.done = true;
-					}
+				// One decision, in a tested module. It used to be two branches here
+				// and two independent `.catch()` handlers upstream, which is how a
+				// failed probe came to mean "finished".
+				const decision = reconcileTasks({
+					pendingTaskIds,
+					responseComplete,
+					assistantIncomplete:
+						currentMessage?.role === 'assistant' && !currentMessage.done
+				});
+				taskIds = decision.taskIds;
+				if (decision.markDone && currentMessage) {
+					currentMessage.done = true;
 				}
 
 				await tick();
