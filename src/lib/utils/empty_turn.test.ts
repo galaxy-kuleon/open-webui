@@ -77,7 +77,7 @@ describe('trace id', () => {
 
 describe('safeCause (M4 render guard)', () => {
 	test('passes every canonical cause', () => {
-		expect(safeCause(EMPTY_TURN_CAUSE)).toBe('db_stream_flush');
+		expect(safeCause(EMPTY_TURN_CAUSE)).toBe('finalized_no_answer');
 		expect(safeCause('stream_interrupted')).toBe('stream_interrupted');
 		expect(safeCause('legacy_empty_unknown')).toBe('legacy_empty_unknown');
 		for (const c of ALLOWED_CAUSES) {
@@ -89,7 +89,13 @@ describe('safeCause (M4 render guard)', () => {
 		// assumed: a backend cause absent from here is rendered `unknown` to the
 		// user while every log and the database record it correctly.
 		expect([...ALLOWED_CAUSES].sort()).toEqual(
-			['db_stream_flush', 'legacy_empty_unknown', 'stream_interrupted'].sort()
+			[
+				'finalized_no_answer',
+				'empty_outcome_unknown',
+				'db_stream_flush',
+				'legacy_empty_unknown',
+				'stream_interrupted'
+			].sort()
 		);
 	});
 	test('a non-canonical / raw cause collapses to "unknown" (never rendered raw)', () => {
@@ -108,9 +114,9 @@ describe('emptyTurnView (no raw content ever reaches the UI)', () => {
 			{ id: 'msg45678cafef00d', error: { content: RAW, cause: EMPTY_TURN_CAUSE, trace_id: 't-chat1234-msg45678' } },
 			'chat1234cafef00d'
 		);
-		expect(v.cause).toBe('db_stream_flush');
+		expect(v.cause).toBe('finalized_no_answer');
 		expect(v.traceId).toBe('t-chat1234-msg45678');
-		expect(v.banner).toBe(buildBanner('db_stream_flush', 't-chat1234-msg45678'));
+		expect(v.banner).toBe(buildBanner('finalized_no_answer', 't-chat1234-msg45678'));
 		// the backend error.content (which carried RAW here) is NOT rendered
 		expect(v.banner).not.toContain('RAW_CLIENT_MATTER_123');
 		expect(JSON.stringify(v)).not.toContain('RAW_CLIENT_MATTER_123');
@@ -161,7 +167,7 @@ describe('emptyTurnView (no raw content ever reaches the UI)', () => {
 		// from before the producer existed lands here too.
 		const v = emptyTurnView({ id: 'msg45678aaaa', role: 'assistant', content: '', done: false }, 'chat1234bbbb');
 		expect(v.cause).toBe('legacy_empty_unknown');
-		expect(v.cause).not.toBe('db_stream_flush');
+		expect(v.cause).not.toBe('finalized_no_answer');
 		expect(v.traceId).toBe('t-chat1234-msg45678');
 		expect(v.banner).toContain('legacy_empty_unknown');
 		expect(v.banner).toContain('t-chat1234-msg45678');
@@ -179,6 +185,6 @@ describe('emptyTurnView (no raw content ever reaches the UI)', () => {
 		expect(v.cause).toBe('stream_interrupted');
 		expect(v.banner).toContain('stream_interrupted');
 		expect(v.banner).not.toContain('unknown');
-		expect(v.banner).not.toContain('db_stream_flush');
+		expect(v.banner).not.toContain('finalized_no_answer');
 	});
 });

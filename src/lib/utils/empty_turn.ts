@@ -16,10 +16,25 @@
  * backend bug emitted one.
  */
 
-// Canonical bucketed cause label. Mirrors failure_surface.CAUSE_EMPTY_FINALIZED and
-// scripts/ops/openwebui_8083_chat_triage.py CAUSES['db_stream_flush'] (task ended but the
-// final assistant message is empty/done=false). Keep in sync by hand (separate runtimes).
-export const EMPTY_TURN_CAUSE = 'db_stream_flush';
+// The turn finalized and there was no answerable output. Mirrors
+// failure_surface.CAUSE_EMPTY_FINALIZED. Keep in sync by hand (separate runtimes).
+//
+// This was 'db_stream_flush' until 2026-08-13 — "the answer completed and the write did
+// not", which no code ever observed: the finalizer writes to the database FIRST and only
+// then notices there is no answerable output, so a failed write would not have reached the
+// label at all. Every layer preserved that invented diagnosis perfectly, and the person
+// reading the banner had no way to disagree with it.
+export const EMPTY_TURN_CAUSE = 'finalized_no_answer';
+
+// The boundary could not be classified. Previously the backend's unknown-phase fallback
+// borrowed the finalized cause, so "we could not tell what happened" was reported as a
+// specific diagnosis of one thing it might not have been.
+export const EMPTY_TURN_CAUSE_UNKNOWN_OUTCOME = 'empty_outcome_unknown';
+
+// EMITTED BY NOTHING, still rendered. Every blank turn stored before 2026-08-13 carries
+// this label; dropping it from the permitted set would make real history render as
+// 'unknown' — a reader would see the stack forget its own past rather than correct it.
+export const EMPTY_TURN_CAUSE_LEGACY_FLUSH = 'db_stream_flush';
 
 // The turn ended EARLY and delivered nothing: a stop, a lost client, a shutdown. Mirrors
 // failure_surface.CAUSE_EMPTY_INTERRUPTED. Without it here the backend could record the
@@ -40,6 +55,8 @@ export const EMPTY_TURN_CAUSE_LEGACY = 'legacy_empty_unknown';
 export const ALLOWED_CAUSES: ReadonlySet<string> = new Set([
 	EMPTY_TURN_CAUSE,
 	EMPTY_TURN_CAUSE_INTERRUPTED,
+	EMPTY_TURN_CAUSE_UNKNOWN_OUTCOME,
+	EMPTY_TURN_CAUSE_LEGACY_FLUSH,
 	EMPTY_TURN_CAUSE_LEGACY
 ]);
 
@@ -94,10 +111,18 @@ export const makeTraceId = (chatId?: string, messageId?: string): string =>
 export const safeCause = (cause: unknown): string =>
 	typeof cause === 'string' && ALLOWED_CAUSES.has(cause) ? cause : 'unknown';
 
-/** Single source of the visible banner text — composed ONLY from cause + trace id. */
+/**
+ * Single source of the visible banner text — composed ONLY from cause + trace id.
+ *
+ * "Nothing was delivered" is gone, and it was the more expensive half. The server knows
+ * there is no answerable output stored; it does not know what reached this browser.
+ * Reasoning, status and tool markup may already be on screen, and `await sio.emit` is emit
+ * acceptance, not an acknowledgement from anyone's tab. Telling a person nothing arrived
+ * when something did sends them to retry work they can see in front of them.
+ */
 export const buildBanner = (cause: string, traceId: string): string =>
-	`This response finished without any content (cause: ${cause}). ` +
-	`Nothing was delivered — retry, or share trace ${traceId} with ops.`;
+	`This turn ended without a final answer (cause: ${cause}). ` +
+	`Retry, or share trace ${traceId} with ops.`;
 
 export interface EmptyTurnView {
 	cause: string;

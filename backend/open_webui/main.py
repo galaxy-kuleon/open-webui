@@ -2017,7 +2017,7 @@ async def chat_completion(
                     # Save each assistant placeholder
                     for target_model_id, assistant_message_id in message_ids.items():
                         if assistant_message_id:
-                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                            placeholder = await Chats.upsert_message_to_chat_by_id_and_message_id(
                                 chat_id,
                                 assistant_message_id,
                                 {
@@ -2031,16 +2031,22 @@ async def chat_completion(
                                     'timestamp': int(time.time()),
                                 },
                             )
-                            # The turn provably exists from here: the row is
-                            # written. Everything else this stack records about
-                            # a turn is written by the finalizer, so a turn that
-                            # dies first leaves no trace at all -- five such
-                            # turns on live 8083 since 08-08, four of them one
-                            # real user. Best-effort by construction; it must
-                            # never be able to break the turn it is observing.
-                            failure_surface.log_turn_opened(
-                                chat_id, assistant_message_id, target_model_id
-                            )
+                            # THE RETURN VALUE IS THE PROOF. Everything else
+                            # this stack records about a turn is written by the
+                            # finalizer, so a turn that dies first leaves no
+                            # trace at all -- five such turns on live 8083 since
+                            # 08-08, four of them one real user. But `upsert`
+                            # returns None for a chat that is gone and raises
+                            # nothing, so "the await returned" is not "the row
+                            # exists". Logging regardless would put a turn in
+                            # the lifecycle denominator that the database never
+                            # held, inflating the very count this marker feeds.
+                            # Best-effort by construction: it must never be able
+                            # to break the turn it is observing.
+                            if placeholder is not None:
+                                failure_surface.log_turn_opened(
+                                    chat_id, assistant_message_id, target_model_id
+                                )
 
         request.state.metadata = metadata
         form_data['metadata'] = metadata

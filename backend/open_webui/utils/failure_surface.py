@@ -217,8 +217,35 @@ def classify_exception(exc) -> str:
     return FAILURE_KIND_UNCLASSIFIED
 
 
-# Bucketed, DB-signal-derivable cause label (mirrors chat_triage CAUSES['db_stream_flush']).
-CAUSE_EMPTY_FINALIZED = "db_stream_flush"
+# WHAT THE FINALIZER ACTUALLY SAW, which is not what this used to say.
+#
+# This was `db_stream_flush` -- "the answer completed and the write did not". No
+# code observed that. The normal finalization path writes done/content/output to
+# the database FIRST, discards the return value, and only afterwards notices
+# there is no answerable output and asks for a label. If that write had really
+# failed, execution would not have reached the label at all.
+#
+# So every normally-finalized blank -- a provider EOF with nothing in it, a
+# reasoning-only completion, anything -- told the user a persistence story, and
+# every layer below faithfully preserved it: the banner they read, the frontend,
+# the ledger, the ops report. Nothing in the chain could disagree, because
+# nothing in the chain had measured it. Partner review round 59 ranked it the
+# highest-harm inferred label in the stack for exactly that reason.
+#
+# The honest label names the observation: the turn finalized and there was no
+# answerable output. If a persistence cause is ever wanted, it needs a NEW
+# observation -- the upsert return checked at the write site -- not a rename.
+CAUSE_EMPTY_FINALIZED = "finalized_no_answer"
+
+# ...and an unknown phase is its own answer. It used to fall back to the
+# finalized cause, so "we could not tell which boundary this was" was reported
+# as a specific diagnosis of the one boundary it might not have been.
+CAUSE_EMPTY_UNKNOWN = "empty_outcome_unknown"
+
+#: Emitted by nothing; READ from historical rows. Every blank turn stored before
+#: 2026-08-13 carries it, and dropping it from the readable set would silently
+#: reclassify real history as unrecognised.
+CAUSE_EMPTY_LEGACY_FLUSH = "db_stream_flush"
 
 # The CANONICAL set of cause labels this slice is permitted to emit. It is a subset/alias of
 # scripts/ops/openwebui_8083_chat_triage.py ``CAUSES``. It is enforced FAIL-LOUD in
@@ -237,7 +264,8 @@ CAUSE_EMPTY_FINALIZED = "db_stream_flush"
 # something the database never touched.
 CAUSE_EMPTY_INTERRUPTED = "stream_interrupted"
 
-ALLOWED_CAUSES = frozenset({CAUSE_EMPTY_FINALIZED, CAUSE_EMPTY_INTERRUPTED})
+ALLOWED_CAUSES = frozenset({CAUSE_EMPTY_FINALIZED, CAUSE_EMPTY_INTERRUPTED,
+                           CAUSE_EMPTY_UNKNOWN})
 
 #: The cause each phase is allowed to report. Derived, never passed in beside
 #: the phase, so the two cannot disagree -- which is exactly how they came to
@@ -251,11 +279,14 @@ CAUSE_FOR_PHASE = {
 def cause_for_phase(phase: str) -> str:
     """The cause label that matches an empty turn's phase.
 
-    An unknown phase falls back to the finalized cause rather than raising: a
-    banner is the last thing standing between a user and a blank box, and it
-    must not be the thing that fails. The phase itself is validated elsewhere.
+    An unknown phase does not raise -- a banner is the last thing standing
+    between a user and a blank box, and it must not be the thing that fails --
+    but it no longer borrows the finalized cause either. "We could not tell
+    which boundary this was" is a different fact from "it finalized with no
+    answer", and reporting the second for the first is how an unclassified
+    turn acquires a specific diagnosis nobody measured.
     """
-    return CAUSE_FOR_PHASE.get(phase, CAUSE_EMPTY_FINALIZED)
+    return CAUSE_FOR_PHASE.get(phase, CAUSE_EMPTY_UNKNOWN)
 
 # The ONLY keys permitted in an assistant-message ``error`` payload that crosses the
 # privacy boundary (M4). Anything else is a fail-loud bug.
@@ -461,6 +492,12 @@ def log_turn_opened(chat_id: str, message_id: str, model: str) -> str:
 def build_banner(cause: str, trace_id: str) -> str:
     """The single source of the visible error banner text (cause + trace id only)."""
     return (
-        "This response finished without any content (cause: {}). "
-        "Nothing was delivered — retry, or share trace {} with ops."
+        # "Nothing was delivered" was never observed. The server knows there
+        # is no answerable output stored; it does not know what reached the
+        # browser -- reasoning, status and tool markup may already be on screen,
+        # and `await sio.emit` is emit acceptance, not a browser acknowledgement.
+        # Telling someone nothing arrived when something did sends them to retry
+        # work they can already see.
+        "This turn ended without a final answer (cause: {}). "
+        "Retry, or share trace {} with ops."
     ).format(cause, trace_id)

@@ -62,7 +62,12 @@ class TestTraceId(unittest.TestCase):
 
 class TestErrorPayload(unittest.TestCase):
     def test_default_cause_is_db_signal_label(self):
-        self.assertEqual(fs.CAUSE_EMPTY_FINALIZED, "db_stream_flush")
+        # NOT "db_stream_flush" any more. That label said the answer completed
+        # and the write did not -- which the finalizer never observed, because it
+        # writes to the database FIRST and only then notices there is no
+        # answerable output. This pins the label to the observation.
+        self.assertEqual(fs.CAUSE_EMPTY_FINALIZED, "finalized_no_answer")
+        self.assertNotIn("db_stream_flush", fs.ALLOWED_CAUSES)
 
     def test_payload_has_only_allow_listed_keys(self):
         p = fs.build_error_payload("deadbeefcafef00d", "0123456789abcdef")
@@ -71,7 +76,7 @@ class TestErrorPayload(unittest.TestCase):
 
     def test_payload_carries_cause_and_trace_only_no_raw_content(self):
         p = fs.build_error_payload("deadbeefcafef00d", "0123456789abcdef")
-        self.assertEqual(p["cause"], "db_stream_flush")
+        self.assertEqual(p["cause"], "finalized_no_answer")
         self.assertEqual(p["trace_id"], "t-deadbeef-01234567")
         # content is exactly the fixed banner from cause+trace — nothing else can be in it
         self.assertEqual(p["content"], fs.build_banner(p["cause"], p["trace_id"]))
@@ -98,7 +103,7 @@ class TestErrorPayload(unittest.TestCase):
         # a content not reconstructible from cause+trace (e.g. raw content spliced in) → fail
         with self.assertRaises(ValueError):
             fs.assert_privacy_safe({"content": "Secret client matter text",
-                                    "cause": "db_stream_flush", "trace_id": "t-a-b"})
+                                    "cause": "finalized_no_answer", "trace_id": "t-a-b"})
 
     # ── canonical-cause fail-loud (Codex NO-PASS fix) ─────────────────────────
     def test_build_error_payload_rejects_non_canonical_cause(self):
@@ -107,14 +112,14 @@ class TestErrorPayload(unittest.TestCase):
             fs.build_error_payload("chat1234", "msg45678", cause="RAW_CLIENT_MATTER_123")
 
     def test_build_error_payload_rejects_arbitrary_strings(self):
-        for bad in ("", "ui_render_only_TYPO", "provider outage", "<script>", "db_stream_flush "):
+        for bad in ("", "ui_render_only_TYPO", "provider outage", "<script>", "finalized_no_answer "):
             with self.subTest(cause=bad):
                 with self.assertRaises(ValueError):
                     fs.build_error_payload("c1234567", "m1234567", cause=bad)
 
     def test_valid_canonical_cause_works(self):
         p = fs.build_error_payload("c1234567", "m1234567", cause=fs.CAUSE_EMPTY_FINALIZED)
-        self.assertEqual(p["cause"], "db_stream_flush")
+        self.assertEqual(p["cause"], "finalized_no_answer")
         self.assertIn(p["cause"], fs.ALLOWED_CAUSES)
 
     def test_assert_privacy_safe_rejects_non_canonical_cause(self):
@@ -135,10 +140,17 @@ class TestErrorPayload(unittest.TestCase):
 
 class TestVocabularySingleSourced(unittest.TestCase):
     def test_allowed_causes_is_subset_of_triage_CAUSES_when_reachable(self):
-        # Single-sourcing-against-drift guard: the local ALLOWED_CAUSES must be a SUBSET of
-        # scripts/ops/openwebui_8083_chat_triage.py CAUSES. Fails LOUD on divergence when the
+        # Single-sourcing-against-drift guard: every label this module may emit must appear
+        # in the parent repo's declared vocabulary. Fails LOUD on divergence when the
         # parent-repo layout is reachable (host CI); skipped inside the owui container, which
         # cannot import the parent-repo ops script (hence this enforcement lives at test time).
+        #
+        # AGAINST THE UNION OF BOTH PRODUCER LISTS, not against `CAUSES` alone. `CAUSES` is
+        # the triage CLASSIFIER's output set, and that module's own self-test requires every
+        # member of it to be returnable by `classify()`. A label this module emits and that
+        # classifier never returns therefore cannot live there: as a member it is decorative
+        # coverage, and as an omission it is drift here. The two invariants contradicted the
+        # moment a second producer existed. One list per producer, one union for readers.
         triage_path = os.path.normpath(os.path.join(
             _HERE, "..", "..", "..", "..", "..", "scripts", "ops", "openwebui_8083_chat_triage.py"))
         if not os.path.exists(triage_path):
@@ -146,9 +158,17 @@ class TestVocabularySingleSourced(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("chat_triage", triage_path)
         triage = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(triage)
-        drift = set(fs.ALLOWED_CAUSES) - set(triage.CAUSES)
+        declared = set(triage.CAUSES) | set(getattr(triage, "PRODUCER_CAUSES", ()))
+        drift = set(fs.ALLOWED_CAUSES) - declared
         self.assertEqual(drift, set(),
-                         "ALLOWED_CAUSES drifted from triage.CAUSES: {}".format(sorted(drift)))
+                         "ALLOWED_CAUSES drifted from the declared vocabulary: {}".format(
+                             sorted(drift)))
+        # ...and the reverse for THIS producer's own list: a label declared as ours that we
+        # cannot emit is the same decorative coverage, one file over.
+        stale = set(getattr(triage, "PRODUCER_CAUSES", ())) - set(fs.ALLOWED_CAUSES)
+        self.assertEqual(stale, set(),
+                         "PRODUCER_CAUSES lists labels failure_surface cannot emit: {}".format(
+                             sorted(stale)))
 
 
 
@@ -176,10 +196,23 @@ class TestCauseMatchesPhase(unittest.TestCase):
         for phase in fs.ALLOWED_PHASES:
             self.assertIn(fs.cause_for_phase(phase), fs.ALLOWED_CAUSES, phase)
 
-    def test_an_unknown_phase_falls_back_rather_than_raising(self):
+    def test_an_unknown_phase_says_unknown_instead_of_borrowing(self):
         # A banner is the last thing between a user and a blank box; it must not
-        # be the thing that fails.
-        self.assertEqual(fs.CAUSE_EMPTY_FINALIZED, fs.cause_for_phase("nonsense"))
+        # be the thing that fails -- but it must not invent a diagnosis either.
+        # This used to return the FINALIZED cause, so "we could not tell which
+        # boundary this was" reached the user as a specific claim about one of
+        # them.
+        self.assertEqual(fs.CAUSE_EMPTY_UNKNOWN, fs.cause_for_phase("nonsense"))
+        self.assertNotEqual(fs.CAUSE_EMPTY_FINALIZED, fs.cause_for_phase("nonsense"))
+
+    def test_the_banner_no_longer_claims_what_reached_the_browser(self):
+        # "Nothing was delivered" was never observed: reasoning, status and tool
+        # markup may already be on screen, and `await sio.emit` is emit
+        # acceptance, not a browser acknowledgement.
+        banner = fs.build_banner(fs.CAUSE_EMPTY_FINALIZED, "t-a-b")
+        self.assertNotIn("Nothing was delivered", banner)
+        self.assertIn("without a final answer", banner)
+        self.assertIn("t-a-b", banner)
 
     def test_the_banner_carries_the_interrupted_cause_end_to_end(self):
         payload = fs.build_error_payload(
