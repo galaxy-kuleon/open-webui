@@ -31,12 +31,12 @@ export const EMPTY_TURN_CAUSE = 'finalized_no_answer';
 // specific diagnosis of one thing it might not have been.
 export const EMPTY_TURN_CAUSE_UNKNOWN_OUTCOME = 'empty_outcome_unknown';
 
-// The process serving this turn went away before it could finish. Written at STARTUP by
-// the reconciler, which reasons backwards: the previous process is gone, so whatever it
-// left unfinished is finished now. Before this, such a turn stayed done=false forever and
-// rendered as an empty bubble with no spinner and no notice -- indistinguishable from a
-// turn that never happened.
-export const EMPTY_TURN_CAUSE_RESTART = 'interrupted_by_restart';
+// RETIRED THE SAME DAY IT SHIPPED, still rendered. A startup sweep wrote this on turns it
+// found unfinished, asserting a cause it never observed -- no process, no owner, no
+// generation. Review returned NO-PASS and the sweep is now read-only. Three real rows carry
+// the label; dropping it here would render their banner as 'unknown', so the stack would
+// appear to forget its own mistake rather than name it.
+export const EMPTY_TURN_CAUSE_RESTART_RETIRED = 'interrupted_by_restart';
 
 // EMITTED BY NOTHING, still rendered. Every blank turn stored before 2026-08-13 carries
 // this label; dropping it from the permitted set would make real history render as
@@ -63,7 +63,7 @@ export const ALLOWED_CAUSES: ReadonlySet<string> = new Set([
 	EMPTY_TURN_CAUSE,
 	EMPTY_TURN_CAUSE_INTERRUPTED,
 	EMPTY_TURN_CAUSE_UNKNOWN_OUTCOME,
-	EMPTY_TURN_CAUSE_RESTART,
+	EMPTY_TURN_CAUSE_RESTART_RETIRED,
 	EMPTY_TURN_CAUSE_LEGACY_FLUSH,
 	EMPTY_TURN_CAUSE_LEGACY
 ]);

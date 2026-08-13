@@ -41,7 +41,7 @@ class _Chat:
         self.chat = {"history": {"messages": messages, "currentId": "keep-me"}}
 
 
-class ShouldTerminalizeTests(unittest.TestCase):
+class LooksUnfinishedTests(unittest.TestCase):
     """THE DEFECT: a turn whose process died stayed done=false forever.
 
     Measured on live 8083 on 2026-08-13 -- three such turns, two of them landing
@@ -50,99 +50,102 @@ class ShouldTerminalizeTests(unittest.TestCase):
     never happened.
     """
 
-    def test_the_abandoned_shape_is_terminalized(self):
-        self.assertTrue(rr.should_terminalize(_msg(), NOW))
+    def test_the_abandoned_shape_is_counted(self):
+        self.assertTrue(rr.looks_unfinished(_msg(), NOW))
 
     def test_a_turn_with_content_is_left_alone(self):
         # The user got something. Whatever happened next, it was not nothing.
-        self.assertFalse(rr.should_terminalize(_msg(content="partial answer"), NOW))
+        self.assertFalse(rr.looks_unfinished(_msg(content="partial answer"), NOW))
 
     def test_a_finished_turn_is_left_alone(self):
-        self.assertFalse(rr.should_terminalize(_msg(done=True), NOW))
+        self.assertFalse(rr.looks_unfinished(_msg(done=True), NOW))
 
     def test_a_turn_that_already_explains_itself_is_left_alone(self):
         # An error means some finalizer reached it and said why. Overwriting
         # that would replace a specific cause with a general one.
         self.assertFalse(
-            rr.should_terminalize(_msg(error={"cause": "stream_interrupted"}), NOW))
+            rr.looks_unfinished(_msg(error={"cause": "stream_interrupted"}), NOW))
 
     def test_a_user_message_is_never_touched(self):
-        self.assertFalse(rr.should_terminalize(_msg(role="user"), NOW))
+        self.assertFalse(rr.looks_unfinished(_msg(role="user"), NOW))
 
     def test_an_old_turn_is_history_not_a_pending_answer(self):
         old = _msg(timestamp=NOW - rr.RECONCILE_LOOKBACK_SECONDS - 1)
-        self.assertFalse(rr.should_terminalize(old, NOW))
+        self.assertFalse(rr.looks_unfinished(old, NOW))
 
     def test_a_turn_with_no_timestamp_is_refused(self):
         # The lookback is the only bound this sweep has. A row it cannot place
         # in time is a row it cannot promise not to rewrite from last month.
-        self.assertFalse(rr.should_terminalize(_msg(timestamp=None), NOW))
+        self.assertFalse(rr.looks_unfinished(_msg(timestamp=None), NOW))
 
     def test_a_turn_from_the_future_is_refused(self):
         # Clock skew, not a pending answer. Negative age fails the bound.
-        self.assertFalse(rr.should_terminalize(_msg(timestamp=NOW + 600), NOW))
+        self.assertFalse(rr.looks_unfinished(_msg(timestamp=NOW + 600), NOW))
 
 
-class SoleInstanceTests(unittest.TestCase):
-    def test_it_refuses_to_run_when_another_instance_could_be_serving(self):
-        # THE SAFETY ARGUMENT. With Redis configured another worker may be
-        # mid-answer on a turn this process can see, and marking that turn
-        # interrupted would destroy a live answer. Not knowing is not
-        # permission.
-        self.assertFalse(rr.sole_instance(redis_configured=True))
+class CountUnfinishedTests(unittest.TestCase):
+    """It COUNTS. The mutating version of this was reverted the day it shipped.
 
-    def test_it_runs_when_nothing_else_can_be(self):
-        self.assertTrue(rr.sole_instance(redis_configured=False))
+    Round 62 returned NO-PASS on four boundaries: `redis is None` is not an
+    ownership test (UVICORN_WORKERS is configurable and a second container on
+    the same volume is invisible), the whole-chat replacement erased a
+    concurrently arriving answer in a race probe, it bypassed the normalized
+    `chat_message` store, and `update_chat_by_id` bumps `updated_at` -- which
+    chat lists sort on, so every swept chat jumped to the top of its owner's
+    list.
+    """
 
-
-class PlanTests(unittest.TestCase):
-    def test_it_finds_the_abandoned_turn_and_only_that_one(self):
+    def test_it_counts_the_unfinished_turn_and_only_that_one(self):
         chats = [_Chat("c1", {"a": _msg(), "b": _msg(done=True),
                               "c": _msg(content="hi"), "u": _msg(role="user")})]
-        planned = rr.plan_reconciliation(chats, NOW)
+        self.assertEqual(rr.count_unfinished(chats, NOW), (1, 1, False))
 
-        self.assertEqual([(c, m) for c, m, _ in planned], [("c1", "a")])
-
-    def test_the_cap_bounds_a_bad_predicate(self):
+    def test_the_cap_says_it_capped(self):
+        # A truncated count that does not say so reads exactly like a complete
+        # one, and the operator cannot tell a quiet night from an early stop.
         many = {str(i): _msg() for i in range(50)}
-        planned = rr.plan_reconciliation([_Chat("c1", many)], NOW, limit=10)
+        turns, _, capped = rr.count_unfinished([_Chat("c1", many)], NOW, limit=10)
+        self.assertEqual(turns, 10)
+        self.assertTrue(capped)
 
-        self.assertEqual(len(planned), 10)
+    def test_an_uncapped_count_says_so(self):
+        turns, _, capped = rr.count_unfinished([_Chat("c1", {"a": _msg()})], NOW)
+        self.assertEqual((turns, capped), (1, False))
 
-    def test_a_malformed_chat_does_not_stop_the_sweep(self):
+    def test_a_malformed_chat_does_not_stop_the_count(self):
         class Broken:
             id = "b"
             chat = "not-a-dict"
 
-        planned = rr.plan_reconciliation([Broken(), _Chat("c1", {"a": _msg()})], NOW)
-        self.assertEqual([(c, m) for c, m, _ in planned], [("c1", "a")])
+        self.assertEqual(
+            rr.count_unfinished([Broken(), _Chat("c1", {"a": _msg()})], NOW),
+            (1, 1, False))
 
+    def test_counting_does_not_MODIFY_what_it_counts(self):
+        """A read-only function must leave its input identical.
 
-class TerminalMessageTests(unittest.TestCase):
-    def test_it_carries_the_restart_cause_and_a_banner(self):
-        out = rr.build_terminal_message(_msg(), "chat1234", "msg45678")
+        Registered after a mutant that set `done=True` on each counted message
+        SURVIVED: the count was unchanged, so nothing noticed the write. In the
+        live caller those dicts are the chat body about to be handed back, so an
+        in-memory mutation here is the first half of exactly the destructive
+        boundary this module was reverted for.
+        """
+        import copy
 
-        self.assertTrue(out["done"])
-        self.assertEqual(out["error"]["cause"], "interrupted_by_restart")
-        self.assertIn("interrupted_by_restart", out["error"]["content"])
-        self.assertIn(out["error"]["trace_id"], out["error"]["content"])
+        chats = [_Chat("c1", {"a": _msg(), "b": _msg(done=True),
+                              "c": _msg(content="hi")})]
+        before = copy.deepcopy(chats[0].chat)
+        rr.count_unfinished(chats, NOW)
 
-    def test_it_preserves_every_other_field(self):
-        # A sweep that drops `model` or `parentId` breaks the thread the user
-        # reads, in exchange for a banner.
-        original = _msg(model="hermes-agent", parentId="p1", childrenIds=[])
-        out = rr.build_terminal_message(original, "c", "m")
+        self.assertEqual(chats[0].chat, before)
 
-        for key in ("model", "parentId", "childrenIds", "role", "timestamp"):
-            self.assertEqual(out[key], original[key], key)
-
-    def test_the_banner_goes_through_the_shared_builder(self):
-        # Not a second banner composed here: one place builds the sentence, so
-        # the two cannot drift and the M4 boundary is enforced once.
-        out = rr.build_terminal_message(_msg(), "chat1234", "msg45678")
-        expected = fs.build_error_payload(
-            "chat1234", "msg45678", cause=fs.CAUSE_INTERRUPTED_BY_RESTART)
-        self.assertEqual(out["error"], expected)
+    def test_the_module_can_no_longer_write_anything(self):
+        # THE REVERT, pinned. A future edit that re-adds a mutating helper here
+        # has to delete this test to do it, which is a visible decision rather
+        # than a quiet reintroduction of a destructive boundary.
+        for gone in ("build_terminal_message", "plan_reconciliation",
+                     "sole_instance", "should_terminalize"):
+            self.assertFalse(hasattr(rr, gone), gone)
 
 
 if __name__ == "__main__":

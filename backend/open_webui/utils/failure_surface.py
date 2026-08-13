@@ -242,16 +242,19 @@ CAUSE_EMPTY_FINALIZED = "finalized_no_answer"
 # as a specific diagnosis of the one boundary it might not have been.
 CAUSE_EMPTY_UNKNOWN = "empty_outcome_unknown"
 
-# The turn was still running when the process that served it went away. NOT a
-# guess: it is written by the startup reconciler, which only ever runs after a
-# previous process has ended, and only on turns that reached no outcome at all.
+# RETIRED THE SAME DAY IT SHIPPED, and readable forever after.
 #
-# Measured 2026-08-13: two blank turns landed 59s and 1m34s after I recreated
-# the owui container under a real user mid-conversation, and 46 replacements
-# were recorded in six days. On the direct-model path no gateway is in the
-# request, so nothing emitted a shutdown notice and nobody told the person
-# anything. This is what they are told now.
-CAUSE_INTERRUPTED_BY_RESTART = "interrupted_by_restart"
+# It was written by a startup sweep that marked unfinished turns as interrupted
+# by a restart. Adversarial review returned NO-PASS: nothing in that predicate
+# observed a process, an owner or a generation -- only that startup found a row
+# unfinished -- so the label asserted a cause it had not measured, which is the
+# exact defect `db_stream_flush` was retired for hours earlier.
+#
+# Three real rows on live 8083 carry it. Their original causes were never
+# recorded, so rewriting them back would swap one guess for another; they stay,
+# and this stays readable so a reader meeting one knows what it does and does
+# not mean. It is deliberately NOT in ALLOWED_CAUSES: nothing may emit it again.
+CAUSE_INTERRUPTED_BY_RESTART_RETIRED = "interrupted_by_restart"
 
 #: Emitted by nothing; READ from historical rows. Every blank turn stored before
 #: 2026-08-13 carries it, and dropping it from the readable set would silently
@@ -276,7 +279,7 @@ CAUSE_EMPTY_LEGACY_FLUSH = "db_stream_flush"
 CAUSE_EMPTY_INTERRUPTED = "stream_interrupted"
 
 ALLOWED_CAUSES = frozenset({CAUSE_EMPTY_FINALIZED, CAUSE_EMPTY_INTERRUPTED,
-                           CAUSE_EMPTY_UNKNOWN, CAUSE_INTERRUPTED_BY_RESTART})
+                           CAUSE_EMPTY_UNKNOWN})
 
 #: The cause each phase is allowed to report. Derived, never passed in beside
 #: the phase, so the two cannot disagree -- which is exactly how they came to
