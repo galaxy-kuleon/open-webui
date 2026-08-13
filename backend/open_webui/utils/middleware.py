@@ -3591,13 +3591,29 @@ async def non_streaming_chat_response_handler(response, ctx):
                 log.error('Provider returned error (non-streaming): %s', error)
 
                 if not metadata.get('chat_id', '').startswith('channel:'):
-                    await Chats.upsert_message_to_chat_by_id_and_message_id(
+                    # TERMINAL. This is the non-streaming path: the provider
+                    # returned an error object and the handler returns straight
+                    # afterwards, so no completion writer follows. Deliberately
+                    # NOT applied to the streaming error write, where the loop
+                    # continues and a later event can still finish the turn.
+                    if await Chats.upsert_message_to_chat_by_id_and_message_id(
                         metadata['chat_id'],
                         metadata['message_id'],
                         {
+                            'done': True,
                             'error': {'content': error},
                         },
-                    )
+                    ) is None:
+                        # PLAIN DIAGNOSTIC, deliberately not marker-shaped. The
+                        # ledger's completeness check caught the first version
+                        # wearing `<name> service=owui`, which is the grammar of
+                        # a COLLECTED marker -- and adding a producer without
+                        # teaching its consumer is the exact rule this stack
+                        # wrote down today. Collecting failed-terminal writes is
+                        # worth doing and is a whole grammar change: producer,
+                        # ledger kind, dedup key, report consumer, fixture.
+                        log.warning(
+                            'provider error terminal was not persisted (chat gone)')
                 if isinstance(error, str) or isinstance(error, dict):
                     await event_emitter(
                         {

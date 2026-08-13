@@ -1949,7 +1949,7 @@ async def chat_completion(
                                 'timestamp': int(time.time()),
                             }
 
-                    await Chats.insert_new_chat(
+                    inserted_chat = await Chats.insert_new_chat(
                         chat_id,
                         user.id,
                         ChatForm(
@@ -1973,6 +1973,22 @@ async def chat_completion(
                             folder_id=metadata.get('folder_id'),
                         ),
                     )
+
+                    # THE OTHER CREATION PATH. `turn_opened` was emitted only
+                    # from the existing-chat placeholder loop, so every turn in a
+                    # NEW chat was missing from the lifecycle denominator
+                    # entirely -- the marker's claim to cover turns from durable
+                    # placeholder creation was false for a whole route.
+                    #
+                    # Emitted only after the insert returned, for the same reason
+                    # the other site checks its upsert: a row that does not exist
+                    # is not a turn that began.
+                    if inserted_chat is not None:
+                        for target_model_id, assistant_message_id in message_ids.items():
+                            if assistant_message_id:
+                                failure_surface.log_turn_opened(
+                                    chat_id, assistant_message_id, target_model_id
+                                )
 
                     # Insert chat files from user message if any
                     user_message_files = user_message.get('files', [])
@@ -2158,14 +2174,35 @@ async def chat_completion(
                     if not metadata.get('chat_id', '').startswith('local:') and not metadata.get(
                         'chat_id', ''
                     ).startswith('channel:'):
-                        await Chats.upsert_message_to_chat_by_id_and_message_id(
+                        # TERMINAL, and only terminal. This task is ending --
+                        # the pipeline was awaited, the exception escaped, and
+                        # cleanup follows -- so `done` records the one thing
+                        # this branch definitely observed. It does NOT mean the
+                        # turn succeeded or produced anything.
+                        #
+                        # Without it the row stays `done=False` for ever while
+                        # the browser sets done in its own memory and never
+                        # persists it. Measured across the whole normalized
+                        # store: unfinished empty rows are the only shape that
+                        # is RISING, and this is their largest producer. A later
+                        # regenerate or continue is a new user action, not a
+                        # continuation of this writer.
+                        terminal_written = await Chats.upsert_message_to_chat_by_id_and_message_id(
                             metadata['chat_id'],
                             metadata['message_id'],
                             {
                                 'parentId': metadata.get('user_message_id', None),
+                                'done': True,
                                 'error': {'content': error_detail},
                             },
                         )
+                        if terminal_written is None:
+                            # The chat is gone. `upsert` returns None and raises
+                            # nothing, so "the await returned" is not "the row
+                            # exists" -- the same claim this stack retired
+                            # elsewhere today.
+                            log.warning(
+                                'request failure terminal was not persisted (chat gone)')
 
                     event_emitter = await get_event_emitter(metadata)
                     if event_emitter:
