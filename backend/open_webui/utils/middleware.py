@@ -3580,8 +3580,15 @@ async def non_streaming_chat_response_handler(response, ctx):
 
     if event_emitter:
         try:
-            if 'error' in response_data:
-                error = response_data.get('error')
+            # MEMBERSHIP IS NOT AN ERROR. This tested `'error' in response_data`,
+            # so a provider sending `error: null` beside a perfectly good answer
+            # had `str(None)` stringified into a banner and the person was told
+            # the error was "None" -- and then the turn completed normally
+            # anyway, because the branches below are SIBLINGS rather than
+            # alternatives.
+            provider_error = response_data.get('error')
+            if 'error' in response_data and provider_error is not None:
+                error = provider_error
 
                 if isinstance(error, dict):
                     error = error.get('detail', error)
@@ -3591,6 +3598,12 @@ async def non_streaming_chat_response_handler(response, ctx):
                 log.error('Provider returned error (non-streaming): %s', error)
 
                 if not metadata.get('chat_id', '').startswith('channel:'):
+                  # PERSISTENCE GUARDED ALONE, so its failure cannot consume the
+                  # notification below. The same split landed in `main.py` first
+                  # and this site was missed: the whole handler body is one try,
+                  # so an exception here jumped clean over the error event and
+                  # the person got neither an answer nor an explanation.
+                  try:
                     # TERMINAL. This is the non-streaming path: the provider
                     # returned an error object and the handler returns straight
                     # afterwards, so no completion writer follows. Deliberately
@@ -3620,6 +3633,8 @@ async def non_streaming_chat_response_handler(response, ctx):
                         log.warning(
                             'provider error terminal not confirmed '
                             '(upsert returned None)')
+                  except Exception:
+                    log.warning('provider error terminal write raised')
                 if isinstance(error, str) or isinstance(error, dict):
                     await event_emitter(
                         {
@@ -3627,6 +3642,12 @@ async def non_streaming_chat_response_handler(response, ctx):
                             'data': {'error': {'content': error}},
                         }
                     )
+                # EXCLUSIVE. An observed provider error ends the interpretation:
+                # the branches below used to be siblings, so a payload carrying
+                # BOTH `error` and a content-bearing choice stored the error and
+                # then stored an answer over the top of it, leaving the reader
+                # an answer and a contradiction side by side.
+                return response
 
             if 'selected_model_id' in response_data and not metadata.get('chat_id', '').startswith('channel:'):
                 await Chats.upsert_message_to_chat_by_id_and_message_id(

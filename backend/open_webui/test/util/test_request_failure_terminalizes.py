@@ -119,6 +119,55 @@ class RequestFailureTerminalizesTests(unittest.TestCase):
         self.assertIn("if terminal_written is None:", src)
 
 
+class NonStreamingOutcomeIsExclusiveTests(unittest.TestCase):
+    """A provider error and an answer are alternatives, not both.
+
+    The three outcome checks were sibling `if`s, so a payload carrying BOTH
+    `error` and a content-bearing choice stored the error and then stored an
+    answer over the top — leaving the reader an answer and a contradiction side
+    by side. And membership alone was the discriminator, so `error: null` beside
+    a good answer stringified `None` into a banner telling the person the error
+    was "None", before completing normally.
+    """
+
+    def _src(self):
+        return open(_MIDDLEWARE, encoding="utf-8").read()
+
+    def test_a_null_error_is_not_an_error(self):
+        src = self._src()
+        self.assertIn("provider_error = response_data.get('error')", src)
+        self.assertIn(
+            "if 'error' in response_data and provider_error is not None:", src)
+
+    def test_an_observed_error_ends_the_interpretation(self):
+        """The early return is the whole fix: without it the branches are siblings."""
+        tree = ast.parse(self._src())
+        found = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            # the error branch, identified by its own guard expression
+            seg = ast.unparse(node.test)
+            if "provider_error is not None" not in seg:
+                continue
+            self.assertTrue(
+                any(isinstance(x, ast.Return) for x in node.body),
+                "the provider-error branch falls through into choice handling")
+            found = True
+        self.assertTrue(found, "could not locate the provider-error branch")
+
+    def test_persistence_cannot_swallow_the_error_notification(self):
+        """Guarded separately, at BOTH sites.
+
+        This split landed in `main.py` first and this site was missed: the whole
+        handler body is one try, so an exception from the terminal write jumped
+        over the error event and the person got neither an answer nor an
+        explanation.
+        """
+        src = self._src()
+        self.assertIn("provider error terminal write raised", src)
+
+
 class EveryPlaceholderPathEmitsAnOpeningTests(unittest.TestCase):
     """A turn that begins in a NEW chat is still a turn that began.
 
