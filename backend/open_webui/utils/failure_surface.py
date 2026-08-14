@@ -491,8 +491,19 @@ INTERRUPTED_REASONS = frozenset({
 })
 
 
+#: `persisted` is THREE states, not a boolean. `no` must mean "the rescue write
+#: was attempted and did not land" -- an operator seeing it should go looking for
+#: lost text. A channel turn has no persistence path at all, so reporting `no`
+#: there would manufacture a data-loss incident out of a design decision.
+PERSISTED_YES = "yes"
+PERSISTED_NO = "no"
+PERSISTED_NOT_APPLICABLE = "n/a"
+ALLOWED_PERSISTED = frozenset({PERSISTED_YES, PERSISTED_NO,
+                               PERSISTED_NOT_APPLICABLE})
+
+
 def build_turn_interrupted_marker(chat_id: str, message_id: str, reason: str,
-                                  failure: str, persisted: bool) -> str:
+                                  failure: str, persisted) -> str:
     """The record that finally says WHICH message a truncation interrupted.
 
     This event already existed and already knew all of this — it was emitted on
@@ -514,10 +525,13 @@ def build_turn_interrupted_marker(chat_id: str, message_id: str, reason: str,
             raise ValueError("marker field {!r} contains whitespace: {!r}".format(key, val))
     safe_reason = reason if reason in INTERRUPTED_REASONS else "unknown"
     safe_failure = failure if failure in ALLOWED_FAILURE_KINDS else FAILURE_KIND_UNCLASSIFIED
+    if isinstance(persisted, str):
+        safe_persisted = persisted if persisted in ALLOWED_PERSISTED else PERSISTED_NOT_APPLICABLE
+    else:
+        safe_persisted = PERSISTED_YES if persisted else PERSISTED_NO
     return (
         "{} service=owui reason={} failure={} persisted={} chat={} msg={}".format(
-            MARKER_TURN_INTERRUPTED, safe_reason, safe_failure,
-            "yes" if persisted else "no",
+            MARKER_TURN_INTERRUPTED, safe_reason, safe_failure, safe_persisted,
             chat_id or "-", message_id or "-",
         )
     )
@@ -534,8 +548,19 @@ def log_turn_interrupted(chat_id: str, message_id: str, reason: str,
     try:
         line = build_turn_interrupted_marker(chat_id, message_id, reason,
                                              failure, persisted)
-    except ValueError:
-        line = build_turn_interrupted_marker("", "", reason, failure, persisted)
+    except Exception:  # noqa: BLE001 -- see below
+        # NOTHING HERE MAY RAISE INTO THE CALLER. This fires inside
+        # `save_interrupted_state`, on a turn that is ALREADY failing and is in
+        # the middle of rescuing the user's partial text to disk. An exception
+        # escaping an observability helper at that moment would turn a
+        # recoverable truncation into a lost answer -- the instrument destroying
+        # the thing it exists to measure. The first version caught only
+        # ValueError, which covers the whitespace refusal and nothing else.
+        try:
+            line = build_turn_interrupted_marker("", "", reason, failure,
+                                                 persisted)
+        except Exception:  # noqa: BLE001
+            return ""
     _emit(logging.INFO, line)
     return line
 
