@@ -88,6 +88,7 @@ from open_webui.utils.failure_surface import (
     StreamReadFailure,
     classified_body_reads as _classified_body_reads,
     log_empty_turn,
+    INTERRUPTED_REASONS,
     log_turn_interrupted,
     PERSISTED_NOT_APPLICABLE,
     should_flag_empty,
@@ -4254,7 +4255,15 @@ async def streaming_chat_response_handler(response, ctx):
                             log.warning(
                                 'assistant_turn_interrupted_persist_failed service=owui'
                                 ' reason=%s chat=%s cause=chat_absent',
-                                reason if reason in ('cancelled', 'stream_failed')
+                                # THE SAME CLOSED SET THE MARKER USES. This
+                                # kept a two-reason grammar from before the
+                                # vocabulary grew, so `upstream_read_failed` --
+                                # the truncation case this whole chain exists
+                                # for -- reported as `unknown` at the exact
+                                # moment a rescue write FAILED. The most
+                                # diagnostic moment, carrying the least
+                                # information.
+                                reason if reason in INTERRUPTED_REASONS
                                 else 'unknown',
                                 metadata.get('chat_id', ''),
                             )
@@ -4268,7 +4277,9 @@ async def streaming_chat_response_handler(response, ctx):
                         log.exception(
                             'assistant_turn_interrupted_persist_failed service=owui'
                             ' reason=%s chat=%s',
-                            reason if reason in ('cancelled', 'stream_failed')
+                            # Same closed set, same reason: a rescue that
+                            # raised must not lose which failure it was rescuing.
+                            reason if reason in INTERRUPTED_REASONS
                             else 'unknown',
                             metadata.get('chat_id', ''),
                         )

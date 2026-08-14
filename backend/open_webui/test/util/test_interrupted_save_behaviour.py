@@ -120,6 +120,10 @@ def _run(chats_returns, output_items, emitter_raises=False):
             lambda *a, **k: log.lines.append(
                 failure_surface.build_turn_interrupted_marker(*a, **k))),
         "PERSISTED_NOT_APPLICABLE": failure_surface.PERSISTED_NOT_APPLICABLE,
+        # The persist-failure diagnostics narrowed to the closed
+        # reason set; a lifted namespace missing it raises inside
+        # the rescue path this suite exists to protect.
+        "INTERRUPTED_REASONS": failure_surface.INTERRUPTED_REASONS,
         "PHASE_INTERRUPTED": failure_surface.PHASE_INTERRUPTED,
         "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
         "NOTICE_WRITTEN": failure_surface.NOTICE_WRITTEN,
@@ -338,6 +342,10 @@ class FinalizedEmptyTurnTests(unittest.TestCase):
             lambda *a, **k: log.lines.append(
                 failure_surface.build_turn_interrupted_marker(*a, **k))),
         "PERSISTED_NOT_APPLICABLE": failure_surface.PERSISTED_NOT_APPLICABLE,
+        # The persist-failure diagnostics narrowed to the closed
+        # reason set; a lifted namespace missing it raises inside
+        # the rescue path this suite exists to protect.
+        "INTERRUPTED_REASONS": failure_surface.INTERRUPTED_REASONS,
             "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
             "NOTICE_WRITTEN": failure_surface.NOTICE_WRITTEN,
             "NOTICE_UNDELIVERED": failure_surface.NOTICE_UNDELIVERED,
