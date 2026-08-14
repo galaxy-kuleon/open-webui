@@ -253,7 +253,15 @@ def start(scope: str, mode: str, turn_ref: str | None = None) -> "Attempt | None
         # withhold this row, but it may never unwind the accepted execution.
         # The reader consequently calls the binding NOT MEASURED; it does not
         # relabel the schema-1 execution.
-        if turn_ref is not None:
+        # SCOPE-GATED, not merely licence-gated. Round 122 proved the
+        # primitive emitted a binding for api/local/channel scope whenever a
+        # caller passed a ref, and the reader then had to classify three
+        # forbidden bindings it should never have received. A binding means "this
+        # execution ran for that PERSISTED assistant placeholder"; only
+        # stored_chat has one. The other scopes are not_measured BY
+        # CONSTRUCTION, and enforcing that here means no caller can create the
+        # case by mistake.
+        if turn_ref is not None and scope == SCOPE_STORED_CHAT:
             try:
                 _emit(build_turn_bound(attempt_id, turn_ref))
             except Exception:  # noqa: BLE001 -- observability stays best effort
