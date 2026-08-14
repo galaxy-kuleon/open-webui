@@ -2324,6 +2324,24 @@ async def chat_completion(
             # Resolve the model object for this specific model
             resolved_model = request.app.state.MODELS.get(target_model_id, model)
 
+            # THE LAST EXPRESSION THAT CAN RAISE, evaluated BEFORE the start.
+            # It used to sit inline in the `process_chat(...)` argument list,
+            # which is evaluated AFTER `start()` -- so a non-mapping
+            # `background_tasks` from the request raised between the start line
+            # and `create_task`, leaving a start with no owner and no
+            # `not_started`. The reader would have called that "terminal record
+            # missing", indistinguishable from process or log loss.
+            execution_tasks = (
+                tasks
+                if idx == 0
+                else {
+                    k: v
+                    for k, v in (tasks or {}).items()
+                    if k not in (TASKS.TITLE_GENERATION, TASKS.TAGS_GENERATION)
+                }
+                or None
+            )
+
             # ONE LIFECYCLE PER ACCEPTED EXECUTION -- opened here, after every
             # per-model value that can raise, and before the owner exists.
             #
@@ -2346,14 +2364,7 @@ async def chat_completion(
                     user,
                     per_model_metadata,
                     resolved_model,
-                    tasks
-                    if idx == 0
-                    else {
-                        k: v
-                        for k, v in (tasks or {}).items()
-                        if k not in (TASKS.TITLE_GENERATION, TASKS.TAGS_GENERATION)
-                    }
-                    or None,
+                    execution_tasks,
                 ),
                 id=chat_id,
                 lifecycle=_lc,

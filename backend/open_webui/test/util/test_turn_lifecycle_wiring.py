@@ -306,3 +306,70 @@ class CreateTaskOwnsTheTerminalTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NothingRaisesBetweenStartAndOwnerTests(unittest.TestCase):
+    """The window that produced a start with no owner and no terminal.
+
+    `start()` was placed "after every per-model value that can raise" — except
+    the background-task filter, which was still inline in the `process_chat`
+    argument list and therefore evaluated AFTER the start. A non-mapping
+    `background_tasks` from the request raised in that gap, and the reader would
+    have called the result `terminal record missing`: indistinguishable from
+    process death or log loss.
+
+    Structural, and deliberately so. Driving `main.chat_completion` end to end
+    would make this a stack test; what regressed is the ORDER of two statements,
+    and that is exactly what this reads.
+    """
+
+    _MAIN = os.path.normpath(os.path.join(_HERE, "..", "..", "main.py"))
+
+    def _fanout_block(self):
+        import ast
+        tree = ast.parse(open(self._MAIN, encoding="utf-8").read())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.For):
+                continue
+            body = ast.unparse(node)
+            if "turn_lifecycle.start" in body and "create_task" in body:
+                return node
+        self.fail("could not locate the fan-out loop")
+
+    def test_start_is_the_last_statement_before_the_owner(self):
+        import ast
+        block = self._fanout_block()
+        statements = [ast.unparse(s) for s in block.body]
+        start_at = next(i for i, s in enumerate(statements)
+                        if "turn_lifecycle.start" in s)
+        owner_at = next(i for i, s in enumerate(statements)
+                        if "create_task" in s)
+        self.assertEqual(
+            owner_at, start_at + 1,
+            "a statement sits between the start and the owner; if it raises, "
+            "the attempt has a start, no owner and no terminal")
+
+    def test_the_background_task_filter_is_evaluated_before_the_start(self):
+        import ast
+        block = self._fanout_block()
+        statements = [ast.unparse(s) for s in block.body]
+        start_at = next(i for i, s in enumerate(statements)
+                        if "turn_lifecycle.start" in s)
+        filtered_at = next(i for i, s in enumerate(statements)
+                           if s.startswith("execution_tasks ="))
+        self.assertLess(filtered_at, start_at)
+
+    def test_the_owner_call_carries_no_raising_expression(self):
+        """The argument list must be names, not comprehensions.
+
+        An expression inside the `create_task(...)` call is evaluated after the
+        start line even though it reads as if it were part of the call.
+        """
+        import ast
+        block = self._fanout_block()
+        owner = next(s for s in block.body if "create_task" in ast.unparse(s))
+        for node in ast.walk(owner):
+            self.assertNotIsInstance(
+                node, (ast.DictComp, ast.ListComp, ast.SetComp),
+                "a comprehension in the owner's arguments is evaluated after "
+                "the start line and can raise in the unguarded window")

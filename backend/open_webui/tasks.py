@@ -103,6 +103,32 @@ async def cleanup_task(redis, task_id: str, id=None):
             item_tasks.pop(id, None)
 
 
+def _finish_and_report(lifecycle, task):
+    """Classify the finished Task, and put back the diagnostic we consumed.
+
+    `classify_task` calls `task.exception()`, which marks the exception as
+    retrieved and therefore SUPPRESSES asyncio's own "Task exception was never
+    retrieved" warning. That warning is how an exception escaping cleanup --
+    exactly the class this lifecycle exists to notice -- used to become visible
+    at all, so consuming it silently would trade one observability win for an
+    observability loss.
+
+    The lifecycle row keeps only `raised`, with no text: its logger is trusted
+    wholesale precisely because nothing free-form reaches it. The traceback goes
+    to this module's ordinary logger instead, where it already went before.
+    """
+    outcome = turn_lifecycle.classify_task(task)
+    lifecycle.finish(outcome)
+    if outcome != turn_lifecycle.OUTCOME_RAISED:
+        return
+    try:
+        exc = task.exception()
+    except BaseException:  # noqa: BLE001
+        return
+    if exc is not None:
+        log.error("chat task ended with an unhandled exception", exc_info=exc)
+
+
 async def create_task(redis, coroutine, id=None, lifecycle=None):
     """
     Create a new asyncio task and add it to the global task dictionary.
@@ -142,7 +168,7 @@ async def create_task(redis, coroutine, id=None, lifecycle=None):
     if lifecycle is not None:
         try:
             task.add_done_callback(
-                lambda t: lifecycle.finish(turn_lifecycle.classify_task(t))
+                lambda t: _finish_and_report(lifecycle, t)
             )
         except BaseException:  # noqa: BLE001
             # The owner exists and may still return, raise or cancel -- we have
@@ -153,10 +179,16 @@ async def create_task(redis, coroutine, id=None, lifecycle=None):
             except BaseException:  # noqa: BLE001
                 pass
 
-    # Add a done callback for cleanup -- separate statement, separate guard: a
-    # lifecycle registration failure must never skip application cleanup.
-    task.add_done_callback(lambda t: asyncio.create_task(cleanup_task(redis, task_id, id)))
+    # THE STRONG MAP BEFORE THE CLEANUP CALLBACK, which is what the contract
+    # actually claimed. Built the other way round first: if cleanup-callback
+    # registration raised, the Task existed with a lifecycle callback while
+    # `tasks[task_id]` had never been set, so the lifecycle stayed honest but
+    # application ownership did not.
     tasks[task_id] = task
+
+    # Separate statement, separate guard: a lifecycle registration failure must
+    # never skip application cleanup.
+    task.add_done_callback(lambda t: asyncio.create_task(cleanup_task(redis, task_id, id)))
 
     # If an ID is provided, associate the task with that ID
     if item_tasks.get(id):
