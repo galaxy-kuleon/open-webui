@@ -24,6 +24,9 @@ _LIFECYCLE = os.path.normpath(os.path.join(_HERE, "..", "..", "utils",
                                            "turn_lifecycle.py"))
 
 
+_ABSENT = object()
+
+
 def _load(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -36,12 +39,20 @@ tl = _load(_LIFECYCLE, "_tl_wiring")
 
 
 def _load_tasks():
-    """`tasks.py` without dragging the app in.
+    """`tasks.py` without dragging the app in — and WITHOUT poisoning the run.
 
-    It needs `open_webui.env.REDIS_KEY_PREFIX` and `open_webui.utils
-    .turn_lifecycle`; both are stubbed to the real lifecycle module so the
-    subject under test is the real one.
+    It needs `open_webui.env.REDIS_KEY_PREFIX` and
+    `open_webui.utils.turn_lifecycle`. The first version installed those stubs
+    permanently, so every OTHER test in the same pytest session then imported a
+    fake `open_webui` package with an empty `__path__` and died at collection.
+    A test that breaks its neighbours is worse than one that fails.
+
+    So the stubs live only for the duration of the load, and whatever was there
+    before is put back exactly — including "was not present at all".
     """
+    saved = {name: sys.modules.get(name, _ABSENT)
+             for name in ("open_webui", "open_webui.env", "open_webui.utils",
+                          "open_webui.utils.turn_lifecycle")}
     pkg = types.ModuleType("open_webui")
     pkg.__path__ = []
     env = types.ModuleType("open_webui.env")
@@ -49,11 +60,18 @@ def _load_tasks():
     utils = types.ModuleType("open_webui.utils")
     utils.__path__ = []
     utils.turn_lifecycle = tl
-    for name, mod in (("open_webui", pkg), ("open_webui.env", env),
-                      ("open_webui.utils", utils),
-                      ("open_webui.utils.turn_lifecycle", tl)):
-        sys.modules.setdefault(name, mod)
-    return _load(_TASKS, "_tasks_wiring")
+    try:
+        sys.modules["open_webui"] = pkg
+        sys.modules["open_webui.env"] = env
+        sys.modules["open_webui.utils"] = utils
+        sys.modules["open_webui.utils.turn_lifecycle"] = tl
+        return _load(_TASKS, "_tasks_wiring")
+    finally:
+        for name, previous in saved.items():
+            if previous is _ABSENT:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
 
 tasks_mod = _load_tasks()
