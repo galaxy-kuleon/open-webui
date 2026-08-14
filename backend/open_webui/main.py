@@ -568,6 +568,7 @@ from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
 from open_webui.utils import failure_surface
+from open_webui.utils import turn_lifecycle
 from open_webui.utils import restart_reconcile
 from open_webui.utils.embeddings import generate_embeddings
 from open_webui.utils.logger import start_logger
@@ -2323,6 +2324,18 @@ async def chat_completion(
             # Resolve the model object for this specific model
             resolved_model = request.app.state.MODELS.get(target_model_id, model)
 
+            # ONE LIFECYCLE PER ACCEPTED EXECUTION -- opened here, after every
+            # per-model value that can raise, and before the owner exists.
+            #
+            # Not at request entry (validation is not an accepted execution),
+            # not per placeholder (a placeholder can be stored and never run),
+            # and not outside this loop (one request can own several
+            # executions). Getting that wrong is how a denominator quietly
+            # stops matching the thing it claims to count.
+            _lc = turn_lifecycle.start(
+                _lifecycle_scope(chat_id), turn_lifecycle.MODE_TASK
+            )
+
             # Only the first model runs title/tags generation;
             # subsequent models only run follow-ups.
             task_id, _ = await create_task(
@@ -2343,6 +2356,7 @@ async def chat_completion(
                     or None,
                 ),
                 id=chat_id,
+                lifecycle=_lc,
             )
             per_model_metadata['task_id'] = task_id
             task_ids.append(task_id)
@@ -2364,7 +2378,32 @@ async def chat_completion(
     else:
         # Legacy/direct: single model, synchronous
         metadata['message_id'] = list(message_ids.values())[0]
-        return await process_chat(request, form_data, user, metadata, model, tasks)
+        # The inline owner. No Task, so no done callback -- but classification
+        # still happens only AFTER `process_chat` and its own `finally` have
+        # fully returned, which is what the `else` branch guarantees. A
+        # `finally` here would classify a disposition that cleanup can still
+        # overturn, and `return await` inside the `try` would do the same.
+        _lc = turn_lifecycle.start(
+            _lifecycle_scope(metadata.get('chat_id')), turn_lifecycle.MODE_INLINE
+        )
+        try:
+            _result = await process_chat(
+                request, form_data, user, metadata, model, tasks
+            )
+        except asyncio.CancelledError:
+            # Explicitly before BaseException: cancellation is its own
+            # disposition, not a raise.
+            if _lc is not None:
+                _lc.finish(turn_lifecycle.OUTCOME_CANCELLED)
+            raise
+        except BaseException:
+            if _lc is not None:
+                _lc.finish(turn_lifecycle.OUTCOME_RAISED)
+            raise
+        else:
+            if _lc is not None:
+                _lc.finish(turn_lifecycle.OUTCOME_RETURNED)
+            return _result
 
 
 # Alias for chat_completion (Legacy)
@@ -3082,9 +3121,31 @@ async def async_db_ping() -> None:
     await asyncio.to_thread(_sync_db_ping)
 
 
+def _lifecycle_scope(chat_id) -> str:
+    """WHERE an execution was accepted. Closed, and derived from one field.
+
+    Deliberately not a route and not a provider: those are inferences schema 1
+    refuses to make. `api` is the honest answer for an execution with no chat
+    at all -- not a default, but the case where no stored conversation exists.
+    """
+    value = str(chat_id or "")
+    if not value:
+        return turn_lifecycle.SCOPE_API
+    if value.startswith("local:"):
+        return turn_lifecycle.SCOPE_LOCAL
+    if value.startswith("channel:"):
+        return turn_lifecycle.SCOPE_CHANNEL
+    return turn_lifecycle.SCOPE_STORED_CHAT
+
+
 @app.get('/health')
 async def healthcheck():
-    return {'status': True}
+    # CAPABILITY, NOT ACTIVITY. This says the build can emit schema 1; it says
+    # nothing about whether any row was emitted, collected, or survived. The
+    # reader needs it to tell "no rows because nothing happened" from "no rows
+    # because this build predates the producer" -- a real zero from NOT
+    # MEASURED.
+    return {'status': True, **turn_lifecycle.capability()}
 
 
 @app.get('/ready')

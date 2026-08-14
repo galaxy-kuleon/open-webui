@@ -1,5 +1,6 @@
 # tasks.py
 import asyncio
+import inspect
 import json
 import logging
 from typing import Dict, List, Optional
@@ -9,6 +10,7 @@ from fastapi import Request
 from redis.asyncio import Redis
 
 from open_webui.env import REDIS_KEY_PREFIX
+from open_webui.utils import turn_lifecycle
 
 log = logging.getLogger(__name__)
 
@@ -101,14 +103,58 @@ async def cleanup_task(redis, task_id: str, id=None):
             item_tasks.pop(id, None)
 
 
-async def create_task(redis, coroutine, id=None):
+async def create_task(redis, coroutine, id=None, lifecycle=None):
     """
     Create a new asyncio task and add it to the global task dictionary.
+
+    `lifecycle` is an optional `turn_lifecycle.Attempt` opened by the caller
+    BEFORE this call. Its terminal belongs to the done callback below and to
+    nothing else: a coroutine-level `finally` can pick `returned` and then be
+    overturned by cleanup that raises, so the Task's final state is the first
+    disposition that cannot change.
     """
     task_id = str(uuid4())  # Generate a unique ID for the task
-    task = asyncio.create_task(coroutine)  # Create the task
 
-    # Add a done callback for cleanup
+    try:
+        task = asyncio.create_task(coroutine)  # Create the task
+    except BaseException:
+        # No owner was ever constructed. Close the unowned coroutine so this
+        # rare path does not also emit "coroutine was never awaited", and let
+        # neither the hygiene nor the observability mask the real failure.
+        try:
+            if inspect.iscoroutine(coroutine):
+                coroutine.close()
+        except BaseException:  # noqa: BLE001
+            pass
+        try:
+            if lifecycle is not None:
+                lifecycle.finish(turn_lifecycle.OUTCOME_NOT_STARTED)
+        except BaseException:  # noqa: BLE001
+            pass
+        raise
+
+    # THE LIFECYCLE CALLBACK GOES FIRST, and in its own guard. `task` is already
+    # a strong reference and there is no await before the map assignment, so
+    # registering here closes the otherwise-unhandled window where `tasks[...]`
+    # fails and nothing owns the disposition. A callback added to an
+    # already-finished Task is QUEUED, not run inline, so it cannot fire before
+    # the bookkeeping below.
+    if lifecycle is not None:
+        try:
+            task.add_done_callback(
+                lambda t: lifecycle.finish(turn_lifecycle.classify_task(t))
+            )
+        except BaseException:  # noqa: BLE001
+            # The owner exists and may still return, raise or cancel -- we have
+            # simply lost the ability to observe which. `unknown` is the honest
+            # terminal; `not_started` would be a lie, because a Task was created.
+            try:
+                lifecycle.finish(turn_lifecycle.OUTCOME_UNKNOWN)
+            except BaseException:  # noqa: BLE001
+                pass
+
+    # Add a done callback for cleanup -- separate statement, separate guard: a
+    # lifecycle registration failure must never skip application cleanup.
     task.add_done_callback(lambda t: asyncio.create_task(cleanup_task(redis, task_id, id)))
     tasks[task_id] = task
 

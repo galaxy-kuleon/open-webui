@@ -235,17 +235,36 @@ def start(scope: str, mode: str) -> "Attempt | None":
     Returning `None` rather than raising keeps the caller's worst case at "this
     attempt is not measured", never "this turn broke because of observability".
     """
-    attempt_id = new_attempt_id()
+    lifecycle = None
     try:
+        # THE WHOLE OPENING IS INSIDE THE GUARD, not just the builder. The first
+        # version put `new_attempt_id()` outside it, so an ordinary entropy
+        # failure (`OSError` from the RNG) escaped into the request path: a
+        # producer of observability could abort a real user's turn. That is the
+        # one thing this module must never do.
+        attempt_id = new_attempt_id()
         line = build_turn_started(attempt_id, scope, mode)
-    except ValueError:
+        lifecycle = Attempt(attempt_id, scope, mode)
+        with _REGISTRY_LOCK:
+            _REGISTRY[attempt_id] = lifecycle
+        lifecycle.start_attempted = True
+        _emit(line)
+        return lifecycle
+    except Exception:  # noqa: BLE001 -- the caller runs unmeasured, never broken
+        if lifecycle is not None:
+            lifecycle._unregister()
+        # NOT `unknown`: no lifecycle was successfully opened, so there is no
+        # attempt to report an outcome for. An unopened attempt is absent from
+        # the denominator, which is the honest place for it.
         return None
-    lifecycle = Attempt(attempt_id, scope, mode)
-    with _REGISTRY_LOCK:
-        _REGISTRY[attempt_id] = lifecycle
-    lifecycle.start_attempted = True
-    _emit(line)
-    return lifecycle
+    except BaseException:
+        # Process control (KeyboardInterrupt, SystemExit, CancelledError) still
+        # propagates -- swallowing those is its own hazard, and this module has
+        # no business deciding a shutdown does not apply to it. The registry
+        # entry is still removed so a killed start cannot leak a live attempt.
+        if lifecycle is not None:
+            lifecycle._unregister()
+        raise
 
 
 def classify_task(task) -> str:

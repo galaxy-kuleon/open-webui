@@ -13,6 +13,7 @@ the grammar at all.
 """
 import asyncio
 import importlib.util
+import logging
 import os
 import threading
 import unittest
@@ -278,3 +279,79 @@ class RegistryOrderingTests(unittest.TestCase):
         self.assertIn(a.id, tl._REGISTRY)
         a.finish(tl.OUTCOME_RETURNED)
         self.assertNotIn(a.id, tl._REGISTRY)
+
+
+class StartIsANonInterferenceBoundaryTests(unittest.TestCase):
+    """A producer of observability must never break the turn it observes.
+
+    Round 76 P0: `new_attempt_id()` sat OUTSIDE the guard, so an ordinary
+    entropy failure escaped `start()` into the request path. The probe was an
+    `OSError` from the RNG — rare, but the failure mode is "a user's turn dies
+    because we wanted to count it", which is never an acceptable trade.
+    """
+
+    def test_an_entropy_failure_returns_none_instead_of_raising(self):
+        real = tl.secrets.token_hex
+
+        def boom(_n):
+            raise OSError("synthetic entropy failure")
+
+        tl.secrets.token_hex = boom
+        try:
+            self.assertIsNone(tl.start(tl.SCOPE_STORED_CHAT, tl.MODE_TASK))
+        finally:
+            tl.secrets.token_hex = real
+
+    def test_a_failed_start_leaves_no_live_attempt_behind(self):
+        """A leaked registry entry is a start that can never be finished."""
+        real = tl.secrets.token_hex
+        before = tl.live_attempts()
+
+        def boom(_n):
+            raise OSError("synthetic entropy failure")
+
+        tl.secrets.token_hex = boom
+        try:
+            tl.start(tl.SCOPE_API, tl.MODE_TASK)
+        finally:
+            tl.secrets.token_hex = real
+        self.assertEqual(tl.live_attempts(), before)
+
+    def test_process_control_still_propagates_and_cleans_up(self):
+        """Swallowing SystemExit would be its own hazard.
+
+        This module has no business deciding a shutdown does not apply to it —
+        but a killed start must not leave a live attempt either.
+        """
+        real = tl.secrets.token_hex
+        before = tl.live_attempts()
+
+        def boom(_n):
+            raise SystemExit("shutting down")
+
+        tl.secrets.token_hex = boom
+        try:
+            with self.assertRaises(SystemExit):
+                tl.start(tl.SCOPE_API, tl.MODE_TASK)
+        finally:
+            tl.secrets.token_hex = real
+        self.assertEqual(tl.live_attempts(), before)
+
+    def test_a_raising_log_sink_does_not_break_the_turn(self):
+        """The sink is the other way observability reaches into the request."""
+        log = logging.getLogger("open_webui.turn_lifecycle")
+
+        class Hostile(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("synthetic sink failure")
+
+        handler = Hostile()
+        log.addHandler(handler)
+        before = tl.live_attempts()
+        try:
+            attempt = tl.start(tl.SCOPE_STORED_CHAT, tl.MODE_TASK)
+            self.assertIsNotNone(attempt)
+            self.assertTrue(attempt.finish(tl.OUTCOME_RETURNED))
+        finally:
+            log.removeHandler(handler)
+        self.assertEqual(tl.live_attempts(), before)
