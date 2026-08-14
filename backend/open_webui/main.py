@@ -1742,6 +1742,18 @@ async def embeddings(request: Request, form_data: dict, user=Depends(get_verifie
     return await generate_embeddings(request, form_data, user)
 
 
+def _license_persisted_placeholder(licenses, chat_model, message_id) -> None:
+    """Forward only the repository-returned assistant row to the lifecycle."""
+    try:
+        chat = chat_model.chat if chat_model is not None else None
+        messages = ((chat or {}).get("history") or {}).get("messages") or {}
+        persisted = messages.get(message_id)
+        chat_id = getattr(chat_model, "id", None)
+        licenses.confirm(chat_id, persisted)
+    except Exception:  # noqa: BLE001 -- observability cannot break a turn
+        return
+
+
 @app.post('/api/chat/completions')
 @app.post('/api/v1/chat/completions')  # Experimental: Compatibility with OpenAI API
 async def chat_completion(
@@ -1849,6 +1861,7 @@ async def chat_completion(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail='message_ids must map each model to a distinct message id',
             )
+        turn_binding_licenses = turn_lifecycle.TurnBindingLicenses()
 
         user_message = form_data.pop('user_message', None) or form_data.pop('parent_message', None)
 
@@ -2004,6 +2017,10 @@ async def chat_completion(
                     if inserted_chat is not None:
                         for target_model_id, assistant_message_id in message_ids.items():
                             if assistant_message_id:
+                                _license_persisted_placeholder(
+                                    turn_binding_licenses, inserted_chat,
+                                    assistant_message_id,
+                                )
                                 failure_surface.log_turn_opened(
                                     chat_id, assistant_message_id, target_model_id
                                 )
@@ -2130,6 +2147,10 @@ async def chat_completion(
                             # Best-effort by construction: it must never be able
                             # to break the turn it is observing.
                             if placeholder is not None:
+                                _license_persisted_placeholder(
+                                    turn_binding_licenses, placeholder,
+                                    assistant_message_id,
+                                )
                                 failure_surface.log_turn_opened(
                                     chat_id, assistant_message_id, target_model_id
                                 )
@@ -2351,7 +2372,8 @@ async def chat_completion(
             # executions). Getting that wrong is how a denominator quietly
             # stops matching the thing it claims to count.
             _lc = turn_lifecycle.start(
-                _lifecycle_scope(chat_id), turn_lifecycle.MODE_TASK
+                _lifecycle_scope(chat_id), turn_lifecycle.MODE_TASK,
+                turn_binding_licenses.take(assistant_message_id),
             )
 
             # Only the first model runs title/tags generation;
@@ -2395,7 +2417,8 @@ async def chat_completion(
         # `finally` here would classify a disposition that cleanup can still
         # overturn, and `return await` inside the `try` would do the same.
         _lc = turn_lifecycle.start(
-            _lifecycle_scope(metadata.get('chat_id')), turn_lifecycle.MODE_INLINE
+            _lifecycle_scope(metadata.get('chat_id')), turn_lifecycle.MODE_INLINE,
+            turn_binding_licenses.take(metadata['message_id']),
         )
         try:
             _result = await process_chat(

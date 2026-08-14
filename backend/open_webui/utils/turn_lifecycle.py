@@ -223,7 +223,7 @@ class Attempt:
                 del _REGISTRY[self.id]
 
 
-def start(scope: str, mode: str) -> "Attempt | None":
+def start(scope: str, mode: str, turn_ref: str | None = None) -> "Attempt | None":
     """Open one accepted execution. `None` if the grammar is invalid.
 
     ORDER IS THE POINT. The lifecycle is registered before the start line is
@@ -249,6 +249,15 @@ def start(scope: str, mode: str) -> "Attempt | None":
             _REGISTRY[attempt_id] = lifecycle
         lifecycle.start_attempted = True
         _emit(line)
+        # A separate schema-2 fact. A malformed or unavailable licence may
+        # withhold this row, but it may never unwind the accepted execution.
+        # The reader consequently calls the binding NOT MEASURED; it does not
+        # relabel the schema-1 execution.
+        if turn_ref is not None:
+            try:
+                _emit(build_turn_bound(attempt_id, turn_ref))
+            except Exception:  # noqa: BLE001 -- observability stays best effort
+                pass
         return lifecycle
     except Exception:  # noqa: BLE001 -- the caller runs unmeasured, never broken
         if lifecycle is not None:
@@ -355,3 +364,47 @@ def build_turn_bound(attempt: str, turn_ref: str) -> str:
         raise ValueError("turn_ref must be 32 lower-case hex characters")
     return (f"{MARKER_TURN_BOUND} service=owui schema={SCHEMA_BOUND} "
             f"attempt={attempt} turn_ref={turn_ref}")
+
+
+class TurnBindingLicenses:
+    """Request-local proof that an assistant placeholder was persisted.
+
+    The caller hands this class the message read from the repository's returned
+    chat snapshot, not request ids. That is load-bearing: deriving from the
+    request's `parentId` can mint a syntactically perfect reference to the wrong
+    row. The report independently derives the expected reference from the
+    identity-bearing `turn_opened` record and refuses that substitution.
+    """
+
+    __slots__ = ("_refs",)
+
+    def __init__(self) -> None:
+        self._refs: dict[str, str] = {}
+
+    def confirm(self, chat_id: str, persisted_message: object) -> None:
+        """Keep one licence, or keep nothing; never break the observed turn."""
+        try:
+            if not isinstance(persisted_message, dict):
+                return
+            if persisted_message.get("role") != "assistant":
+                return
+            message_id = persisted_message.get("id")
+            if not isinstance(chat_id, str) or not chat_id:
+                return
+            if not isinstance(message_id, str) or not message_id:
+                return
+            # Intentionally derive again from the persisted object. The key is
+            # only local routing; the digest is the evidence that crosses the
+            # process boundary. Replacing this `id` with `parentId` produces a
+            # valid-looking ref that the independent reader must reject.
+            self._refs[message_id] = make_turn_ref(
+                chat_id, persisted_message.get("id"))
+        except Exception:  # noqa: BLE001 -- a missing binding is not a failed turn
+            return
+
+    def take(self, message_id: object) -> str | None:
+        """Consume the licence so one placeholder cannot bind twice."""
+        try:
+            return self._refs.pop(message_id, None)
+        except Exception:  # noqa: BLE001 -- hostile ids stay unmeasured
+            return None

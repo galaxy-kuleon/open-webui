@@ -16,6 +16,7 @@ import os
 import sys
 import types
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(__file__)
 _BACKEND = os.path.normpath(os.path.join(_HERE, "..", "..", ".."))
@@ -302,6 +303,194 @@ class CreateTaskOwnsTheTerminalTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cap.starts(), [])
             self.assertEqual(cap.terminals(), [])
         self.assertIsInstance(task_id, str)
+
+
+class PersistedPlaceholderLicenceTests(unittest.TestCase):
+    def test_main_forwards_the_repository_returned_assistant_row(self):
+        """Drive the real forwarding helper; request ids are not its oracle."""
+        import open_webui.main as main
+
+        licenses = tl.TurnBindingLicenses()
+        persisted = types.SimpleNamespace(
+            id="chat-persisted",
+            chat={"history": {"messages": {
+                "parent-row": {"id": "parent-row", "role": "user"},
+                "assistant-row": {"id": "assistant-row",
+                                  "parentId": "parent-row",
+                                  "role": "assistant"},
+            }}},
+        )
+        main._license_persisted_placeholder(
+            licenses, persisted, "assistant-row")
+        self.assertEqual(
+            licenses.take("assistant-row"),
+            tl.make_turn_ref("chat-persisted", "assistant-row"),
+        )
+        self.assertIsNone(licenses.take("parent-row"))
+
+
+class RealChatCompletionBindingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_chat_fanout_binds_each_confirmed_assistant_once(self):
+        """The insert return licenses both persisted rows, not one request."""
+        import open_webui.main as main
+
+        request = types.SimpleNamespace(
+            state=types.SimpleNamespace(),
+            app=types.SimpleNamespace(state=types.SimpleNamespace(
+                MODELS={"m1": {"id": "m1"}, "m2": {"id": "m2"}},
+                redis=None,
+                config=types.SimpleNamespace(DEFAULT_MODEL_PARAMS={}),
+            )),
+        )
+        user = types.SimpleNamespace(id="user", role="admin")
+        form = {
+            "model": "m1", "model_item": {"direct": True},
+            "parent_id": None, "session_id": "session",
+            "message_ids": {"m1": "assistant-one", "m2": "assistant-two"},
+        }
+        inserted = types.SimpleNamespace(
+            id="chat-new",
+            chat={"history": {"messages": {
+                "assistant-one": {"id": "assistant-one", "role": "assistant"},
+                "assistant-two": {"id": "assistant-two", "role": "assistant"},
+            }}},
+        )
+        task_number = 0
+
+        async def own_task(_redis, coroutine, *, id=None, lifecycle=None):
+            nonlocal task_number
+            coroutine.close()
+            self.assertIsNotNone(lifecycle)
+            lifecycle.finish(tl.OUTCOME_RETURNED)
+            task_number += 1
+            return f"task-{task_number}", None
+
+        with _Capture() as cap, \
+                mock.patch.object(main, "uuid4", return_value="chat-new"), \
+                mock.patch.object(main.Chats, "insert_new_chat",
+                                  mock.AsyncMock(return_value=inserted)), \
+                mock.patch.object(main, "create_task", side_effect=own_task), \
+                mock.patch.object(main, "get_event_emitter",
+                                  mock.AsyncMock(return_value=None)), \
+                mock.patch.object(main.failure_surface, "log_turn_opened"):
+            result = await main.chat_completion(request, form, user)
+
+        self.assertEqual(result["task_ids"], ["task-1", "task-2"])
+        bound = [line for line in cap.buf.getvalue().splitlines()
+                 if line.startswith("turn_bound ")]
+        self.assertEqual(len(bound), 2)
+        self.assertEqual(
+            {line.split("turn_ref=", 1)[1] for line in bound},
+            {tl.make_turn_ref("chat-new", "assistant-one"),
+             tl.make_turn_ref("chat-new", "assistant-two")},
+        )
+
+    async def test_existing_chat_forwards_the_confirmed_assistant_to_start(self):
+        """The real caller, with I/O owners replaced but its ordering intact."""
+        import open_webui.main as main
+
+        request = types.SimpleNamespace(
+            state=types.SimpleNamespace(),
+            app=types.SimpleNamespace(state=types.SimpleNamespace(
+                MODELS={"m": {"id": "m"}}, redis=None,
+                config=types.SimpleNamespace(DEFAULT_MODEL_PARAMS={}),
+            )),
+        )
+        user = types.SimpleNamespace(id="user", role="admin")
+        form = {
+            "model": "m", "model_item": {"direct": True},
+            "chat_id": "chat-persisted", "session_id": "session",
+            "message_ids": {"m": "assistant-row"},
+        }
+
+        async def upsert(chat_id, message_id, message):
+            stored = {**message, "id": message_id}
+            return types.SimpleNamespace(
+                id=chat_id,
+                chat={"history": {"messages": {message_id: stored}}},
+            )
+
+        async def own_task(_redis, coroutine, *, id=None, lifecycle=None):
+            coroutine.close()
+            self.assertIsNotNone(lifecycle)
+            lifecycle.finish(tl.OUTCOME_RETURNED)
+            return "task-id", None
+
+        with _Capture() as cap, \
+                mock.patch.object(main.Chats, "is_chat_owner",
+                                  mock.AsyncMock(return_value=True)), \
+                mock.patch.object(
+                    main.Chats, "upsert_message_to_chat_by_id_and_message_id",
+                    side_effect=upsert), \
+                mock.patch.object(main, "create_task", side_effect=own_task), \
+                mock.patch.object(main, "get_event_emitter",
+                                  mock.AsyncMock(return_value=None)), \
+                mock.patch.object(main.failure_surface, "log_turn_opened"):
+            result = await main.chat_completion(request, form, user)
+
+        self.assertEqual(result["task_ids"], ["task-id"])
+        bound = [line for line in cap.buf.getvalue().splitlines()
+                 if line.startswith("turn_bound ")]
+        self.assertEqual(len(bound), 1)
+        self.assertIn(
+            "turn_ref=" + tl.make_turn_ref("chat-persisted", "assistant-row"),
+            bound[0],
+        )
+
+    async def test_inline_caller_binds_the_same_confirmed_assistant(self):
+        """No Task exists on this branch; the binding must not disappear."""
+        import open_webui.main as main
+
+        request = types.SimpleNamespace(
+            state=types.SimpleNamespace(),
+            app=types.SimpleNamespace(state=types.SimpleNamespace(
+                MODELS={"m": {"id": "m"}}, redis=None,
+                config=types.SimpleNamespace(DEFAULT_MODEL_PARAMS={}),
+            )),
+        )
+        user = types.SimpleNamespace(id="user", role="admin")
+        form = {
+            "model": "m", "model_item": {"direct": True},
+            "chat_id": "chat-persisted",
+            "message_ids": {"m": "assistant-row"},
+        }
+
+        async def upsert(chat_id, message_id, message):
+            return types.SimpleNamespace(
+                id=chat_id,
+                chat={"history": {"messages": {
+                    message_id: {**message, "id": message_id},
+                }}},
+            )
+
+        async def payload(_request, data, _user, metadata, _model):
+            return data, metadata, []
+
+        with _Capture() as cap, \
+                mock.patch.object(main.Chats, "is_chat_owner",
+                                  mock.AsyncMock(return_value=True)), \
+                mock.patch.object(
+                    main.Chats, "upsert_message_to_chat_by_id_and_message_id",
+                    side_effect=upsert), \
+                mock.patch.object(main.failure_surface, "log_turn_opened"), \
+                mock.patch.object(main, "process_chat_payload",
+                                  side_effect=payload), \
+                mock.patch.object(main, "chat_completion_handler",
+                                  mock.AsyncMock(return_value={"wire": "ok"})), \
+                mock.patch.object(main, "build_chat_response_context",
+                                  mock.AsyncMock(return_value={})), \
+                mock.patch.object(main, "process_chat_response",
+                                  mock.AsyncMock(return_value="answer")):
+            result = await main.chat_completion(request, form, user)
+
+        self.assertEqual(result, "answer")
+        bound = [line for line in cap.buf.getvalue().splitlines()
+                 if line.startswith("turn_bound ")]
+        self.assertEqual(len(bound), 1)
+        self.assertIn(
+            "turn_ref=" + tl.make_turn_ref("chat-persisted", "assistant-row"),
+            bound[0],
+        )
 
 
 if __name__ == "__main__":
