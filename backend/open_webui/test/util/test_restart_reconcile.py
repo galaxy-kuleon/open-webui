@@ -139,10 +139,50 @@ class CountUnfinishedTests(unittest.TestCase):
 
         self.assertEqual(chats[0].chat, before)
 
-    def test_the_module_can_no_longer_write_anything(self):
-        # THE REVERT, pinned. A future edit that re-adds a mutating helper here
-        # has to delete this test to do it, which is a visible decision rather
-        # than a quiet reintroduction of a destructive boundary.
+    def test_the_module_names_no_writing_symbol_AT_ALL(self):
+        """The revert, pinned by PROPERTY rather than by a list of the past.
+
+        This forbade four historical names. Adding `repair_rows()` that writes
+        through the repository would have passed it — the guard enumerated what
+        had already been removed instead of what must never exist, so it could
+        only ever catch the mistake that had already been made.
+
+        D1 in the register is "never rebuild the destructive startup sweep".
+        That deserves a guard that a NEW writer fails.
+        """
+        import ast
+
+        source = open(rr.__file__, encoding="utf-8").read()
+        tree = ast.parse(source)
+
+        # Any call that could mutate durable state, by the vocabulary this
+        # codebase actually uses for writes.
+        WRITE_VERBS = ("upsert", "insert", "update", "delete", "commit",
+                       "save", "write", "set_", "add_")
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if not name:
+                continue
+            low = name.lower()
+            if any(low.startswith(v) or f"_{v}" in low for v in WRITE_VERBS):
+                offenders.append(f"{name} (line {node.lineno})")
+
+        self.assertEqual(
+            offenders, [],
+            "this module is read-only by decision (register D1: never rebuild "
+            "the destructive startup sweep). A writing call appeared: "
+            f"{offenders}")
+
+    def test_the_four_reverted_symbols_are_still_gone(self):
+        """Kept, under a name that says what it does.
+
+        Listing the removed symbols is a legitimate regression pin — it is just
+        not a proof that the module cannot write, which is what the old name
+        claimed.
+        """
         for gone in ("build_terminal_message", "plan_reconciliation",
                      "sole_instance", "should_terminalize"):
             self.assertFalse(hasattr(rr, gone), gone)
