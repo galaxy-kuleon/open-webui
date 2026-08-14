@@ -88,6 +88,7 @@ from open_webui.utils.failure_surface import (
     StreamReadFailure,
     classified_body_reads as _classified_body_reads,
     log_empty_turn,
+    log_turn_interrupted,
     should_flag_empty,
 )
 from open_webui.utils.file_coverage import (
@@ -4274,25 +4275,25 @@ async def streaming_chat_response_handler(response, ctx):
                 #
                 # These two markers must never be summed as attempts: an empty
                 # interrupted turn emits both.
-                log.info(
-                    # NO `msg=` HERE, deliberately. These 14 ledger records
-                    # carry no join key and I went to add one -- but this
-                    # logger is `count-only` precisely because this module also
-                    # logs provider text, so the ledger strips `chat`/`uid`
-                    # from it and would have to trust a message id from the
-                    # same untrusted line. The join key comes from
-                    # `turn_opened` on the identity-trusted marker logger
-                    # instead. Widening a trust boundary for a convenience is
-                    # how the boundary stops meaning anything.
-                    'assistant_turn_interrupted service=owui'
-                    ' reason=%s failure=%s persisted=%s chat=%s',
-                    reason if reason in ('cancelled', 'upstream_read_failed',
-                                        'stream_processing_failed',
-                                        'stream_failed') else 'unknown',
-                    failure if failure in ALLOWED_FAILURE_KINDS
-                    else FAILURE_KIND_UNCLASSIFIED,
-                    'yes' if persisted else 'no',
+                # EMITTED BY `failure_surface`, NOT HERE, and this is the whole
+                # fix. The record always knew which message was interrupted; it
+                # could not SAY so, because this module's logger is trusted
+                # count-only (it also logs provider text), so the ledger strips
+                # identity from it. The previous note here concluded that
+                # widening that trust for convenience would make the boundary
+                # meaningless -- correct, and the answer is to move the
+                # emission to the producer that is already allowed to name a
+                # turn, rather than to widen anything.
+                #
+                # ONE record, not two: the count-only line is GONE, not
+                # supplemented. Emitting both would double a population that
+                # already must never be summed with `empty_reply`.
+                log_turn_interrupted(
                     metadata.get('chat_id', ''),
+                    metadata.get('message_id', ''),
+                    reason,
+                    failure,
+                    bool(persisted),
                 )
 
                 # Best-effort notifications, each guarded on its own: the user

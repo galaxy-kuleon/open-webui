@@ -480,6 +480,66 @@ def build_turn_opened_marker(chat_id: str, message_id: str, model: str) -> str:
     )
 
 
+MARKER_TURN_INTERRUPTED = "assistant_turn_interrupted"
+
+#: The closed reason set for an interrupted turn. Same discipline as every other
+#: vocabulary here: a value outside it becomes `unknown` rather than reaching the
+#: ledger as free text.
+INTERRUPTED_REASONS = frozenset({
+    "cancelled", "upstream_read_failed", "stream_processing_failed",
+    "stream_failed",
+})
+
+
+def build_turn_interrupted_marker(chat_id: str, message_id: str, reason: str,
+                                  failure: str, persisted: bool) -> str:
+    """The record that finally says WHICH message a truncation interrupted.
+
+    This event already existed and already knew all of this — it was emitted on
+    `utils.middleware`, which the ledger trusts COUNT-ONLY because that module
+    also logs provider text. So the identity was stripped and `msg` was
+    deliberately never included: widening a trust boundary for convenience is
+    how the boundary stops meaning anything.
+
+    Moving the emission here resolves that tension instead of working around it.
+    This module's whole contract is that nothing free-form reaches its logger,
+    which is exactly what makes an identity-bearing record safe. Same event, same
+    fields, a producer that is allowed to name the turn.
+
+    `persisted` is the CHECKED upsert result, not the absence of an exception —
+    the distinction this stack retired elsewhere the same week.
+    """
+    for key, val in (("chat", chat_id or ""), ("msg", message_id or "")):
+        if val != "".join(val.split()):
+            raise ValueError("marker field {!r} contains whitespace: {!r}".format(key, val))
+    safe_reason = reason if reason in INTERRUPTED_REASONS else "unknown"
+    safe_failure = failure if failure in ALLOWED_FAILURE_KINDS else FAILURE_KIND_UNCLASSIFIED
+    return (
+        "{} service=owui reason={} failure={} persisted={} chat={} msg={}".format(
+            MARKER_TURN_INTERRUPTED, safe_reason, safe_failure,
+            "yes" if persisted else "no",
+            chat_id or "-", message_id or "-",
+        )
+    )
+
+
+def log_turn_interrupted(chat_id: str, message_id: str, reason: str,
+                         failure: str, persisted: bool) -> str:
+    """Emit it, and never let an unbuildable line erase the event.
+
+    Same rule as `log_turn_opened`: a record that cannot be built drops its ids
+    rather than vanishing. An interruption nobody recorded reads as a turn that
+    was never interrupted, which is the more dangerous silence.
+    """
+    try:
+        line = build_turn_interrupted_marker(chat_id, message_id, reason,
+                                             failure, persisted)
+    except ValueError:
+        line = build_turn_interrupted_marker("", "", reason, failure, persisted)
+    _emit(logging.INFO, line)
+    return line
+
+
 def log_turn_opened(chat_id: str, message_id: str, model: str) -> str:
     """Record that a turn began. Best-effort, and never raises into the caller.
 
