@@ -53,7 +53,10 @@ class _Chats:
 
     async def upsert_message_to_chat_by_id_and_message_id(self, chat, msg, patch):
         self.calls.append(patch)
-        return self.returns.pop(0) if self.returns else {"ok": True}
+        value = self.returns.pop(0) if self.returns else {"ok": True}
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
 
 class _Log:
@@ -66,7 +69,7 @@ class _Log:
     info = warning = exception = _add
 
 
-def _run(chats_returns, output_items, emitter_raises=False):
+def _run(chats_returns, output_items, emitter_raises=False, *, reason="stream_failed"):
     log = _Log()
     chats = _Chats(chats_returns)
     events = []
@@ -140,7 +143,7 @@ def _run(chats_returns, output_items, emitter_raises=False):
     marker_log.setLevel(logging.INFO)
     try:
         exec(compile(_lift("save_interrupted_state"), "<lifted>", "exec"), ns)
-        asyncio.run(ns["save_interrupted_state"]("stream_failed"))
+        asyncio.run(ns["save_interrupted_state"](reason))
     finally:
         marker_log.removeHandler(handler)
     log.markers = marker_lines
@@ -253,6 +256,23 @@ class InterruptedSaveBehaviourTests(unittest.TestCase):
                 if text:
                     self.assertNotIn(text, marker,
                                      "reasoning text leaked into the marker")
+
+    def test_upstream_read_failure_survives_both_rescue_write_failures(self):
+        for failed_write in (None, RuntimeError("database unavailable")):
+            with self.subTest(failed_write=type(failed_write).__name__):
+                log, _, _ = _run(
+                    [failed_write],
+                    ANSWER,
+                    reason="upstream_read_failed",
+                )
+                diagnostics = [
+                    line
+                    for line in log.lines
+                    if "assistant_turn_interrupted_persist_failed" in line
+                ]
+                self.assertEqual(len(diagnostics), 1)
+                self.assertIn("reason=upstream_read_failed", diagnostics[0])
+                self.assertNotIn("reason=unknown", diagnostics[0])
 
 
 if __name__ == "__main__":
