@@ -637,3 +637,37 @@ class NoticeMustBeObservedTests(unittest.TestCase):
         # as a user who was told.
         src, _ = self._sites()
         self.assertIn("notice = NOTICE_UNDELIVERED", src)
+
+
+class ChannelInterruptionIsNotARescueFailureTests(unittest.TestCase):
+    """`no` must mean the rescue was attempted and did not land.
+
+    A channel turn has no persistence path — middleware skips the write for
+    `channel:` chats. Reporting `no` there manufactures a data-loss incident out
+    of a design decision, and every channel interruption reads as lost text.
+
+    This shipped half-done once: the three states existed in the builder while
+    the only caller still passed `bool(persisted)`, so `n/a` was unreachable on
+    the wire. Fixing the vocabulary without fixing its caller fixed nothing.
+    """
+
+    def test_a_channel_interruption_is_not_a_rescue_failure(self):
+        import ast
+        import os
+        src_path = os.path.normpath(os.path.join(
+            os.path.dirname(__file__), "..", "..", "utils", "middleware.py"))
+        src = open(src_path, encoding="utf-8").read()
+
+        # The caller must START from not-applicable and narrow to a real boolean
+        # only on the path that actually attempts a write.
+        self.assertIn("persisted = PERSISTED_NOT_APPLICABLE", src)
+
+        # ...and must not collapse the three states back to two at the call.
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", None) == "log_turn_interrupted"):
+                for arg in node.args:
+                    self.assertNotEqual(
+                        getattr(getattr(arg, "func", None), "id", None), "bool",
+                        "bool() at the call site makes `n/a` unreachable")

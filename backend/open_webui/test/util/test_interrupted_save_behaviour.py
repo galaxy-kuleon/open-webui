@@ -106,6 +106,20 @@ def _run(chats_returns, output_items, emitter_raises=False):
         "cause_for_phase": failure_surface.cause_for_phase,
         "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
         "log_empty_turn": failure_surface.log_empty_turn,
+        # The interrupted marker moved to `failure_surface` so it could
+        # carry `msg`; a lifted namespace that does not carry the new
+        # symbol raises NameError inside the very rescue path this
+        # suite exists to protect.
+        # A SPY OVER THE REAL BUILDER, not a stand-in for it. The emission
+        # moved off this module's `log.info` and onto `failure_surface`'s own
+        # logger, so the fake `log` these assertions read stopped seeing the
+        # record even though the record was correct. Recording the REAL line
+        # keeps every existing assertion meaningful instead of rewriting them
+        # to match whatever the code now does.
+        "log_turn_interrupted": (
+            lambda *a, **k: log.lines.append(
+                failure_surface.build_turn_interrupted_marker(*a, **k))),
+        "PERSISTED_NOT_APPLICABLE": failure_surface.PERSISTED_NOT_APPLICABLE,
         "PHASE_INTERRUPTED": failure_surface.PHASE_INTERRUPTED,
         "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
         "NOTICE_WRITTEN": failure_surface.NOTICE_WRITTEN,
@@ -310,6 +324,20 @@ class FinalizedEmptyTurnTests(unittest.TestCase):
             "metadata": {"chat_id": "c-final", "message_id": "m-final"},
             "empty_error": failure_surface.build_error_payload("c-final", "m-final"),
             "log_empty_turn": failure_surface.log_empty_turn,
+        # The interrupted marker moved to `failure_surface` so it could
+        # carry `msg`; a lifted namespace that does not carry the new
+        # symbol raises NameError inside the very rescue path this
+        # suite exists to protect.
+        # A SPY OVER THE REAL BUILDER, not a stand-in for it. The emission
+        # moved off this module's `log.info` and onto `failure_surface`'s own
+        # logger, so the fake `log` these assertions read stopped seeing the
+        # record even though the record was correct. Recording the REAL line
+        # keeps every existing assertion meaningful instead of rewriting them
+        # to match whatever the code now does.
+        "log_turn_interrupted": (
+            lambda *a, **k: log.lines.append(
+                failure_surface.build_turn_interrupted_marker(*a, **k))),
+        "PERSISTED_NOT_APPLICABLE": failure_surface.PERSISTED_NOT_APPLICABLE,
             "PHASE_FINALIZED": failure_surface.PHASE_FINALIZED,
             "NOTICE_WRITTEN": failure_surface.NOTICE_WRITTEN,
             "NOTICE_UNDELIVERED": failure_surface.NOTICE_UNDELIVERED,

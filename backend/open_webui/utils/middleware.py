@@ -89,6 +89,7 @@ from open_webui.utils.failure_surface import (
     classified_body_reads as _classified_body_reads,
     log_empty_turn,
     log_turn_interrupted,
+    PERSISTED_NOT_APPLICABLE,
     should_flag_empty,
 )
 from open_webui.utils.file_coverage import (
@@ -4208,8 +4209,15 @@ async def streaming_chat_response_handler(response, ctx):
                 snapshot = full_output()
                 serialized = serialize_output(snapshot)
 
-                persisted = False
+                # THREE STATES, and the channel case is the reason. `no` must
+                # mean "the rescue write was attempted and did not land", so an
+                # operator seeing it goes looking for lost text. A channel turn
+                # has no persistence path at all -- reporting `no` there would
+                # manufacture a data-loss incident out of a design decision, and
+                # every channel interruption would look like a rescue failure.
+                persisted = PERSISTED_NOT_APPLICABLE
                 if not metadata.get('chat_id', '').startswith('channel:'):
+                    persisted = False
                     try:
                         if not ENABLE_REALTIME_CHAT_SAVE:
                             written = await Chats.upsert_message_to_chat_by_id_and_message_id(
@@ -4293,7 +4301,11 @@ async def streaming_chat_response_handler(response, ctx):
                     metadata.get('message_id', ''),
                     reason,
                     failure,
-                    bool(persisted),
+                    # NOT `bool(...)`: that collapsed the three states back to
+                    # two at the only call site, so `n/a` existed in the
+                    # vocabulary and was unreachable on the wire. Fixing the
+                    # builder without fixing its caller fixed nothing.
+                    persisted,
                 )
 
                 # Best-effort notifications, each guarded on its own: the user
