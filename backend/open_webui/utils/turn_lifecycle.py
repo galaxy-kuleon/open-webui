@@ -303,3 +303,55 @@ def capability() -> dict:
     happened" from "no rows because this build predates the producer".
     """
     return {"owui_turn_lifecycle": SCHEMA}
+
+
+#: SCHEMA 2, and a SEPARATE RECORD rather than a field on schema 1 — the module
+#: docstring above says never to add a field there, and that rule is the reason
+#: schema 1's small meaning stayed stable enough to trust.
+MARKER_TURN_BOUND = "turn_bound"
+SCHEMA_BOUND = 2
+
+#: Bytes of the digest kept. 16 bytes / 32 lower hex, matching the attempt id's
+#: shape so both are the same thing to a reader.
+_TURN_REF_BYTES = 16
+
+
+def make_turn_ref(chat_id: str, message_id: str) -> str:
+    """A stable, privacy-safe reference to one persisted assistant placeholder.
+
+    DOMAIN-SEPARATED AND LENGTH-FRAMED, both deliberately. Concatenating the two
+    ids would let `("ab", "c")` and `("a", "bc")` produce the same reference —
+    two different turns sharing one identity, which is the exact collapse this
+    exists to make impossible. The length prefix removes that, and the domain
+    tag stops a digest computed here ever matching one computed for some other
+    purpose over the same strings.
+
+    A HASH, NOT THE IDS. The ledger already refuses free-form identity from
+    untrusted producers; this keeps that property while still allowing a join,
+    because both sides can compute the same ref from data they already hold and
+    neither has to transmit a chat or message id to do it.
+
+    Both sides must IMPORT this function. An extractor that reimplements the
+    formula is two implementations agreeing with each other, which is the defect
+    class this stack has spent a week removing.
+    """
+    import hashlib
+
+    chat_bytes = (chat_id or "").encode("utf-8")
+    message_bytes = (message_id or "").encode("utf-8")
+    payload = b"owui.turn_ref.v1|" + \
+        str(len(chat_bytes)).encode("ascii") + b":" + chat_bytes + b"|" + \
+        str(len(message_bytes)).encode("ascii") + b":" + message_bytes
+    return hashlib.sha256(payload).hexdigest()[: _TURN_REF_BYTES * 2]
+
+
+def build_turn_bound(attempt: str, turn_ref: str) -> str:
+    """The binding record. Says ONE thing: this execution was dispatched for
+    that persisted placeholder. Not that it answered, saved, or was delivered.
+    """
+    if not _ATTEMPT_RE.match(attempt or ""):
+        raise ValueError("attempt id must be 32 lower-case hex characters")
+    if not _ATTEMPT_RE.match(turn_ref or ""):
+        raise ValueError("turn_ref must be 32 lower-case hex characters")
+    return (f"{MARKER_TURN_BOUND} service=owui schema={SCHEMA_BOUND} "
+            f"attempt={attempt} turn_ref={turn_ref}")
