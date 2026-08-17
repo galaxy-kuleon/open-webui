@@ -4,6 +4,7 @@ import {
 	ALLOWED_CAUSES,
 	EMPTY_TURN_CAUSE,
 	buildBanner,
+	causeLabel,
 	emptyTurnView,
 	hasStructuredEmptyError,
 	isRenderedEmpty,
@@ -173,7 +174,10 @@ describe('emptyTurnView (no raw content ever reaches the UI)', () => {
 		expect(v.cause).toBe('legacy_empty_unknown');
 		expect(v.cause).not.toBe('finalized_no_answer');
 		expect(v.traceId).toBe('t-chat1234-msg45678');
-		expect(v.banner).toContain('legacy_empty_unknown');
+		// The banner carries the WORDS, never the code: `cause` is what ops routes on,
+		// and until 2026-08-17 it was also what the person on the screen was handed.
+		expect(v.banner).toContain('cause unknown');
+		expect(v.banner).not.toContain('legacy_empty_unknown');
 		expect(v.banner).toContain('t-chat1234-msg45678');
 	});
 
@@ -187,8 +191,58 @@ describe('emptyTurnView (no raw content ever reaches the UI)', () => {
 			'chat1234bbbb'
 		);
 		expect(v.cause).toBe('stream_interrupted');
-		expect(v.banner).toContain('stream_interrupted');
+		// Same property, measured in the vocabulary a person actually reads.
+		expect(v.banner).toContain('cut off part-way');
+		expect(v.banner).not.toContain('stream_interrupted');
 		expect(v.banner).not.toContain('unknown');
-		expect(v.banner).not.toContain('finalized_no_answer');
+		expect(v.banner).not.toContain('no answer was written');
+	});
+});
+
+describe('causeLabel (what a PERSON reads)', () => {
+	test('every renderable cause has words, and none of them is a code', () => {
+		for (const cause of ALLOWED_CAUSES) {
+			const label = causeLabel(cause);
+			expect(label.trim()).not.toBe('');
+			expect(label).not.toBe(cause);
+			expect(label).not.toMatch(/[a-z]+_[a-z_]+/);
+		}
+	});
+
+	test('the two undetermined codes read identically', () => {
+		// One failure, two codes, decided only by position in the message tree:
+		// the backend stamps `empty_outcome_unknown`, the load-time guard derives
+		// `legacy_empty_unknown`. Two people hitting one bug quoted two different
+		// strings at ops while the screen printed codes.
+		expect(causeLabel('empty_outcome_unknown')).toBe(causeLabel('legacy_empty_unknown'));
+	});
+
+	test('a withdrawn diagnosis is never restated as fact', () => {
+		// `db_stream_flush` claimed the answer completed and the write did not;
+		// `interrupted_by_restart` came from a sweep that never saw a restart.
+		const undetermined = causeLabel('empty_outcome_unknown');
+		expect(causeLabel('db_stream_flush')).toBe(undetermined);
+		expect(causeLabel('interrupted_by_restart')).toBe(undetermined);
+	});
+
+	test('the two OBSERVED causes keep their own words', () => {
+		// Sensitivity control: mapping all six to one sentence would satisfy every
+		// check above while telling a user nothing.
+		const distinct = new Set([
+			causeLabel('finalized_no_answer'),
+			causeLabel('stream_interrupted'),
+			causeLabel('empty_outcome_unknown')
+		]);
+		expect(distinct.size).toBe(3);
+	});
+
+	test('a non-canonical cause degrades to words, never to itself (M4)', () => {
+		// The guard that matters: a raw backend string must not reach the screen
+		// through the label path either.
+		for (const raw of ['mrchuang-case-2024', 'db error: table users', '', null, undefined]) {
+			const label = causeLabel(raw as unknown);
+			expect(label).toBe(causeLabel('empty_outcome_unknown'));
+			if (typeof raw === 'string' && raw) expect(label).not.toContain(raw);
+		}
 	});
 });

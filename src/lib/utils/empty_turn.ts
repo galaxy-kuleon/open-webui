@@ -68,6 +68,43 @@ export const ALLOWED_CAUSES: ReadonlySet<string> = new Set([
 	EMPTY_TURN_CAUSE_LEGACY
 ]);
 
+/**
+ * The words a PERSON reads. Until now the banner and the pill printed the cause CODE, so a
+ * user who lost an answer was handed `empty_outcome_unknown` — a routing key for ops, in a
+ * place where only a human ever looks. Browser RBV on 2026-08-17 caught it on screen.
+ *
+ * FOUR of the six codes map to the same sentence, and that is not laziness — it is the
+ * honest state of the system. Only two causes were ever OBSERVED by code: the finalizer
+ * seeing no answerable output, and a stream ending early. The other four all mean "we could
+ * not tell", including the two diagnoses that were asserted and later withdrawn
+ * (`db_stream_flush`: "the answer completed and the write did not", which no code observed;
+ * `interrupted_by_restart`: written by a sweep that never saw a restart). Giving a withdrawn
+ * guess its own confident sentence would re-publish the guess to the next reader.
+ *
+ * This also closes the second defect RBV found: identical broken bytes rendered
+ * `empty_outcome_unknown` or `legacy_empty_unknown` purely by position in the message tree,
+ * so two people hitting ONE failure quoted two different codes at ops. They now read the
+ * same words. The codes stay distinct in the store and in `title`/the copy payload, because
+ * ops does need the distinction — a user does not.
+ */
+const CAUSE_UNDETERMINED_LABEL = 'cause unknown';
+export const CAUSE_LABELS: Readonly<Record<string, string>> = Object.freeze({
+	[EMPTY_TURN_CAUSE]: 'no answer was written',
+	[EMPTY_TURN_CAUSE_INTERRUPTED]: 'cut off part-way',
+	[EMPTY_TURN_CAUSE_UNKNOWN_OUTCOME]: CAUSE_UNDETERMINED_LABEL,
+	[EMPTY_TURN_CAUSE_LEGACY]: CAUSE_UNDETERMINED_LABEL,
+	[EMPTY_TURN_CAUSE_LEGACY_FLUSH]: CAUSE_UNDETERMINED_LABEL,
+	[EMPTY_TURN_CAUSE_RESTART_RETIRED]: CAUSE_UNDETERMINED_LABEL
+});
+
+/**
+ * Human words for a cause. Runs the M4 guard FIRST, so a non-canonical value cannot reach a
+ * label lookup, and an unlabelled canonical cause degrades to "cause unknown" rather than
+ * leaking its code — the failure mode of a missing entry is silence, never a raw string.
+ */
+export const causeLabel = (cause: unknown): string =>
+	CAUSE_LABELS[safeCause(cause)] ?? CAUSE_UNDETERMINED_LABEL;
+
 export interface TurnLike {
 	role?: string;
 	content?: unknown;
@@ -129,7 +166,7 @@ export const safeCause = (cause: unknown): string =>
  * when something did sends them to retry work they can see in front of them.
  */
 export const buildBanner = (cause: string, traceId: string): string =>
-	`This turn ended without a final answer (cause: ${cause}). ` +
+	`This turn ended without a final answer (${causeLabel(cause)}). ` +
 	`Retry, or share trace ${traceId} with ops.`;
 
 export interface EmptyTurnView {

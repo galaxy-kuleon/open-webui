@@ -4,6 +4,7 @@
 	// COPYABLE opaque trace id + an explicit Retry — never raw content (M3/M4). The
 	// cause/trace/banner are produced by `$lib/utils/empty_turn` (canonical-cause guarded).
 	import Info from '$lib/components/icons/Info.svelte';
+	import { causeLabel } from '$lib/utils/empty_turn';
 
 	export let cause: string;
 	export let traceId: string;
@@ -14,6 +15,9 @@
 	export let artifacts: Array<{ name?: string; url?: string }> = [];
 
 	let copied = false;
+	// Copies the trace ALONE, deliberately. It is the key ops greps the ledger with, and a
+	// decorated key stops matching — appending the cause here would have traded a working
+	// search for a tidier paste. The cause stays reachable as `title` on the pill.
 	const copyTrace = async () => {
 		try {
 			await navigator.clipboard.writeText(traceId);
@@ -37,7 +41,15 @@
 		<div data-testid="empty-turn-banner">{banner}</div>
 
 		<div class="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
-			<span class="px-2 py-0.5 rounded-full bg-red-600/10" data-testid="empty-turn-cause">cause: {cause}</span>
+			<!-- Human words on screen; the CODE lives in `title` + `data-cause` so ops keeps its
+			     routing key and RBV can still assert on the exact cause. Printing the code here
+			     handed `empty_outcome_unknown` to a person who had just lost an answer. -->
+			<span
+				class="px-2 py-0.5 rounded-full bg-red-600/10"
+				data-testid="empty-turn-cause"
+				data-cause={cause}
+				title={cause}>{causeLabel(cause)}</span
+			>
 			<span>trace:</span>
 			<code class="px-1 rounded bg-black/5 dark:bg-white/10 select-all" data-testid="empty-turn-trace">{traceId}</code>
 			<button
