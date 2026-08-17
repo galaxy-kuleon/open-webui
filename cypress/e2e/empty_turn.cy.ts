@@ -64,20 +64,23 @@ describe('OpenWebUI empty/stuck turn surface (live 8083 E2E, issue #16)', () => 
 
 		// The notice replaces a silent blank, in-place on the assistant message.
 		cy.get('[data-testid="empty-turn-notice"]', { timeout: 30000 }).should('be.visible');
-		// Bucketed cause label.
-		cy.get('[data-testid="empty-turn-cause"]').should('contain', 'db_stream_flush');
+		// Human words on screen; the CODE is an attribute for ops, never a text node.
+		cy.get('[data-testid="empty-turn-cause"]').should('contain', 'cause unknown');
+		cy.get('[data-testid="empty-turn-cause"]').should('have.attr', 'data-cause', 'db_stream_flush');
 		// Opaque, copyable trace id — matches the backend-emitted trace.
 		cy.get('[data-testid="empty-turn-trace"]').should('contain', ET_TRACE);
 		// Explicit Retry affordance.
 		cy.get('[data-testid="empty-turn-notice"]').contains('button', 'Retry').should('exist');
 		// Banner is the fixed cause+trace text (no raw content).
-		cy.get('[data-testid="empty-turn-banner"]').should('contain', 'finished without any content');
+		cy.get('[data-testid="empty-turn-banner"]').should('contain', 'without a final answer');
 
 		// M4: nothing beyond the fixed banner + cause + trace appears in the notice.
 		cy.get('[data-testid="empty-turn-notice"]')
 			.invoke('text')
 			.then((t) => {
-				expect(t).to.contain('db_stream_flush');
+				// The routing key must NOT be readable text anywhere in the notice.
+				expect(t).to.contain('cause unknown');
+				expect(t).to.not.contain('db_stream_flush');
 				expect(t).to.contain(ET_TRACE as string);
 				// the disposable prompt filler must NOT be echoed into the failure UI
 				expect(t).to.not.contain('The sea is vast and deep');
