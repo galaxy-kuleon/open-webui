@@ -251,6 +251,10 @@ class CreateTaskOwnsTheTerminalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_callback_registration_failure_is_unknown_not_not_started(self):
         """The owner exists; only our ability to watch it was lost."""
+        self.assertTrue(
+            hasattr(tl, "owner_observation"),
+            "the production lifecycle has no owner-observation boundary",
+        )
         async def fine():
             return "answer"
 
@@ -290,6 +294,11 @@ class CreateTaskOwnsTheTerminalTests(unittest.IsolatedAsyncioTestCase):
             await wrapped["t"]
             await asyncio.sleep(0)
             self.assertEqual(cap.outcome(), "unknown")
+            observation = tl.owner_observation(1)
+            self.assertEqual(observation["status"], "unknown")
+            self.assertIsNone(observation["active"])
+            self.assertEqual(observation["reason"],
+                             "callback_registration_failed")
 
     async def test_no_lifecycle_leaves_create_task_completely_unchanged(self):
         """The parameter is optional and every existing caller passes nothing."""
@@ -327,6 +336,56 @@ class PersistedPlaceholderLicenceTests(unittest.TestCase):
             tl.make_turn_ref("chat-persisted", "assistant-row"),
         )
         self.assertIsNone(licenses.take("parent-row"))
+
+
+class OwnerObservationRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_the_admin_route_preserves_zero_and_unknown_on_the_wire(self):
+        import open_webui.main as main
+
+        self.assertTrue(
+            hasattr(main, "owner_observation_endpoint"),
+            "the production app has no owner-observation endpoint",
+        )
+
+        payloads = (
+            {"schema": 1, "status": "observed", "active": 0, "reason": None,
+             "scope": "accepted_executions", "worker_count": 1},
+            {"schema": 1, "status": "unknown", "active": None,
+             "reason": "start_unobserved", "scope": "accepted_executions",
+             "worker_count": 1},
+        )
+        for payload in payloads:
+            with self.subTest(status=payload["status"]), mock.patch.object(
+                    main.turn_lifecycle, "owner_observation",
+                    return_value=payload) as observe:
+                self.assertEqual(
+                    await main.owner_observation_endpoint(user=object()), payload)
+                observe.assert_called_once_with(main.UVICORN_WORKERS)
+
+    async def test_the_count_is_admin_authenticated_not_public_health_data(self):
+        import open_webui.main as main
+
+        self.assertTrue(
+            hasattr(main, "owner_observation_endpoint"),
+            "the production app has no owner-observation endpoint",
+        )
+
+        route = next(
+            r for r in main.app.routes
+            if getattr(r, "path", None) == "/api/tasks/owner-observation")
+        dependency_calls = {
+            dependency.call for dependency in route.dependant.dependencies}
+        self.assertIn(main.get_admin_user, dependency_calls)
+        health = next(
+            r for r in main.app.routes if getattr(r, "path", None) == "/health")
+        self.assertNotEqual(route.endpoint, health.endpoint)
+        health_payload = await main.healthcheck()
+        self.assertTrue(
+            {"active", "reason", "scope", "worker_count"}.isdisjoint(
+                health_payload
+            ),
+            "the operational owner count leaked onto unauthenticated /health",
+        )
 
 
 class RealChatCompletionBindingTests(unittest.IsolatedAsyncioTestCase):

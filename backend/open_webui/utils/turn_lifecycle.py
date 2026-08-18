@@ -98,6 +98,19 @@ ALLOWED_OUTCOMES = frozenset({OUTCOME_RETURNED, OUTCOME_RAISED,
                               OUTCOME_CANCELLED, OUTCOME_NOT_STARTED,
                               OUTCOME_UNKNOWN})
 
+OWNER_OBSERVATION_SCHEMA = 1
+OWNER_STATUS_OBSERVED = "observed"
+OWNER_STATUS_UNKNOWN = "unknown"
+OWNER_SCOPE_ACCEPTED_EXECUTIONS = "accepted_executions"
+OWNER_UNKNOWN_START_UNOBSERVED = "start_unobserved"
+OWNER_UNKNOWN_CALLBACK_REGISTRATION = "callback_registration_failed"
+OWNER_UNKNOWN_MULTI_WORKER = "multi_worker_unaggregated"
+OWNER_UNKNOWN_INSTRUMENTATION = "instrumentation_failure"
+ALLOWED_OWNER_UNKNOWN_REASONS = frozenset({
+    OWNER_UNKNOWN_START_UNOBSERVED, OWNER_UNKNOWN_CALLBACK_REGISTRATION,
+    OWNER_UNKNOWN_MULTI_WORKER, OWNER_UNKNOWN_INSTRUMENTATION,
+})
+
 #: Exactly what `secrets.token_hex(16)` produces. Anchored, lower-case only.
 _ATTEMPT_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 
@@ -111,6 +124,11 @@ _ATTEMPT_ENTROPY_BYTES = 16
 #: failure must never pop a lifecycle whose task is still running.
 _REGISTRY: "dict[str, Attempt]" = {}
 _REGISTRY_LOCK = threading.Lock()
+#: None means every accepted owner is still represented by `_REGISTRY`.
+#: Once representation is lost, the process can never reconstruct whether the
+#: unseen owner is still running. Sticky unknown is therefore the only honest
+#: state until process restart; returning to zero would invent an observation.
+_OWNER_OBSERVATION_REASON: "str | None" = None
 
 
 def new_attempt_id() -> str:
@@ -246,6 +264,8 @@ def start(scope: str, mode: str, turn_ref: str | None = None) -> "Attempt | None
         line = build_turn_started(attempt_id, scope, mode)
         lifecycle = Attempt(attempt_id, scope, mode)
         with _REGISTRY_LOCK:
+            if attempt_id in _REGISTRY:
+                raise ValueError("attempt id collision")
             _REGISTRY[attempt_id] = lifecycle
         lifecycle.start_attempted = True
         _emit(line)
@@ -268,6 +288,7 @@ def start(scope: str, mode: str, turn_ref: str | None = None) -> "Attempt | None
                 pass
         return lifecycle
     except Exception:  # noqa: BLE001 -- the caller runs unmeasured, never broken
+        invalidate_owner_observation(OWNER_UNKNOWN_START_UNOBSERVED)
         if lifecycle is not None:
             lifecycle._unregister()
         # NOT `unknown`: no lifecycle was successfully opened, so there is no
@@ -305,8 +326,53 @@ def classify_task(task) -> str:
         return OUTCOME_UNKNOWN
 
 
+def invalidate_owner_observation(reason: str) -> None:
+    """Make process-local ownership permanently unknown, never falsely zero.
+
+    This is intentionally separate from lifecycle outcome. `unknown` on a
+    terminal says the Task's disposition could not be inspected; this flag says
+    the registry no longer represents every owner and therefore cannot expose a
+    count at all.
+    """
+    if reason not in ALLOWED_OWNER_UNKNOWN_REASONS:
+        reason = OWNER_UNKNOWN_INSTRUMENTATION
+    global _OWNER_OBSERVATION_REASON
+    with _REGISTRY_LOCK:
+        if _OWNER_OBSERVATION_REASON is None:
+            _OWNER_OBSERVATION_REASON = reason
+
+
+def owner_observation(worker_count: int) -> dict:
+    """Wire-ready process observation; unknown and zero are disjoint values.
+
+    The existing registry is process-local. A request handled by one of several
+    uvicorn workers cannot observe the others, so multi-worker mode fails closed
+    instead of returning a partial count that looks global.
+    """
+    if type(worker_count) is not int or worker_count != 1:
+        return {
+            "schema": OWNER_OBSERVATION_SCHEMA,
+            "status": OWNER_STATUS_UNKNOWN,
+            "active": None,
+            "reason": OWNER_UNKNOWN_MULTI_WORKER,
+            "scope": OWNER_SCOPE_ACCEPTED_EXECUTIONS,
+            "worker_count": worker_count if type(worker_count) is int else None,
+        }
+    with _REGISTRY_LOCK:
+        reason = _OWNER_OBSERVATION_REASON
+        active = len(_REGISTRY) if reason is None else None
+    return {
+        "schema": OWNER_OBSERVATION_SCHEMA,
+        "status": OWNER_STATUS_OBSERVED if reason is None else OWNER_STATUS_UNKNOWN,
+        "active": active,
+        "reason": reason,
+        "scope": OWNER_SCOPE_ACCEPTED_EXECUTIONS,
+        "worker_count": worker_count,
+    }
+
+
 def live_attempts() -> int:
-    """Diagnostic only. Never a measurement: it counts this process."""
+    """Legacy diagnostic count; callers needing truth use owner_observation."""
     with _REGISTRY_LOCK:
         return len(_REGISTRY)
 

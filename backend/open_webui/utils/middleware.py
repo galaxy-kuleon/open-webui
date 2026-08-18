@@ -3568,6 +3568,60 @@ async def outlet_filter_handler(ctx):
         log.debug(f'Error running outlet filters: {e}')
 
 
+async def _surface_finalized_empty_non_streaming_turn(metadata, event_emitter):
+    """Persist and announce an observed terminal turn with no answer.
+
+    This is the non-streaming sibling of the streaming finalizer.  Reaching
+    this function means the provider request returned normally, no top-level
+    provider error was present, and the first choice carried no truthy answer
+    content.  It does not diagnose why the provider returned no answer and it
+    does not claim that a browser received the best-effort event.
+    """
+    if metadata.get('chat_id', '').startswith('channel:'):
+        return
+
+    empty_error = build_error_payload(
+        metadata['chat_id'], metadata['message_id'],
+        cause_for_phase(PHASE_FINALIZED),
+    )
+    persisted = False
+    emitted = False
+
+    try:
+        surfaced = await Chats.upsert_message_to_chat_by_id_and_message_id(
+            metadata['chat_id'],
+            metadata['message_id'],
+            {'done': True, 'error': empty_error},
+        )
+        persisted = surfaced is not None
+        if not persisted:
+            log.warning(
+                'non-streaming empty terminal not confirmed '
+                '(upsert returned None)')
+    except Exception:
+        log.warning('non-streaming empty terminal write raised')
+
+    try:
+        await event_emitter(
+            {'type': 'chat:message:error', 'data': {'error': empty_error}}
+        )
+        emitted = True
+    except Exception:
+        log.warning('non-streaming empty-turn event not accepted')
+
+    # Existing notice vocabulary: "written" means the row was confirmed and
+    # the event emitter accepted the event.  It is never browser delivery.
+    notice = (
+        NOTICE_WRITTEN
+        if persisted and emitted
+        else NOTICE_UNDELIVERED
+    )
+    log_empty_turn(
+        empty_error, PHASE_FINALIZED,
+        metadata['chat_id'], metadata['message_id'], notice,
+    )
+
+
 async def non_streaming_chat_response_handler(response, ctx):
     request = ctx['request']
 
@@ -3652,6 +3706,12 @@ async def non_streaming_chat_response_handler(response, ctx):
                 # an answer and a contradiction side by side.
                 return response
 
+            choices = response_data.get('choices', [])
+            if not (choices and choices[0].get('message', {}).get('content')):
+                await _surface_finalized_empty_non_streaming_turn(
+                    metadata, event_emitter
+                )
+
             if 'selected_model_id' in response_data and not metadata.get('chat_id', '').startswith('channel:'):
                 await Chats.upsert_message_to_chat_by_id_and_message_id(
                     metadata['chat_id'],
@@ -3661,7 +3721,6 @@ async def non_streaming_chat_response_handler(response, ctx):
                     },
                 )
 
-            choices = response_data.get('choices', [])
             if choices and choices[0].get('message', {}).get('content'):
                 content = response_data['choices'][0]['message']['content']
 

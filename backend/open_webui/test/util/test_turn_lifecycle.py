@@ -128,6 +128,103 @@ class GrammarTests(unittest.TestCase):
         self.assertEqual(tl.capability(), {"owui_turn_lifecycle": tl.SCHEMA})
 
 
+class OwnerObservationTests(unittest.TestCase):
+    def _subject(self):
+        subject = _load()
+        self.assertTrue(
+            hasattr(subject, "owner_observation"),
+            "the production lifecycle has no owner-observation boundary",
+        )
+        return subject
+
+    def test_zero_and_active_are_observed_from_the_real_registry(self):
+        subject = self._subject()
+        self.assertEqual(subject.owner_observation(1), {
+            "schema": 1, "status": "observed", "active": 0, "reason": None,
+            "scope": "accepted_executions", "worker_count": 1,
+        })
+        attempt = subject.start(subject.SCOPE_STORED_CHAT, subject.MODE_TASK)
+        self.assertEqual(subject.owner_observation(1), {
+            "schema": 1, "status": "observed", "active": 1, "reason": None,
+            "scope": "accepted_executions", "worker_count": 1,
+        })
+        attempt.finish(subject.OUTCOME_RETURNED)
+        self.assertEqual(subject.owner_observation(1)["active"], 0)
+
+    def test_an_unobserved_start_can_never_read_as_zero(self):
+        subject = self._subject()
+        real = subject.secrets.token_hex
+
+        def boom(_n):
+            raise OSError("synthetic entropy failure")
+
+        subject.secrets.token_hex = boom
+        try:
+            self.assertIsNone(subject.start(subject.SCOPE_STORED_CHAT,
+                                             subject.MODE_TASK))
+        finally:
+            subject.secrets.token_hex = real
+        self.assertEqual(subject.owner_observation(1), {
+            "schema": 1, "status": "unknown", "active": None,
+            "reason": "start_unobserved", "scope": "accepted_executions",
+            "worker_count": 1,
+        })
+
+    def test_an_attempt_id_collision_can_never_overwrite_a_live_owner(self):
+        subject = self._subject()
+        real = subject.new_attempt_id
+        subject.new_attempt_id = lambda: "a" * 32
+        try:
+            first = subject.start(subject.SCOPE_STORED_CHAT, subject.MODE_TASK)
+            second = subject.start(subject.SCOPE_STORED_CHAT, subject.MODE_TASK)
+        finally:
+            subject.new_attempt_id = real
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(subject.owner_observation(1), {
+            "schema": 1, "status": "unknown", "active": None,
+            "reason": "start_unobserved", "scope": "accepted_executions",
+            "worker_count": 1,
+        })
+        first.finish(subject.OUTCOME_RETURNED)
+
+    def test_unknown_is_monotonic_even_after_later_owners_finish(self):
+        subject = self._subject()
+        self.assertTrue(hasattr(subject, "invalidate_owner_observation"))
+        subject.invalidate_owner_observation(
+            subject.OWNER_UNKNOWN_CALLBACK_REGISTRATION)
+        attempt = subject.start(subject.SCOPE_API, subject.MODE_INLINE)
+        attempt.finish(subject.OUTCOME_RETURNED)
+        observation = subject.owner_observation(1)
+        self.assertEqual(observation["status"], "unknown")
+        self.assertIsNone(observation["active"])
+        self.assertEqual(observation["reason"], "callback_registration_failed")
+
+    def test_multi_worker_is_unknown_not_one_process_zero(self):
+        subject = self._subject()
+        self.assertEqual(subject.owner_observation(2), {
+            "schema": 1, "status": "unknown", "active": None,
+            "reason": "multi_worker_unaggregated",
+            "scope": "accepted_executions", "worker_count": 2,
+        })
+
+    def test_malformed_worker_count_is_unknown_not_defaulted_to_one(self):
+        subject = self._subject()
+        self.assertEqual(subject.owner_observation("1"), {
+            "schema": 1, "status": "unknown", "active": None,
+            "reason": "multi_worker_unaggregated",
+            "scope": "accepted_executions", "worker_count": None,
+        })
+
+    def test_unknown_reasons_are_a_closed_vocabulary(self):
+        subject = self._subject()
+        self.assertTrue(hasattr(subject, "invalidate_owner_observation"))
+        subject.invalidate_owner_observation("free form or customer text")
+        observation = subject.owner_observation(1)
+        self.assertEqual(observation["reason"], "instrumentation_failure")
+        self.assertNotIn("free form", repr(observation))
+
+
 class SingleChannelTests(unittest.TestCase):
     def test_exactly_one_logging_call_in_the_module(self):
         """What makes "any line on this logger came from here" true.

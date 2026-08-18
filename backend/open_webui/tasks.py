@@ -172,6 +172,15 @@ async def create_task(redis, coroutine, id=None, lifecycle=None):
             )
         except BaseException:  # noqa: BLE001
             # The owner exists and may still return, raise or cancel -- we have
+            # also lost the registry's ability to say whether it is active. The
+            # terminal below unregisters immediately while the real Task keeps
+            # running, so exposing len(_REGISTRY) after this point would be an
+            # undercount. Poison the observation before consuming the lifecycle.
+            try:
+                turn_lifecycle.invalidate_owner_observation(
+                    turn_lifecycle.OWNER_UNKNOWN_CALLBACK_REGISTRATION)
+            except BaseException:  # noqa: BLE001 -- counting must not break owner
+                pass
             # simply lost the ability to observe which. `unknown` is the honest
             # terminal; `not_started` would be a lie, because a Task was created.
             try:
