@@ -464,6 +464,7 @@ from open_webui.env import (
     RESET_CONFIG_ON_START,
     SAFE_MODE,
     SCIM_TOKEN,
+    UVICORN_WORKERS,
     VERSION,
     # Admin Account Runtime Creation
     WEBUI_ADMIN_EMAIL,
@@ -2557,6 +2558,12 @@ async def stop_task_endpoint(request: Request, task_id: str, user=Depends(get_ad
 @app.get('/api/tasks')
 async def list_tasks_endpoint(request: Request, user=Depends(get_admin_user)):
     return {'tasks': await list_tasks(request.app.state.redis)}
+
+
+@app.get('/api/tasks/owner-observation')
+async def owner_observation_endpoint(user=Depends(get_admin_user)):
+    """Admin-only process observation; not a drain or deployment verdict."""
+    return turn_lifecycle.owner_observation(UVICORN_WORKERS)
 
 
 @app.get('/api/tasks/chat/{chat_id:path}')
