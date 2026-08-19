@@ -500,6 +500,7 @@ from open_webui.routers import (
     folders,
     functions,
     groups,
+    hermes_artifacts,
     images,
     knowledge,
     memories,
@@ -1492,6 +1493,7 @@ app.mount('/ws', socket_app)
 
 app.include_router(ollama.router, prefix='/ollama', tags=['ollama'])
 app.include_router(openai.router, prefix='/openai', tags=['openai'])
+app.include_router(hermes_artifacts.router, prefix='/api/hermes', tags=['hermes-artifacts'])
 
 
 app.include_router(pipelines.router, prefix='/api/v1/pipelines', tags=['pipelines'])
