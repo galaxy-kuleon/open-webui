@@ -62,9 +62,11 @@ def _read_positive_int_env(name: str, default: int) -> int:
 DOCLING_SERVER_URL: str = os.environ.get('DOCLING_SERVER_URL', 'http://docling:5001').rstrip('/')
 SOFFICE_URL: str = os.environ.get('SKIP_RAG_SOFFICE_URL', 'http://soffice:2004').rstrip('/')
 CACHE_DIR: str = os.environ.get('SKIP_RAG_CACHE_DIR', '/app/backend/skiprag-cache')
-DEFAULT_OCR_PAGE_TIMEOUT_SECONDS: int = 240
+DEFAULT_OCR_PAGE_TIMEOUT_SECONDS: int = 900
 DEFAULT_PDF_CHUNK_PAGES: int = 4
 DEFAULT_DOCLING_MAX_INFLIGHT: int = 1
+DEFAULT_DOCLING_NON_PDF_TIMEOUT_SECONDS: int = 1800
+DEFAULT_SOFFICE_TIMEOUT_SECONDS: int = 1800
 # Maximum seconds allowed per page in the current Docling PDF range.
 OCR_PAGE_TIMEOUT_SECONDS: int = _read_positive_int_env(
     'SKIP_RAG_OCR_PAGE_TIMEOUT',
@@ -80,8 +82,14 @@ DOCLING_MAX_INFLIGHT: int = _read_positive_int_env(
     'SKIP_RAG_DOCLING_MAX_INFLIGHT',
     DEFAULT_DOCLING_MAX_INFLIGHT,
 )
-DOCLING_NON_PDF_TIMEOUT_SECONDS: int = 120
-SOFFICE_TIMEOUT_SECONDS: int = 120
+DOCLING_NON_PDF_TIMEOUT_SECONDS: int = _read_positive_int_env(
+    'SKIP_RAG_DOCLING_NON_PDF_TIMEOUT_SECONDS',
+    DEFAULT_DOCLING_NON_PDF_TIMEOUT_SECONDS,
+)
+SOFFICE_TIMEOUT_SECONDS: int = _read_positive_int_env(
+    'SKIP_RAG_SOFFICE_TIMEOUT_SECONDS',
+    DEFAULT_SOFFICE_TIMEOUT_SECONDS,
+)
 LOG_HASH_PREFIX_LENGTH: int = 16
 ELAPSED_SECONDS_DECIMAL_PLACES: int = 3
 # Explicit boundary emitted within a range by Docling and between adjacent ranges by OWUI.

@@ -316,6 +316,9 @@ def test_pdf_runtime_defaults_are_named_and_measured(monkeypatch):
 
     assert convert.DEFAULT_PDF_CHUNK_PAGES == 4
     assert convert.DEFAULT_DOCLING_MAX_INFLIGHT == 1
+    assert convert.DEFAULT_OCR_PAGE_TIMEOUT_SECONDS == 900
+    assert convert.DEFAULT_DOCLING_NON_PDF_TIMEOUT_SECONDS == 1800
+    assert convert.DEFAULT_SOFFICE_TIMEOUT_SECONDS == 1800
     assert (
         convert._read_positive_int_env(
             'TEST_PDF_CHUNK_PAGES',
@@ -345,6 +348,8 @@ def test_invalid_positive_integer_config_fails_loudly(monkeypatch):
         'SKIP_RAG_PDF_CHUNK_PAGES',
         'SKIP_RAG_DOCLING_MAX_INFLIGHT',
         'SKIP_RAG_OCR_PAGE_TIMEOUT',
+        'SKIP_RAG_DOCLING_NON_PDF_TIMEOUT_SECONDS',
+        'SKIP_RAG_SOFFICE_TIMEOUT_SECONDS',
     ],
 )
 def test_invalid_runtime_config_fails_module_import_loudly(name):
