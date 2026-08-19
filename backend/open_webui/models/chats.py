@@ -127,6 +127,153 @@ class ChatFileModel(BaseModel):
 
 
 ####################
+# Client-save turn guard  (MECHANISM -- no I/O, no logging, no framework)
+####################
+
+#: The fields on a STORED assistant message that only the server writes.
+#:
+#: `done` and `error` are the terminal pair: `done` is written by the placeholder
+#: (`main.py`), by the streaming finalizer, by `save_interrupted_state` and by
+#: the non-streaming finalizer, and `error` is the payload behind the visible
+#: banner. Nothing client-reachable writes either one except the full-blob save
+#: this guard sits on -- the socket path writes `statusHistory`, `content`,
+#: `embeds`, `files` and `sources` and never touches `done`.
+#:
+#: `content` and `output` are deliberately NOT here even though the server owns
+#: them with `ENABLE_REALTIME_CHAT_SAVE` unset. `chatActionHandler` merges an
+#: outlet filter's rewritten messages into the client history and saves the whole
+#: thing, so it is a LEGITIMATE client-originated write of assistant content;
+#: guarding those two would reject it. Closing that hole means persisting the
+#: action result server-side first, which is a different patch.
+GUARDED_TURN_FIELDS = ("done", "error")
+
+#: Why one message conflicted. Closed, and kept separate from the marker's
+#: request-level `reason` because they answer different questions: this says
+#: which shape of staleness a message showed, the marker says whether the
+#: request was refused.
+CONFLICT_DROPPED = "dropped"
+CONFLICT_CHANGED = "changed"
+
+
+def _turn_state_conflicts(stored_messages: dict, claimed_messages: dict) -> list:
+    """Which stored assistant turns does this payload contradict?
+
+    THE COMPARE HALF of a compare-and-set, and the compared value is the stored
+    server-owned turn state itself rather than a synthetic version counter. The
+    client already echoes that state back on every save -- that is precisely the
+    defect -- so its copy IS its claim about what it read, and no new field, no
+    migration and no frontend token are needed to read the claim.
+
+    Both directions are conflicts, and the second one is the less obvious:
+
+      * stored `done=True` -> claimed `done=False` UNDOES a terminal write. This
+        is the shape that makes `nonstreaming-finalize-147` and every other
+        repair non-durable.
+      * stored `done=False` -> claimed `done=True` claims a RUNNING turn
+        finished. That is the "confident answer that is not an answer" class
+        this stack already tracks, arriving from the browser instead of the
+        model.
+
+    PRESENT-KEY SEMANTICS, mirroring `ChatMessages.upsert_message`: a field the
+    server never wrote is not a field the server can defend. Legacy assistant
+    messages with no `done` key are therefore not guarded, which is stated
+    rather than hidden -- guarding an absent key would 409 every future save of
+    the oldest chats and leave their owners unable to save them at all.
+
+    `error` is compared only when the STORED value is truthy. Adding an error
+    the server does not have is what a client-side fetch failure legitimately
+    does (`Chat.svelte` sets `responseMessage.error` on a transport failure);
+    dropping or rewriting one the server does have is the visible half of the
+    same undo.
+
+    A stored id ABSENT from the payload is deliberately not a conflict here.
+    That is message deletion, it is a real user action, and refusing it needs a
+    different signal than this one -- see the patch header's NOT COVERED.
+
+    Deterministic order: the marker names one message, and which one it names
+    must not depend on dict iteration order.
+    """
+    conflicts = []
+    for message_id in sorted(stored_messages):
+        stored_message = stored_messages[message_id]
+        if not isinstance(stored_message, dict):
+            continue
+        # The STORED role decides. Reading the role from the payload would let a
+        # client relabel a message to `user` and walk straight past the guard.
+        if stored_message.get("role") != "assistant":
+            continue
+        claimed = claimed_messages.get(message_id)
+        if not isinstance(claimed, dict):
+            continue
+        for field in GUARDED_TURN_FIELDS:
+            if field == "error" and not stored_message.get("error"):
+                continue
+            if field not in stored_message:
+                continue
+            if field not in claimed:
+                conflicts.append({"message_id": message_id, "field": field,
+                                  "conflict": CONFLICT_DROPPED})
+                continue
+            stored_value = stored_message[field]
+            claimed_value = claimed[field]
+            if field == "done":
+                # `done` is a flag, not a value: `0`/`False`/`None` and
+                # `1`/`True` are the same two states however a client spells
+                # them, and a spelling difference is not staleness.
+                if bool(stored_value) != bool(claimed_value):
+                    conflicts.append({"message_id": message_id, "field": field,
+                                      "conflict": CONFLICT_CHANGED})
+            elif claimed_value != stored_value:
+                conflicts.append({"message_id": message_id, "field": field,
+                                  "conflict": CONFLICT_CHANGED})
+    return conflicts
+
+
+def merge_client_chat(stored_chat: dict, client_chat: dict,
+                      derive_content=None) -> tuple:
+    """ONE merge, feeding BOTH stores. Returns ``(merged, conflicts)``.
+
+    Pure: no session, no I/O, no logging, no HTTP. That is the whole reason it
+    lives here rather than in the handler -- the handler currently derives the
+    blob write and the reconcile input from the same local, and the `if
+    messages:` asymmetry after it is how the two stores were observed to
+    diverge. A caller that feeds this one return value to both writes cannot
+    reintroduce that split by editing one branch.
+
+    `derive_content` is INJECTED rather than imported. The content re-derivation
+    needs `serialize_output`, which lives in `utils.middleware`, and
+    `utils.middleware` imports this module -- importing it here would be a cycle.
+    Injecting it also keeps this function testable with no framework at all.
+
+    THE COMPARISON IS AGAINST `merged`, NOT against the raw payload, and that is
+    load-bearing. `{**stored, **client}` is one level deep, so a request that
+    omits `history` entirely -- a title rename, a tag edit, the controls
+    autosave -- inherits the stored history and compares clean. Comparing the
+    raw payload instead would have found every one of those messages "dropped"
+    and 409'd the most ordinary saves in the product.
+    """
+    merged = {**stored_chat, **client_chat}
+
+    stored_messages = (stored_chat.get("history") or {}).get("messages") or {}
+    merged_messages = (merged.get("history") or {}).get("messages") or {}
+    conflicts = _turn_state_conflicts(stored_messages, merged_messages)
+
+    # Re-derive content from output for assistant messages so that frontend
+    # edits to output items are reflected in content. Only when output
+    # actually changed -- otherwise content set independently of output
+    # (e.g. a `replace` event or an outlet filter footer) would be reverted.
+    if derive_content is not None:
+        for msg_id, msg in merged_messages.items():
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") == "assistant" and msg.get("output"):
+                if msg.get("output") != stored_messages.get(msg_id, {}).get("output"):
+                    msg["content"] = derive_content(msg["output"])
+
+    return merged, conflicts
+
+
+####################
 # Forms
 ####################
 

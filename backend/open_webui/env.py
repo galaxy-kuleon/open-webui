@@ -357,6 +357,24 @@ DATABASE_ENABLE_SESSION_SHARING = os.getenv('DATABASE_ENABLE_SESSION_SHARING', '
 ENABLE_PUBLIC_ACTIVE_USERS_COUNT = os.getenv('ENABLE_PUBLIC_ACTIVE_USERS_COUNT', 'True').lower() == 'true'
 RESET_CONFIG_ON_START = os.getenv('RESET_CONFIG_ON_START', 'False').lower() == 'true'
 ENABLE_REALTIME_CHAT_SAVE = os.getenv('ENABLE_REALTIME_CHAT_SAVE', 'False').lower() == 'true'
+
+# What `POST /api/v1/chats/{id}` does when the client's copy of a stored
+# assistant turn contradicts the server's. POLICY, deliberately separated from
+# the mechanism that detects the contradiction (`models.chats.merge_client_chat`)
+# so a deployment can measure before it refuses, and can back the refusal out
+# without a rebuild.
+#
+#   enforce  (default) -- 409, and NOTHING is written to either store.
+#   observe            -- apply the save exactly as before, and file the marker
+#                         with `outcome=would_reject`.
+#
+# `observe` is the STAGED-ROLLOUT state, not a safe steady state: the undo it
+# names still lands. The frontend handles an enforced conflict by refetching
+# these server-owned fields and retrying once; a second race remains a visible
+# failure rather than an unbounded retry. Leave production policy at the
+# default unless an operator is explicitly measuring a new rollout.
+CLIENT_SAVE_TURN_GUARD_OBSERVE_ONLY = os.getenv(
+    'CLIENT_SAVE_TURN_GUARD', 'enforce').strip().lower() == 'observe'
 ENABLE_QUERIES_CACHE = os.getenv('ENABLE_QUERIES_CACHE', 'False').lower() == 'true'
 RAG_SYSTEM_CONTEXT = os.getenv('RAG_SYSTEM_CONTEXT', 'False').lower() == 'true'
 

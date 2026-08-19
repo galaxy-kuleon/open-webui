@@ -600,3 +600,102 @@ def build_banner(cause: str, trace_id: str) -> str:
         "This turn ended without a final answer (cause: {}). "
         "Retry, or share trace {} with ops."
     ).format(cause, trace_id)
+
+
+# THE CLIENT SAVE ROUTE, which is the only way a browser can move `done`.
+#
+# `POST /api/v1/chats/{id}` replaces the whole chat blob with the client's copy
+# and then reconciles the normalized rows from it, so a tab whose mirror predates
+# a terminal write re-asserts the pre-terminal state into BOTH stores. Every
+# terminal write this module exists to record -- the finalized-empty banner, the
+# interrupted-turn rescue -- is undoable by that route, silently, with no record
+# that anything was undone.
+#
+# ONE kind for BOTH outcomes, and the accept line is the point of it. A guard
+# that fires zero times must be distinguishable from a guard that was never
+# wired: at eleven full-blob saves per forty-eight hours on live 8083, a
+# rejection-only marker looks identical either way, and this stack has already
+# shipped one P0 fix that never once ran while its silence read as health.
+# `outcome=` carries the distinction, so a zero always arrives with its own
+# positive control beside it.
+MARKER_CLIENT_SAVE = "client_save_checked"
+
+#: What the guard did with this request. `accepted` = no conflict was found and
+#: the save was applied. `rejected` = a conflict was found and NOTHING was
+#: written to either store. `would_reject` = a conflict was found and the save
+#: was applied anyway, because the deployment is running the guard in observe
+#: mode; it is the staged-rollout state and it is NOT a safe steady state.
+CLIENT_SAVE_ACCEPTED = "accepted"
+CLIENT_SAVE_REJECTED = "rejected"
+CLIENT_SAVE_WOULD_REJECT = "would_reject"
+ALLOWED_CLIENT_SAVE_OUTCOMES = frozenset({
+    CLIENT_SAVE_ACCEPTED, CLIENT_SAVE_REJECTED, CLIENT_SAVE_WOULD_REJECT,
+})
+
+#: WHY it was refused, from a closed set. `none` accompanies `accepted` and is
+#: spelled rather than omitted: a missing key and a key meaning "nothing was
+#: wrong" are different records, and the ledger's `_KV_RE` cannot tell an absent
+#: field from one nobody wrote.
+CLIENT_SAVE_REASON_NONE = "none"
+CLIENT_SAVE_REASON_STALE_TURN_STATE = "stale_turn_state"
+ALLOWED_CLIENT_SAVE_REASONS = frozenset({
+    CLIENT_SAVE_REASON_NONE, CLIENT_SAVE_REASON_STALE_TURN_STATE,
+})
+
+
+def build_client_save_marker(chat_id: str, message_id: str, outcome: str,
+                             reason: str) -> str:
+    """The ledger line for one guarded client save. Ids and closed labels only.
+
+    Deliberately carries NO field values and no counts of anything the client
+    sent: the conflicting field's stored and claimed values are message content
+    in every practically interesting case, and this logger's whole trust rests
+    on nothing free-form reaching it. An operator who needs the detail has the
+    chat and message id and can read the row.
+    """
+    if outcome not in ALLOWED_CLIENT_SAVE_OUTCOMES:
+        raise ValueError("outcome {!r} is not canonical; allowed: {}".format(
+            outcome, sorted(ALLOWED_CLIENT_SAVE_OUTCOMES)))
+    if reason not in ALLOWED_CLIENT_SAVE_REASONS:
+        raise ValueError("reason {!r} is not canonical; allowed: {}".format(
+            reason, sorted(ALLOWED_CLIENT_SAVE_REASONS)))
+    # Same whitespace refusal as every other marker here: `_KV_RE` splits on
+    # whitespace, so a value containing a space silently truncates the record.
+    for key, val in (("chat", chat_id or ""), ("msg", message_id or "")):
+        if val != "".join(val.split()):
+            raise ValueError("marker field {!r} contains whitespace: {!r}".format(key, val))
+    return (
+        "{} service=owui outcome={} reason={} chat={} msg={}".format(
+            MARKER_CLIENT_SAVE, outcome, reason, chat_id or "-", message_id or "-",
+        )
+    )
+
+
+def log_client_save(chat_id: str, message_id: str, outcome: str,
+                    reason: str) -> str:
+    """Emit it, and never raise into the request.
+
+    Same promise as the other emitters here, and the same honest limit: when the
+    sink itself is broken there is no channel left to say so. The direction of
+    the silence is what decides the fallback -- a lost ACCEPT line only shrinks a
+    denominator, but a lost REJECT line turns a refused save into a save that
+    looks like it never happened, so an unbuildable line is still emitted with
+    its ids dropped rather than the event going unrecorded.
+    """
+    try:
+        line = build_client_save_marker(chat_id, message_id, outcome, reason)
+        level = logging.INFO
+    except Exception as exc:  # noqa: BLE001 -- see docstring
+        # `outcome=marker_unbuildable`: a value deliberately OUTSIDE
+        # ALLOWED_CLIENT_SAVE_OUTCOMES, exactly as `log_empty_turn` does with
+        # `phase=`. Naming either real outcome here would INVENT one -- claiming
+        # a rejection that may not have happened, or an acceptance that may not
+        # have either -- and the reader treats an unknown outcome as
+        # not-measured, which is the safe direction.
+        line = ("{} service=owui outcome=marker_unbuildable reason={} "
+                "chat=- msg=- err={}").format(
+            MARKER_CLIENT_SAVE, CLIENT_SAVE_REASON_NONE, type(exc).__name__,
+        )
+        level = logging.WARNING
+    _emit(level, line)
+    return line

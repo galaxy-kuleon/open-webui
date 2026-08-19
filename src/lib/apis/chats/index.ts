@@ -1039,10 +1039,11 @@ export const getChatAccessGrants = async (token: string, id: string) => {
 	return res;
 };
 
-export const updateChatById = async (token: string, id: string, chat: object) => {
-	let error = null;
+const STALE_TURN_STATE = 'stale_turn_state';
+const MAX_STALE_TURN_RETRIES = 1;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/chats/${id}`, {
+const postChatUpdate = async (token: string, id: string, chat: object) => {
+	const response = await fetch(`${WEBUI_API_BASE_URL}/chats/${id}`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -1052,26 +1053,71 @@ export const updateChatById = async (token: string, id: string, chat: object) =>
 		body: JSON.stringify({
 			chat: chat
 		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.then((json) => {
-			return json;
-		})
-		.catch((err) => {
-			error = err;
+	});
+	const body = await response.json();
+	return { response, body };
+};
 
-			console.error(err);
-			return null;
-		});
-
-	if (error) {
-		throw error;
+export const reconcileServerTurnState = (
+	clientChat: any,
+	serverChat: any,
+	messageIds: string[]
+) => {
+	const clientMessages = clientChat?.history?.messages;
+	const serverMessages = serverChat?.history?.messages;
+	if (!clientMessages || !serverMessages || !Array.isArray(messageIds) || messageIds.length === 0) {
+		return null;
 	}
 
-	return res;
+	const reconciledMessages = { ...clientMessages };
+	for (const messageId of messageIds) {
+		const clientMessage = clientMessages[messageId];
+		const serverMessage = serverMessages[messageId];
+		if (!clientMessage || !serverMessage) return null;
+
+		const reconciledMessage = { ...clientMessage };
+		if (Object.prototype.hasOwnProperty.call(serverMessage, 'done')) {
+			reconciledMessage.done = serverMessage.done;
+		}
+		if (serverMessage.error) {
+			reconciledMessage.error = serverMessage.error;
+		}
+		reconciledMessages[messageId] = reconciledMessage;
+	}
+
+	return {
+		...clientChat,
+		history: {
+			...clientChat.history,
+			messages: reconciledMessages
+		}
+	};
+};
+
+export const updateChatById = async (token: string, id: string, chat: object) => {
+	let candidate = chat;
+
+	for (let attempt = 0; attempt <= MAX_STALE_TURN_RETRIES; attempt++) {
+		const { response, body } = await postChatUpdate(token, id, candidate);
+		if (response.ok) return body;
+
+		const staleTurn =
+			response.status === 409 && body?.detail?.reason === STALE_TURN_STATE ? body.detail : null;
+		if (!staleTurn || attempt === MAX_STALE_TURN_RETRIES) {
+			console.error(body);
+			throw body;
+		}
+
+		const latest = await getChatById(token, id);
+		const reconciled = reconcileServerTurnState(candidate, latest?.chat, staleTurn.message_ids);
+		if (!reconciled) {
+			console.error(body);
+			throw body;
+		}
+		candidate = reconciled;
+	}
+
+	throw new Error('unreachable stale-turn retry state');
 };
 
 export const deleteChatById = async (token: string, id: string) => {

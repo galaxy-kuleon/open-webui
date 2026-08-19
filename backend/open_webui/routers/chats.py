@@ -12,6 +12,7 @@ from open_webui.config import ENABLE_ADMIN_CHAT_ACCESS, ENABLE_ADMIN_EXPORT
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
+from open_webui.env import CLIENT_SAVE_TURN_GUARD_OBSERVE_ONLY
 from open_webui.models.chats import (
     AggregateChatStats,
     ChatBody,
@@ -25,6 +26,7 @@ from open_webui.models.chats import (
     ChatTitleIdResponse,
     ChatUsageStatsListResponse,
     MessageStats,
+    merge_client_chat,
 )
 from open_webui.models.folders import Folders
 from open_webui.models.shared_chats import SharedChatResponse, SharedChats
@@ -33,6 +35,14 @@ from open_webui.socket.main import get_event_emitter
 from open_webui.tasks import stop_item_tasks
 from open_webui.utils.access_control import filter_allowed_access_grants, has_permission
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.failure_surface import (
+    CLIENT_SAVE_ACCEPTED,
+    CLIENT_SAVE_REASON_NONE,
+    CLIENT_SAVE_REASON_STALE_TURN_STATE,
+    CLIENT_SAVE_REJECTED,
+    CLIENT_SAVE_WOULD_REJECT,
+    log_client_save,
+)
 from open_webui.utils.middleware import serialize_output
 from open_webui.utils.misc import get_message_list
 from pydantic import BaseModel
@@ -971,24 +981,72 @@ async def update_chat_by_id(
 ):
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
-        updated_chat = {**chat.chat, **form_data.chat}
+        # THE CHOKE POINT. This is the only client-reachable full-history
+        # writer in the product: the only caller of `Chats.update_chat_by_id`
+        # outside `models/chats.py`, the only caller of
+        # `reconcile_messages_by_chat_id`, and the only route through which a
+        # browser can move `done` at all -- the socket path writes
+        # `statusHistory`, `content`, `embeds`, `files` and `sources` and never
+        # touches it.
+        #
+        # THE GUARD DOES NOT SIT ON THE SERVER'S OWN WRITE PATH, and that is
+        # what makes continue-generation legal by construction rather than by
+        # exception. Continue re-opens an EXISTING assistant message with
+        # `done: False` (`main.py`, the existing-chat placeholder loop), and
+        # `continue_response` is enabled for every group on this deployment. A
+        # monotonic `done` rule in `ChatMessages.upsert_message` or in
+        # `Chats.upsert_message_to_chat_by_id_and_message_id` would break the
+        # server, not the browser -- and would fail silently, leaving a row
+        # claiming `done=true` while a generation is actively running.
+        merged, conflicts = merge_client_chat(
+            chat.chat, form_data.chat, derive_content=serialize_output)
 
-        # Re-derive content from output for assistant messages so that frontend
-        # edits to output items are reflected in content. Only when output
-        # actually changed — otherwise content set independently of output
-        # (e.g. a `replace` event or an outlet filter footer) would be reverted.
-        existing_messages = (chat.chat.get('history') or {}).get('messages') or {}
-        for msg_id, msg in updated_chat.get('history', {}).get('messages', {}).items():
-            if msg.get('role') == 'assistant' and msg.get('output'):
-                if msg.get('output') != existing_messages.get(msg_id, {}).get('output'):
-                    msg['content'] = serialize_output(msg['output'])
+        if conflicts:
+            # ONE message named, deterministically: the marker is a pointer for
+            # an operator, not a manifest. `merge_client_chat` sorts, so the
+            # same payload always names the same message.
+            log_client_save(
+                id, conflicts[0]['message_id'],
+                CLIENT_SAVE_WOULD_REJECT if CLIENT_SAVE_TURN_GUARD_OBSERVE_ONLY
+                else CLIENT_SAVE_REJECTED,
+                CLIENT_SAVE_REASON_STALE_TURN_STATE,
+            )
+            if not CLIENT_SAVE_TURN_GUARD_OBSERVE_ONLY:
+                # WHOLE REQUEST, BOTH STORES, NOTHING WRITTEN. Applying the
+                # non-conflicting part would be last-writer-wins with extra
+                # bookkeeping: the payload is one stale snapshot, and half of a
+                # stale snapshot is still stale. Raising here is also what keeps
+                # the two stores in step -- the blob write and the reconcile
+                # both live below this line, so neither can run alone.
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        'reason': CLIENT_SAVE_REASON_STALE_TURN_STATE,
+                        'message_ids': sorted(
+                            {c['message_id'] for c in conflicts}),
+                    },
+                )
+        else:
+            # THE POSITIVE CONTROL, emitted on every save that passes. Without
+            # it a guard that has never fired and a guard that was never wired
+            # produce the same silence, and at eleven full-blob saves per
+            # forty-eight hours that silence is the expected reading either way.
+            log_client_save(id, '', CLIENT_SAVE_ACCEPTED,
+                            CLIENT_SAVE_REASON_NONE)
 
-        chat = await Chats.update_chat_by_id(id, updated_chat, db=db)
+        chat = await Chats.update_chat_by_id(id, merged, db=db)
 
         # Reconcile chat_message rows with the committed blob.
         # This is the only caller where the frontend pushes a full
         # history with potential edits, deletions, or new branches.
-        messages = (updated_chat.get('history') or {}).get('messages') or {}
+        #
+        # SAME OBJECT as the blob write above, which is the point of the single
+        # merge: the two stores can no longer be fed different dicts by an edit
+        # to one branch. The `if messages:` asymmetry below is UNCHANGED and
+        # still open -- an empty-history payload replaces the blob and skips the
+        # reconcile -- because closing it changes deletion semantics and needs
+        # its own patch.
+        messages = (merged.get('history') or {}).get('messages') or {}
         if messages:
             await Chats.reconcile_messages_by_chat_id(id, user.id, messages)
 
