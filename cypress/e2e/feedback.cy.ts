@@ -16,7 +16,7 @@
 const BASE = Cypress.config('baseUrl');
 const EMAIL = Cypress.env('E2E_FEEDBACK_EMAIL') || 'e2e-feedback-cypress-disposable@example.com';
 const PASSWORD = Cypress.env('E2E_FEEDBACK_PASSWORD') || 'Cypr3ssE2E-feedback!';
-const MODEL = Cypress.env('E2E_FEEDBACK_MODEL') || 'lmstudio.qwen3.5-4b';
+const MODEL = Cypress.env('E2E_FEEDBACK_MODEL') || 'lmstudio.qwen3.5-4b-mtp';
 
 // Two categories spanning BOTH taxonomy groups (src/lib/utils/feedback.ts).
 const PRODUCT_CATEGORY = { key: 'formatting_or_layout_problem', label: 'Formatting or layout problem' };

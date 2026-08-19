@@ -14,7 +14,7 @@ const EMAIL = Cypress.env('ET_EMAIL');
 const PASSWORD = Cypress.env('ET_PASSWORD');
 const ET_CHAT_ID = Cypress.env('ET_CHAT_ID'); // backend-produced empty-turn chat (Case 1)
 const ET_TRACE = Cypress.env('ET_TRACE'); // expected opaque trace id
-const MODEL = 'lmstudio.qwen3.5-4b';
+const MODEL = 'lmstudio.qwen3.5-4b-mtp';
 
 const uuid = () =>
 	'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
