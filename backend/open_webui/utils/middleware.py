@@ -101,6 +101,7 @@ from open_webui.utils.file_coverage import (
 )
 from open_webui.utils.hermes_bridge import (
     memory_bridge_misconfigured,
+    model_uses_hermes_tool_harness,
     should_bypass_openwebui_memory_injection,
 )
 from open_webui.utils.files import (
@@ -1478,12 +1479,10 @@ async def chat_completion_tools_handler(
                     if tools[tool_function_name].get('metadata', {}).get('file_handler', False):
                         skip_files = True
 
-            # check if "tool_calls" in result
-            if result.get('tool_calls'):
-                for tool_call in result.get('tool_calls'):
-                    await tool_call_handler(tool_call)
-            else:
-                await tool_call_handler(result)
+            # A selector may return {"name": null} to mean no tool. Treat it
+            # as no selection, not an invocation of a fictional `None` tool.
+            for tool_call in _selected_tool_calls(result):
+                await tool_call_handler(tool_call)
 
         except Exception as e:
             log.debug(f'Error: {e}')
@@ -2389,6 +2388,51 @@ def _normalised_request_files(files):
     return []
 
 
+def _bypass_openwebui_tool_harness(
+    form_data: dict,
+    metadata: dict,
+    model: dict,
+    tool_ids,
+    terminal_id,
+):
+    """Remove the duplicate outer tool harness for a Hermes-owned model."""
+    if not model_uses_hermes_tool_harness(model):
+        return tool_ids, terminal_id, False
+    form_data.pop("tools", None)
+    metadata["tool_servers"] = None
+    metadata["openwebui_tool_harness"] = "bypassed_hermes_owned"
+    return None, None, True
+
+
+def _foreground_first_background_tasks(tasks: dict, model_id: str) -> dict:
+    """Keep Agent terminal truth independent of cosmetic model jobs."""
+    if not model_uses_hermes_tool_harness(model_id):
+        return tasks
+    foreground = dict(tasks or {})
+    for task in (
+        TASKS.FOLLOW_UP_GENERATION,
+        TASKS.TITLE_GENERATION,
+        TASKS.TAGS_GENERATION,
+    ):
+        if task in foreground:
+            foreground[task] = False
+    return foreground
+
+
+def _selected_tool_calls(result) -> list[dict]:
+    """Normalize selector no-choice output without inventing a `None` tool."""
+    if not isinstance(result, dict):
+        return []
+    candidates = result.get("tool_calls")
+    if not isinstance(candidates, list):
+        candidates = [result]
+    return [
+        call
+        for call in candidates
+        if isinstance(call, dict) and str(call.get("name") or "").strip()
+    ]
+
+
 async def process_chat_payload(request, form_data, user, metadata, model):
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
@@ -2650,17 +2694,29 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             ):
                 form_data = await chat_memory_handler(request, form_data, extra_params, user)
 
-        if 'web_search' in features and features['web_search']:
+        if (
+            'web_search' in features
+            and features['web_search']
+            and not model_uses_hermes_tool_harness(model)
+        ):
             # Skip forced RAG web search when native FC is enabled - model can use web_search tool
             if metadata.get('params', {}).get('function_calling') != 'native':
                 form_data = await chat_web_search_handler(request, form_data, extra_params, user)
 
-        if 'image_generation' in features and features['image_generation']:
+        if (
+            'image_generation' in features
+            and features['image_generation']
+            and not model_uses_hermes_tool_harness(model)
+        ):
             # Skip forced image generation when native FC is enabled - model can use generate_image tool
             if metadata.get('params', {}).get('function_calling') != 'native':
                 form_data = await chat_image_generation_handler(request, form_data, extra_params, user)
 
-        if 'code_interpreter' in features and features['code_interpreter']:
+        if (
+            'code_interpreter' in features
+            and features['code_interpreter']
+            and not model_uses_hermes_tool_harness(model)
+        ):
             engine = getattr(request.app.state.config, 'CODE_INTERPRETER_ENGINE', 'pyodide')
 
             # Skip XML-tag prompt injection when native FC is enabled —
@@ -2696,6 +2752,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     tool_ids = form_data.pop('tool_ids', None)
     terminal_id = form_data.pop('terminal_id', None)
+    tool_ids, terminal_id, hermes_owns_tool_harness = _bypass_openwebui_tool_harness(
+        form_data, metadata, model, tool_ids, terminal_id
+    )
     files = _normalised_request_files(form_data.pop('files', None))
     form_data.pop('folder_id', None)
 
@@ -2791,7 +2850,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # When the caller provides an explicit OpenAI-style `tools` array in the
     # request body, skip all server-side tool resolution and pass the caller's
     # tools through to the model unchanged.
-    if not payload_tools:
+    if not payload_tools and not hermes_owns_tool_harness:
         # Server side tools
         tool_ids = metadata.get('tool_ids', None)
         # Client side tools
@@ -3209,7 +3268,12 @@ async def background_tasks_handler(ctx):
     form_data = ctx['form_data']
     user = ctx['user']
     metadata = ctx['metadata']
-    tasks = ctx['tasks']
+    tasks = _foreground_first_background_tasks(
+        ctx['tasks'],
+        (ctx.get('form_data') or {}).get('model')
+        or (ctx.get('metadata') or {}).get('model_id')
+        or '',
+    )
     event_emitter = ctx['event_emitter']
 
     message = None

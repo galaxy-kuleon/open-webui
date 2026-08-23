@@ -38,9 +38,13 @@ NEVER ADD A FIELD TO SCHEMA 1. Its small meaning is the stable denominator.
 from __future__ import annotations
 
 import logging
+import json
+import os
 import re
 import secrets
 import threading
+import time
+from pathlib import Path
 
 #: The dedicated logger. Its whole value is that ANY line on it came from this
 #: module, so the collector can allow-list it wholesale instead of pattern-
@@ -129,6 +133,54 @@ _REGISTRY_LOCK = threading.Lock()
 #: unseen owner is still running. Sticky unknown is therefore the only honest
 #: state until process restart; returning to zero would invent an observation.
 _OWNER_OBSERVATION_REASON: "str | None" = None
+
+_ACTIVITY_DIR_DEFAULT = "/run/kg-user-activity"
+_ACTIVITY_LEASE_SECONDS_DEFAULT = 46800
+
+
+def _activity_path(attempt_id: str) -> Path:
+    root = Path(os.environ.get("KG_USER_ACTIVITY_DIR", _ACTIVITY_DIR_DEFAULT))
+    return root / f"{attempt_id}.json"
+
+
+def _open_activity_lease(attempt: "Attempt") -> None:
+    """Best-effort foreground lease; lifecycle logging remains authoritative."""
+    try:
+        now = time.time()
+        ttl = int(
+            os.environ.get(
+                "KG_USER_ACTIVITY_LEASE_SECONDS",
+                str(_ACTIVITY_LEASE_SECONDS_DEFAULT),
+            )
+        )
+        target = _activity_path(attempt.id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "attempt": attempt.id,
+                    "scope": attempt.scope,
+                    "execution_mode": attempt.mode,
+                    "started_at": now,
+                    "expires_at": now + max(1, ttl),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(target)
+    except Exception:  # noqa: BLE001 -- activity control cannot break a turn
+        pass
+
+
+def _close_activity_lease(attempt_id: str) -> None:
+    try:
+        _activity_path(attempt_id).unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 -- stale leases expire automatically
+        pass
 
 
 def new_attempt_id() -> str:
@@ -227,10 +279,12 @@ class Attempt:
             # turn, and it must not silently become a healthy label either. The
             # attempt stays claimed and nothing is written, which the reader
             # counts as a missing terminal.
+            _close_activity_lease(self.id)
             self._unregister()
             return True
         self.terminal_attempted = True
         _emit(line)
+        _close_activity_lease(self.id)
         self._unregister()
         return True
 
@@ -268,6 +322,7 @@ def start(scope: str, mode: str, turn_ref: str | None = None) -> "Attempt | None
                 raise ValueError("attempt id collision")
             _REGISTRY[attempt_id] = lifecycle
         lifecycle.start_attempted = True
+        _open_activity_lease(lifecycle)
         _emit(line)
         # A separate schema-2 fact. A malformed or unavailable licence may
         # withhold this row, but it may never unwind the accepted execution.
@@ -290,6 +345,7 @@ def start(scope: str, mode: str, turn_ref: str | None = None) -> "Attempt | None
     except Exception:  # noqa: BLE001 -- the caller runs unmeasured, never broken
         invalidate_owner_observation(OWNER_UNKNOWN_START_UNOBSERVED)
         if lifecycle is not None:
+            _close_activity_lease(lifecycle.id)
             lifecycle._unregister()
         # NOT `unknown`: no lifecycle was successfully opened, so there is no
         # attempt to report an outcome for. An unopened attempt is absent from
@@ -301,6 +357,7 @@ def start(scope: str, mode: str, turn_ref: str | None = None) -> "Attempt | None
         # no business deciding a shutdown does not apply to it. The registry
         # entry is still removed so a killed start cannot leak a live attempt.
         if lifecycle is not None:
+            _close_activity_lease(lifecycle.id)
             lifecycle._unregister()
         raise
 

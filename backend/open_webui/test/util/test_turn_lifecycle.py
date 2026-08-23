@@ -13,8 +13,10 @@ the grammar at all.
 """
 import asyncio
 import importlib.util
+import json
 import logging
 import os
+import tempfile
 import threading
 import unittest
 
@@ -32,6 +34,50 @@ def _load():
 
 
 tl = _load()
+
+
+class ForegroundActivityLeaseTests(unittest.TestCase):
+    def setUp(self):
+        self._previous_dir = os.environ.get("KG_USER_ACTIVITY_DIR")
+        self._tempdir = tempfile.TemporaryDirectory()
+        os.environ["KG_USER_ACTIVITY_DIR"] = self._tempdir.name
+
+    def tearDown(self):
+        if self._previous_dir is None:
+            os.environ.pop("KG_USER_ACTIVITY_DIR", None)
+        else:
+            os.environ["KG_USER_ACTIVITY_DIR"] = self._previous_dir
+        self._tempdir.cleanup()
+
+    def test_start_opens_an_unexpired_control_lease_and_finish_closes_it(self):
+        attempt = tl.start(tl.SCOPE_STORED_CHAT, tl.MODE_TASK)
+        self.assertIsNotNone(attempt)
+        lease = tl._activity_path(attempt.id)
+        payload = json.loads(lease.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema"], 1)
+        self.assertEqual(payload["attempt"], attempt.id)
+        self.assertGreater(payload["expires_at"], payload["started_at"])
+        self.assertTrue(attempt.finish(tl.OUTCOME_RETURNED))
+        self.assertFalse(lease.exists())
+
+    def test_finishing_one_attempt_does_not_close_another_attempt_lease(self):
+        first = tl.start(tl.SCOPE_API, tl.MODE_TASK)
+        second = tl.start(tl.SCOPE_LOCAL, tl.MODE_INLINE)
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertTrue(tl._activity_path(first.id).exists())
+        self.assertTrue(tl._activity_path(second.id).exists())
+        first.finish(tl.OUTCOME_RETURNED)
+        self.assertFalse(tl._activity_path(first.id).exists())
+        self.assertTrue(tl._activity_path(second.id).exists())
+        second.finish(tl.OUTCOME_CANCELLED)
+
+    def test_invalid_outcome_still_closes_its_control_lease(self):
+        attempt = tl.start(tl.SCOPE_API, tl.MODE_TASK)
+        self.assertIsNotNone(attempt)
+        lease = tl._activity_path(attempt.id)
+        self.assertTrue(attempt.finish("not-a-real-outcome"))
+        self.assertFalse(lease.exists())
 
 
 class ExactlyOnceTests(unittest.TestCase):

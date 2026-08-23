@@ -110,6 +110,12 @@ HERMES_BRIDGE_MODEL_IDS = tuple(
 )
 
 
+def model_uses_hermes_tool_harness(model: Any) -> bool:
+    """True when OpenWebUI must leave tool selection to Hermes itself."""
+    model_id = model.get("id") if isinstance(model, dict) else model
+    return str(model_id or "").strip() in HERMES_BRIDGE_MODEL_IDS
+
+
 @dataclass(frozen=True)
 class HermesBridgeConfig:
     enabled: bool = HERMES_BRIDGE_ENABLED
