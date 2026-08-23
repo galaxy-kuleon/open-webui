@@ -356,10 +356,10 @@ def _extract_image_via_task_model(file_bytes: bytes, filename: str) -> tuple[boo
     """Return (success, extracted content or warning) for an image attachment."""
     try:
         api_base = os.environ.get(
-            "SKIP_RAG_EXTRACTOR_API_BASE",
-            "http://host.docker.internal:1234/v1",
+            "SKIP_RAG_TASK_MODEL_API_BASE",
+            "http://host.docker.internal:31235/v1",
         ).rstrip("/")
-        model = os.environ.get("TASK_MODEL", "qwen3.5-4b-mtp")
+        model = os.environ.get("SKIP_RAG_TASK_MODEL_ID", "qwen3.5-4b-mtp")
 
         image_bytes, mime = _image_payload_and_mime(file_bytes, filename)
         b64 = base64.b64encode(image_bytes).decode()
