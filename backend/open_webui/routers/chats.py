@@ -6,13 +6,13 @@ import logging
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from open_webui.config import ENABLE_ADMIN_CHAT_ACCESS, ENABLE_ADMIN_EXPORT
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.env import CLIENT_SAVE_TURN_GUARD_OBSERVE_ONLY
 from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
-from open_webui.env import CLIENT_SAVE_TURN_GUARD_OBSERVE_ONLY
 from open_webui.models.chats import (
     AggregateChatStats,
     ChatBody,
@@ -43,6 +43,14 @@ from open_webui.utils.failure_surface import (
     CLIENT_SAVE_WOULD_REJECT,
     log_client_save,
 )
+from open_webui.utils.journey_archive import (
+    actor_record,
+    archive_chat_delete_request,
+    get_raw_chats_by_user,
+    record_projection_delete_outcome,
+    request_record,
+)
+from open_webui.utils.journey_evidence import read_subject
 from open_webui.utils.middleware import serialize_output
 from open_webui.utils.misc import get_message_list
 from pydantic import BaseModel
@@ -502,6 +510,7 @@ async def export_single_chat_stats(
 @router.delete('/', response_model=bool)
 async def delete_all_user_chats(
     request: Request,
+    reason: str = Query('clear_history'),
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
@@ -513,7 +522,33 @@ async def delete_all_user_chats(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
+    actor = actor_record(user)
+    request_meta = request_record(request)
+    delete_events = []
+    for chat in await get_raw_chats_by_user(db, user.id):
+        delete_events.append(
+            (
+                chat.id,
+                await archive_chat_delete_request(
+                    db=db,
+                    chat=chat,
+                    actor=actor,
+                    request=request_meta,
+                    reason=reason,
+                ),
+            )
+        )
+
     result = await Chats.delete_chats_by_user_id(user.id, db=db)
+    for chat_id, delete_event in delete_events:
+        record_projection_delete_outcome(
+            subject_type='chat',
+            subject_id=chat_id,
+            actor=actor,
+            request_event_id=delete_event['event_id'],
+            visible=not result,
+            result='completed' if result else 'failed',
+        )
     return result
 
 
@@ -1176,6 +1211,7 @@ async def send_chat_message_event_by_id(
 async def delete_chat_by_id(
     request: Request,
     id: str,
+    reason: str = Query('user_requested'),
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
@@ -1190,9 +1226,26 @@ async def delete_chat_by_id(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=ERROR_MESSAGES.NOT_FOUND,
             )
+        actor = actor_record(user)
+        delete_event = await archive_chat_delete_request(
+            db=db,
+            chat=chat,
+            actor=actor,
+            request=request_record(request),
+            reason=reason,
+        )
         await Chats.delete_orphan_tags_for_user(chat.meta.get('tags', []), user.id, threshold=1, db=db)
 
         result = await Chats.delete_chat_by_id(id, db=db)
+
+        record_projection_delete_outcome(
+            subject_type='chat',
+            subject_id=id,
+            actor=actor,
+            request_event_id=delete_event['event_id'],
+            visible=not result,
+            result='completed' if result else 'failed',
+        )
 
         return result
     else:
@@ -1208,10 +1261,41 @@ async def delete_chat_by_id(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=ERROR_MESSAGES.NOT_FOUND,
             )
+        actor = actor_record(user)
+        delete_event = await archive_chat_delete_request(
+            db=db,
+            chat=chat,
+            actor=actor,
+            request=request_record(request),
+            reason=reason,
+        )
         await Chats.delete_orphan_tags_for_user(chat.meta.get('tags', []), user.id, threshold=1, db=db)
 
         result = await Chats.delete_chat_by_id_and_user_id(id, user.id, db=db)
+        record_projection_delete_outcome(
+            subject_type='chat',
+            subject_id=id,
+            actor=actor,
+            request_event_id=delete_event['event_id'],
+            visible=not result,
+            result='completed' if result else 'failed',
+        )
         return result
+
+
+@router.get('/{id}/evidence')
+async def reconstruct_deleted_chat_evidence(
+    id: str,
+    user=Depends(get_admin_user),
+):
+    """Authorized exact reconstruction of the append-only deletion journey."""
+    events = read_subject('chat', id)
+    if not events:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    return {'chat_id': id, 'events': events}
 
 
 ############################

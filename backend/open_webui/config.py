@@ -572,7 +572,7 @@ HERMES_DELETE_PURGE_ENABLED = ConfigVar(
     _env_bool(
         'OPENWEBUI_HERMES_DELETE_PURGE_ENABLED',
         'HERMES_DELETE_PURGE_ENABLED',
-        default=True,
+        default=False,
     ),
 )
 HERMES_BRIDGE_URL = ConfigVar(

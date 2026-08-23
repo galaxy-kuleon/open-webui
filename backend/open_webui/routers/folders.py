@@ -22,6 +22,13 @@ from open_webui.models.folders import (
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.journey_archive import (
+    actor_record,
+    archive_chat_delete_request,
+    get_raw_chats_by_folder,
+    record_projection_delete_outcome,
+    request_record,
+)
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -297,7 +304,33 @@ async def delete_folder_by_id(
 
                 for folder_id in folder_ids:
                     if delete_contents:
-                        await Chats.delete_chats_by_user_id_and_folder_id(user.id, folder_id, db=db)
+                        actor = actor_record(user)
+                        events = []
+                        for chat in await get_raw_chats_by_folder(db, user.id, folder_id):
+                            events.append(
+                                (
+                                    chat.id,
+                                    await archive_chat_delete_request(
+                                        db=db,
+                                        chat=chat,
+                                        actor=actor,
+                                        request=request_record(request),
+                                        reason='folder_deleted_with_contents',
+                                    ),
+                                )
+                            )
+                        deleted = await Chats.delete_chats_by_user_id_and_folder_id(
+                            user.id, folder_id, db=db
+                        )
+                        for chat_id, delete_event in events:
+                            record_projection_delete_outcome(
+                                subject_type='chat',
+                                subject_id=chat_id,
+                                actor=actor,
+                                request_event_id=delete_event['event_id'],
+                                visible=not deleted,
+                                result='completed' if deleted else 'failed',
+                            )
                     else:
                         await Chats.move_chats_by_user_id_and_folder_id(user.id, folder_id, None, db=db)
 

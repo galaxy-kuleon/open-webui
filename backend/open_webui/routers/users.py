@@ -11,9 +11,13 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import ENABLE_PROFILE_IMAGE_URL_FORWARDING, PROFILE_IMAGE_ALLOWED_MIME_TYPES, STATIC_DIR
 from open_webui.internal.db import get_async_session
+from open_webui.models.access_grants import AccessGrants
 from open_webui.models.auths import Auths
 from open_webui.models.groups import Groups
+from open_webui.models.knowledge import Knowledges
+from open_webui.models.models import Models
 from open_webui.models.oauth_sessions import OAuthSessions
+from open_webui.models.tools import Tools
 from open_webui.models.users import (
     UserGroupIdsListResponse,
     UserGroupIdsModel,
@@ -26,10 +30,6 @@ from open_webui.models.users import (
     UserStatus,
     UserUpdateForm,
 )
-from open_webui.models.access_grants import AccessGrants
-from open_webui.models.knowledge import Knowledges
-from open_webui.models.models import Models
-from open_webui.models.tools import Tools
 from open_webui.socket.main import disconnect_user_sessions
 from open_webui.utils.access_control import get_permissions, has_permission
 from open_webui.utils.auth import (
@@ -37,6 +37,13 @@ from open_webui.utils.auth import (
     get_password_hash,
     get_verified_user,
     validate_password,
+)
+from open_webui.utils.journey_archive import (
+    actor_record,
+    archive_chat_delete_request,
+    get_raw_chats_by_user,
+    record_projection_delete_outcome,
+    request_record,
 )
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -639,7 +646,12 @@ async def update_user_by_id(
 
 
 @router.delete('/{user_id}', response_model=bool)
-async def delete_user_by_id(user_id: str, user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)):
+async def delete_user_by_id(
+    request: Request,
+    user_id: str,
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
     # Prevent deletion of the primary admin user
     try:
         first_user = await Users.get_first_user(db=db)
@@ -658,7 +670,32 @@ async def delete_user_by_id(user_id: str, user=Depends(get_admin_user), db: Asyn
         )
 
     if user.id != user_id:
+        actor = actor_record(user)
+        delete_events = []
+        for chat in await get_raw_chats_by_user(db, user_id):
+            delete_events.append(
+                (
+                    chat.id,
+                    await archive_chat_delete_request(
+                        db=db,
+                        chat=chat,
+                        actor=actor,
+                        request=request_record(request),
+                        reason='administrator_deleted_user',
+                    ),
+                )
+            )
         result = await Auths.delete_auth_by_id(user_id, db=db)
+
+        for chat_id, delete_event in delete_events:
+            record_projection_delete_outcome(
+                subject_type='chat',
+                subject_id=chat_id,
+                actor=actor,
+                request_event_id=delete_event['event_id'],
+                visible=not result,
+                result='completed' if result else 'failed',
+            )
 
         if result:
             await disconnect_user_sessions(user_id)

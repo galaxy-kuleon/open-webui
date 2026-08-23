@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -42,6 +43,14 @@ from open_webui.routers.audio import transcribe
 from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.journey_archive import (
+    actor_record,
+    archive_file_delete_request,
+    record_projection_delete_outcome,
+    record_upload_accepted,
+    request_record,
+)
+from open_webui.utils.journey_evidence import read_subject
 from open_webui.utils.misc import strict_match_mime_type
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,6 +112,19 @@ def _cleanup_local_cache(file_path: str) -> None:
             log.debug(f'Cleaned up local cache: {local_path}')
     except OSError as e:
         log.warning(f'Failed to clean up local cache for {file_path}: {e}')
+
+
+def _verified_upload_hash(contents: bytes, claimed_hash: object = None) -> str:
+    """Return the server digest or reject an invalid client integrity claim."""
+    server_hash = hashlib.sha256(contents).hexdigest()
+    claimed = str(claimed_hash or '').strip()
+    if claimed and (
+        len(claimed) != 64
+        or any(char not in '0123456789abcdefABCDEF' for char in claimed)
+        or not hmac.compare_digest(claimed.lower(), server_hash)
+    ):
+        raise ValueError('Uploaded bytes do not match file_hash')
+    return server_hash
 
 
 async def process_uploaded_file(
@@ -295,15 +317,26 @@ async def upload_file_handler(
             },
         )
 
-        # SHA-256 of raw uploaded bytes for incremental sync diffing.
-        # If the client pre-computed and sent file_hash, use that.
-        file_hash = file_metadata.get('file_hash') or hashlib.sha256(contents).hexdigest()
+        # The server digest is authoritative. A claimed digest is an integrity
+        # assertion, never a shortcut around reading the bytes we received.
+        try:
+            file_hash = _verified_upload_hash(contents, file_metadata.get('file_hash'))
+        except ValueError:
+            try:
+                await asyncio.to_thread(Storage.delete_file, file_path)
+            except Exception:
+                log.exception('Failed to remove rejected upload bytes: %s', file_path)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ERROR_MESSAGES.DEFAULT('Uploaded bytes do not match file_hash'),
+            )
 
         file_item = await Files.insert_new_file(
             user.id,
             FileForm(
                 **{
                     'id': id,
+                    'hash': file_hash,
                     'filename': name,
                     'path': file_path,
                     'data': {
@@ -320,6 +353,35 @@ async def upload_file_handler(
             ),
             db=db,
         )
+
+        if not file_item:
+            try:
+                await asyncio.to_thread(Storage.delete_file, file_path)
+            except Exception:
+                log.exception('Failed to remove upload after file-row failure: %s', file_path)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ERROR_MESSAGES.DEFAULT('Error storing uploaded file'),
+            )
+
+        try:
+            record_upload_accepted(
+                file=file_item,
+                content=contents,
+                metadata=file_metadata,
+                actor=actor_record(user),
+                request=request_record(request),
+            )
+        except Exception:
+            # Evidence is a required part of accepting an upload. Keep any
+            # immutable orphan object, but never expose a DB/storage projection
+            # whose accepted event could not be appended.
+            await Files.delete_file_by_id(id, db=db)
+            try:
+                await asyncio.to_thread(Storage.delete_file, file_path)
+            except Exception:
+                log.exception('Failed to remove upload after evidence failure: %s', file_path)
+            raise
 
         if 'channel_id' in file_metadata:
             channel = await Channels.get_channel_by_id_and_user_id(file_metadata['channel_id'], user.id, db=db)
@@ -449,7 +511,27 @@ async def search_files(
 
 
 @router.delete('/all')
-async def delete_all_files(user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)):
+async def delete_all_files(
+    request: Request,
+    reason: str = Query('administrator_clear_all_files'),
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    actor = actor_record(user)
+    delete_events = []
+    for file in await Files.get_files(db=db):
+        delete_events.append(
+            (
+                file.id,
+                await archive_file_delete_request(
+                    db=db,
+                    file=file,
+                    actor=actor,
+                    request=request_record(request),
+                    reason=reason,
+                ),
+            )
+        )
     result = await Files.delete_all_files(db=db)
     if result:
         try:
@@ -458,12 +540,39 @@ async def delete_all_files(user=Depends(get_admin_user), db: AsyncSession = Depe
         except Exception as e:
             log.exception(e)
             log.error('Error deleting files')
+            for file_id, delete_event in delete_events:
+                record_projection_delete_outcome(
+                    subject_type='file',
+                    subject_id=file_id,
+                    actor=actor,
+                    request_event_id=delete_event['event_id'],
+                    visible=False,
+                    result='failed',
+                )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ERROR_MESSAGES.DEFAULT('Error deleting files'),
             )
+        for file_id, delete_event in delete_events:
+            record_projection_delete_outcome(
+                subject_type='file',
+                subject_id=file_id,
+                actor=actor,
+                request_event_id=delete_event['event_id'],
+                visible=False,
+                result='completed',
+            )
         return {'message': 'All files deleted successfully'}
     else:
+        for file_id, delete_event in delete_events:
+            record_projection_delete_outcome(
+                subject_type='file',
+                subject_id=file_id,
+                actor=actor,
+                request_event_id=delete_event['event_id'],
+                visible=True,
+                result='failed',
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.DEFAULT('Error deleting files'),
@@ -859,7 +968,13 @@ async def rename_file_by_id(
 
 
 @router.delete('/{id}')
-async def delete_file_by_id(id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
+async def delete_file_by_id(
+    request: Request,
+    id: str,
+    reason: str = Query('user_requested'),
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
     file = await Files.get_file_by_id(id, db=db)
 
     if not file:
@@ -869,6 +984,14 @@ async def delete_file_by_id(id: str, user=Depends(get_verified_user), db: AsyncS
         )
 
     if file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db):
+        actor = actor_record(user)
+        delete_event = await archive_file_delete_request(
+            db=db,
+            file=file,
+            actor=actor,
+            request=request_record(request),
+            reason=reason,
+        )
         # Clean up KB associations and embeddings before deleting
         knowledges = await Knowledges.get_knowledges_by_file_id(id, db=db)
         for knowledge in knowledges:
@@ -890,12 +1013,36 @@ async def delete_file_by_id(id: str, user=Depends(get_verified_user), db: AsyncS
             except Exception as e:
                 log.exception(e)
                 log.error('Error deleting files')
+                record_projection_delete_outcome(
+                    subject_type='file',
+                    subject_id=id,
+                    actor=actor,
+                    request_event_id=delete_event['event_id'],
+                    visible=False,
+                    result='failed',
+                )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=ERROR_MESSAGES.DEFAULT('Error deleting files'),
                 )
+            record_projection_delete_outcome(
+                subject_type='file',
+                subject_id=id,
+                actor=actor,
+                request_event_id=delete_event['event_id'],
+                visible=False,
+                result='completed',
+            )
             return {'message': 'File deleted successfully'}
         else:
+            record_projection_delete_outcome(
+                subject_type='file',
+                subject_id=id,
+                actor=actor,
+                request_event_id=delete_event['event_id'],
+                visible=True,
+                result='failed',
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ERROR_MESSAGES.DEFAULT('Error deleting file'),
@@ -905,3 +1052,17 @@ async def delete_file_by_id(id: str, user=Depends(get_verified_user), db: AsyncS
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+
+@router.get('/{id}/evidence')
+async def reconstruct_file_evidence(
+    id: str,
+    user=Depends(get_admin_user),
+):
+    events = read_subject('file', id)
+    if not events:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    return {'file_id': id, 'events': events}
