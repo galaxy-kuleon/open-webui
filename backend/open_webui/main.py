@@ -1767,6 +1767,43 @@ async def _close_cancelled_chat_upstream(response) -> bool:
     return True
 
 
+async def _finalize_cancelled_chat_before_response(metadata) -> bool:
+    """Persist an honest terminal when cancellation precedes response headers."""
+    chat_id = str(metadata.get('chat_id') or '')
+    message_id = str(metadata.get('message_id') or '')
+    if (
+        not chat_id
+        or not message_id
+        or chat_id.startswith('local:')
+        or chat_id.startswith('channel:')
+    ):
+        return False
+
+    error = failure_surface.build_error_payload(
+        chat_id,
+        message_id,
+        failure_surface.cause_for_phase(failure_surface.PHASE_INTERRUPTED),
+    )
+    written = await Chats.upsert_message_to_chat_by_id_and_message_id(
+        chat_id,
+        message_id,
+        {
+            'parentId': metadata.get('user_message_id'),
+            'done': True,
+            'error': error,
+        },
+    )
+    persisted = written is not None
+    failure_surface.log_turn_interrupted(
+        chat_id,
+        message_id,
+        'cancelled',
+        failure_surface.FAILURE_KIND_UNCLASSIFIED,
+        persisted,
+    )
+    return persisted
+
+
 @app.post('/api/chat/completions')
 @app.post('/api/v1/chat/completions')  # Experimental: Compatibility with OpenAI API
 async def chat_completion(
@@ -2207,6 +2244,26 @@ async def chat_completion(
             return await process_chat_response(response, ctx)
         except asyncio.CancelledError:
             log.info('Chat processing was cancelled')
+            if response is None:
+                try:
+                    persisted = await asyncio.shield(
+                        _finalize_cancelled_chat_before_response(metadata)
+                    )
+                    log.info(
+                        'Cancelled chat terminalized before response chat_id=%s '
+                        'message_id=%s persisted=%s',
+                        metadata.get('chat_id'),
+                        metadata.get('message_id'),
+                        persisted,
+                    )
+                except (asyncio.CancelledError, Exception) as terminal_error:
+                    log.warning(
+                        'Cancelled chat terminalization failed chat_id=%s '
+                        'message_id=%s error=%s',
+                        metadata.get('chat_id'),
+                        metadata.get('message_id'),
+                        type(terminal_error).__name__,
+                    )
             try:
                 # The inner stream consumer normally closes this iterator. A
                 # cancellation can reach this outer task outside that handler;

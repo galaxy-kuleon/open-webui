@@ -346,7 +346,45 @@ class CancelledChatUpstreamCleanupTests(unittest.IsolatedAsyncioTestCase):
         source = inspect.getsource(main.chat_completion)
         cancel_handler = source.split("except asyncio.CancelledError:", 1)[1]
         self.assertIn(
+            "_finalize_cancelled_chat_before_response(metadata)",
+            cancel_handler,
+        )
+        self.assertIn(
             "_close_cancelled_chat_upstream(response)", cancel_handler
+        )
+
+    async def test_pre_response_cancel_persists_done_with_interrupted_notice(self):
+        import open_webui.main as main
+
+        metadata = {
+            "chat_id": "chat-1",
+            "message_id": "assistant-1",
+            "user_message_id": "user-1",
+        }
+        with mock.patch.object(
+            main.Chats,
+            "upsert_message_to_chat_by_id_and_message_id",
+            new=mock.AsyncMock(return_value=object()),
+        ) as upsert, mock.patch.object(
+            main.failure_surface, "log_turn_interrupted"
+        ) as interrupted:
+            self.assertTrue(
+                await main._finalize_cancelled_chat_before_response(metadata)
+            )
+
+        patch = upsert.await_args.args[2]
+        self.assertTrue(patch["done"])
+        self.assertEqual(patch["parentId"], "user-1")
+        self.assertEqual(
+            patch["error"]["cause"],
+            main.failure_surface.CAUSE_EMPTY_INTERRUPTED,
+        )
+        interrupted.assert_called_once_with(
+            "chat-1",
+            "assistant-1",
+            "cancelled",
+            main.failure_surface.FAILURE_KIND_UNCLASSIFIED,
+            True,
         )
 
     async def test_top_level_cancel_fallback_closes_provider_iterator(self):
