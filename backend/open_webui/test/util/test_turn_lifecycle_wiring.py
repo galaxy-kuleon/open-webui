@@ -10,6 +10,7 @@ terminal, and that terminal says what the Task's FINAL state said.
 """
 import asyncio
 import importlib.util
+import inspect
 import io
 import logging
 import os
@@ -336,6 +337,37 @@ class PersistedPlaceholderLicenceTests(unittest.TestCase):
             tl.make_turn_ref("chat-persisted", "assistant-row"),
         )
         self.assertIsNone(licenses.take("parent-row"))
+
+
+class CancelledChatUpstreamCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stored_chat_cancel_path_uses_the_cleanup_fallback(self):
+        import open_webui.main as main
+
+        source = inspect.getsource(main.chat_completion)
+        cancel_handler = source.split("except asyncio.CancelledError:", 1)[1]
+        self.assertIn(
+            "_close_cancelled_chat_upstream(response)", cancel_handler
+        )
+
+    async def test_top_level_cancel_fallback_closes_provider_iterator(self):
+        import open_webui.main as main
+
+        class Iterator:
+            def __init__(self):
+                self.close_calls = 0
+
+            async def aclose(self):
+                self.close_calls += 1
+
+        iterator = Iterator()
+        response = types.SimpleNamespace(body_iterator=iterator)
+        self.assertTrue(await main._close_cancelled_chat_upstream(response))
+        self.assertEqual(iterator.close_calls, 1)
+
+    async def test_non_streaming_response_needs_no_cleanup(self):
+        import open_webui.main as main
+
+        self.assertFalse(await main._close_cancelled_chat_upstream({"ok": True}))
 
 
 class OwnerObservationRouteTests(unittest.IsolatedAsyncioTestCase):

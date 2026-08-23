@@ -1757,6 +1757,16 @@ def _license_persisted_placeholder(licenses, chat_model, message_id) -> None:
         return
 
 
+async def _close_cancelled_chat_upstream(response) -> bool:
+    """Close the provider iterator on every stored-chat cancellation path."""
+    iterator = getattr(response, 'body_iterator', None)
+    close = getattr(iterator, 'aclose', None)
+    if not callable(close):
+        return False
+    await close()
+    return True
+
+
 @app.post('/api/chat/completions')
 @app.post('/api/v1/chat/completions')  # Experimental: Compatibility with OpenAI API
 async def chat_completion(
@@ -2171,6 +2181,7 @@ async def chat_completion(
         )
 
     async def process_chat(request, form_data, user, metadata, model, tasks=None):
+        response = None
         try:
             form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
 
@@ -2196,6 +2207,26 @@ async def chat_completion(
             return await process_chat_response(response, ctx)
         except asyncio.CancelledError:
             log.info('Chat processing was cancelled')
+            try:
+                # The inner stream consumer normally closes this iterator. A
+                # cancellation can reach this outer task outside that handler;
+                # without this fallback Hermes keeps doing an abandoned run.
+                upstream_closed = await asyncio.shield(
+                    _close_cancelled_chat_upstream(response)
+                )
+                log.info(
+                    'Cancelled chat upstream cleanup chat_id=%s message_id=%s closed=%s',
+                    metadata.get('chat_id'),
+                    metadata.get('message_id'),
+                    upstream_closed,
+                )
+            except (asyncio.CancelledError, Exception) as cleanup_error:
+                log.warning(
+                    'Cancelled chat upstream cleanup failed chat_id=%s message_id=%s error=%s',
+                    metadata.get('chat_id'),
+                    metadata.get('message_id'),
+                    type(cleanup_error).__name__,
+                )
             try:
 
                 async def emit_cancel_event():
