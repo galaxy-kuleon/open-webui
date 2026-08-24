@@ -118,7 +118,7 @@ def _minutes_since(raw: str, now: dt.datetime) -> int | None:
         return None
 
 
-def _progress_details(progress: object) -> list[str]:
+def _progress_details(progress: object, phase: str = '') -> list[str]:
     if not isinstance(progress, dict):
         return []
     try:
@@ -132,7 +132,12 @@ def _progress_details(progress: object) -> list[str]:
 
     details = [f'進度 {completed}/{total}（{completed * 100 // total}%）']
     if failed:
-        details.append(f'{failed} 頁辨識失敗但工作仍繼續')
+        if phase == 'ocr':
+            details.append(f'{failed} 頁辨識失敗但工作仍繼續')
+        elif phase == 'translating':
+            details.append(f'{failed} 個翻譯區塊需要重試或保留原文')
+        else:
+            details.append(f'{failed} 個處理單位需要重試或降級處理')
     return details
 
 
@@ -147,7 +152,7 @@ def pending_user_message(
     label = PHASE_LABELS.get(phase, phase)
     progress = stage.get('progress')
     details = [f'目前階段：{label}'] if label else []
-    details.extend(_progress_details(progress))
+    details.extend(_progress_details(progress, phase))
 
     elapsed = _minutes_since(str(stage.get('created_at') or ''), now)
     if elapsed is not None:
