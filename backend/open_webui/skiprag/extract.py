@@ -98,6 +98,24 @@ EXTRACTOR_API_KEY: str = os.environ.get(
 EXTRACTOR_ENABLE_THINKING: bool = _env_bool(
     'SKIP_RAG_EXTRACTOR_ENABLE_THINKING', False
 )
+EXTRACTOR_TEMPERATURE: float = float(
+    os.environ.get('SKIP_RAG_EXTRACTOR_TEMPERATURE', '1.0')
+)
+EXTRACTOR_TOP_P: float = float(
+    os.environ.get('SKIP_RAG_EXTRACTOR_TOP_P', '0.95')
+)
+EXTRACTOR_TOP_K: int = int(
+    os.environ.get('SKIP_RAG_EXTRACTOR_TOP_K', '20')
+)
+EXTRACTOR_MIN_P: float = float(
+    os.environ.get('SKIP_RAG_EXTRACTOR_MIN_P', '0.0')
+)
+EXTRACTOR_PRESENCE_PENALTY: float = float(
+    os.environ.get('SKIP_RAG_EXTRACTOR_PRESENCE_PENALTY', '0.0')
+)
+EXTRACTOR_REPETITION_PENALTY: float = float(
+    os.environ.get('SKIP_RAG_EXTRACTOR_REPETITION_PENALTY', '1.0')
+)
 EXTRACTOR_MAX_TOKENS: int = int(os.environ.get('SKIP_RAG_EXTRACTOR_MAX_TOKENS', '4096'))
 EXTRACTOR_CHUNK_TOKENS: int = int(os.environ.get('SKIP_RAG_EXTRACTOR_CHUNK_TOKENS', '12000'))
 EXTRACTOR_FLOOR_TOKENS: int = int(os.environ.get('SKIP_RAG_EXTRACTOR_FLOOR_TOKENS', '1000'))
@@ -462,6 +480,12 @@ def _extract_cache_key(item_text: str, query: str, target_tokens: int) -> str:
             _EXTRACTION_PROMPT_VERSION,
             EXTRACTOR_MODEL_ID,
             str(EXTRACTOR_ENABLE_THINKING),
+            str(EXTRACTOR_TEMPERATURE),
+            str(EXTRACTOR_TOP_P),
+            str(EXTRACTOR_TOP_K),
+            str(EXTRACTOR_MIN_P),
+            str(EXTRACTOR_PRESENCE_PENALTY),
+            str(EXTRACTOR_REPETITION_PENALTY),
             str(EXTRACTOR_CHUNK_TOKENS),
             str(EXTRACTOR_MAX_TOKENS),
             str(PRESELECT_WINDOW_TOKENS),
@@ -560,6 +584,12 @@ async def _call_extractor(doc: str, query: str, budget_tokens: int) -> str | Non
         ],
         'stream': False,
         'enable_thinking': EXTRACTOR_ENABLE_THINKING,
+        'temperature': EXTRACTOR_TEMPERATURE,
+        'top_p': EXTRACTOR_TOP_P,
+        'top_k': EXTRACTOR_TOP_K,
+        'min_p': EXTRACTOR_MIN_P,
+        'presence_penalty': EXTRACTOR_PRESENCE_PENALTY,
+        'repetition_penalty': EXTRACTOR_REPETITION_PENALTY,
         'max_tokens': min(EXTRACTOR_MAX_TOKENS, max(1, budget_tokens)),
     }
 
