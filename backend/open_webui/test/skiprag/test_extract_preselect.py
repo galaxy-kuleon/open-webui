@@ -224,12 +224,74 @@ def test_cache_key_includes_extractor_model_chunk_and_prompt_identity(monkeypatc
 
     monkeypatch.setattr(extract, 'EXTRACTOR_MODEL_ID', 'different-model')
     changed_model = extract._extract_cache_key('material', 'query', 900)
+    monkeypatch.setattr(
+        extract,
+        'EXTRACTOR_ENABLE_THINKING',
+        not extract.EXTRACTOR_ENABLE_THINKING,
+    )
+    changed_thinking = extract._extract_cache_key('material', 'query', 900)
     monkeypatch.setattr(extract, 'EXTRACTOR_CHUNK_TOKENS', 777)
     changed_chunk = extract._extract_cache_key('material', 'query', 900)
     monkeypatch.setattr(extract, '_EXTRACTION_PROMPT_VERSION', 'different-prompt')
     changed_prompt = extract._extract_cache_key('material', 'query', 900)
 
-    assert len({baseline, changed_model, changed_chunk, changed_prompt}) == 4
+    assert len(
+        {baseline, changed_model, changed_thinking, changed_chunk, changed_prompt}
+    ) == 5
+
+
+def test_extractor_thinking_env_is_strict_and_explicit(monkeypatch):
+    monkeypatch.setenv('EXAMPLE_BOOL', 'off')
+    assert extract._env_bool('EXAMPLE_BOOL', True) is False
+    monkeypatch.setenv('EXAMPLE_BOOL', 'yes')
+    assert extract._env_bool('EXAMPLE_BOOL', False) is True
+    monkeypatch.setenv('EXAMPLE_BOOL', 'sometimes')
+    with pytest.raises(ValueError, match='EXAMPLE_BOOL'):
+        extract._env_bool('EXAMPLE_BOOL', False)
+
+
+@pytest.mark.asyncio
+async def test_extractor_payload_disables_thinking_for_extraction(monkeypatch):
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                'choices': [
+                    {
+                        'message': {'content': 'relevant evidence'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            captured['timeout'] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, url, *, headers, content):
+            captured['url'] = url
+            captured['headers'] = headers
+            captured['payload'] = json.loads(content)
+            return FakeResponse()
+
+    monkeypatch.setattr(extract, 'EXTRACTOR_ENABLE_THINKING', False)
+    monkeypatch.setattr(extract.httpx, 'AsyncClient', FakeClient)
+
+    result = await extract._call_extractor('document', 'find evidence', 321)
+
+    assert result == 'relevant evidence'
+    assert captured['payload']['enable_thinking'] is False
+    assert captured['payload']['max_tokens'] == 321
 
 
 @pytest.mark.asyncio

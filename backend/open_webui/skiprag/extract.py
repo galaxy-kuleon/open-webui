@@ -40,6 +40,8 @@ SKIP_RAG_EXTRACTOR_API_BASE     OpenAI-compatible base URL
                                  (default: http://host.docker.internal:31234/v1)
 SKIP_RAG_EXTRACTOR_API_KEY      Bearer key for the extractor endpoint
                                  (default: change-me-local-key)
+SKIP_RAG_EXTRACTOR_ENABLE_THINKING Whether extractor calls may spend output
+                                 budget on model reasoning (default: false)
 SKIP_RAG_EXTRACTOR_MAX_TOKENS   max_tokens for each extractor call (default: 4096)
 SKIP_RAG_EXTRACTOR_CHUNK_TOKENS Doc is split into this many tokens per chunk
                                  for the map step (default: 12000)
@@ -71,6 +73,19 @@ log = logging.getLogger(__name__)
 # Environment / configuration
 # ---------------------------------------------------------------------------
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {'1', 'true', 'yes', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'off'}:
+        return False
+    raise ValueError(
+        f'{name} must be one of true/false, yes/no, on/off, or 1/0'
+    )
+
 EXTRACTOR_MODEL_ID: str = os.environ.get(
     'SKIP_RAG_EXTRACTOR_MODEL_ID', 'qwen3.8-27b-mtplx-optimized-speed'
 )
@@ -79,6 +94,9 @@ EXTRACTOR_API_BASE: str = os.environ.get(
 ).rstrip('/')
 EXTRACTOR_API_KEY: str = os.environ.get(
     'SKIP_RAG_EXTRACTOR_API_KEY', 'change-me-local-key'
+)
+EXTRACTOR_ENABLE_THINKING: bool = _env_bool(
+    'SKIP_RAG_EXTRACTOR_ENABLE_THINKING', False
 )
 EXTRACTOR_MAX_TOKENS: int = int(os.environ.get('SKIP_RAG_EXTRACTOR_MAX_TOKENS', '4096'))
 EXTRACTOR_CHUNK_TOKENS: int = int(os.environ.get('SKIP_RAG_EXTRACTOR_CHUNK_TOKENS', '12000'))
@@ -122,7 +140,7 @@ _PRESELECT_CONTEXT_RADIUS = 1
 _PRESELECT_WINDOW_STEP_DIVISOR = 2
 _PRESELECT_RENDER_SAFETY_TOKENS = 16
 _SOURCE_MARKER_OVERHEAD_TOKENS_PER_ITEM = 20
-_EXTRACTION_CACHE_VERSION = 'v3-query-preselect'
+_EXTRACTION_CACHE_VERSION = 'v4-query-preselect-thinking-policy'
 _EXTRACTION_PROMPT_VERSION = 'v2-untrusted-json'
 _PRESELECT_SECTION_LABEL = '[skip-rag excerpt section {index}/{total}]'
 _PRESELECT_SEPARATOR = '\n\n<!-- skip-rag excerpt boundary -->\n\n'
@@ -443,6 +461,7 @@ def _extract_cache_key(item_text: str, query: str, target_tokens: int) -> str:
             _EXTRACTION_CACHE_VERSION,
             _EXTRACTION_PROMPT_VERSION,
             EXTRACTOR_MODEL_ID,
+            str(EXTRACTOR_ENABLE_THINKING),
             str(EXTRACTOR_CHUNK_TOKENS),
             str(EXTRACTOR_MAX_TOKENS),
             str(PRESELECT_WINDOW_TOKENS),
@@ -540,6 +559,7 @@ async def _call_extractor(doc: str, query: str, budget_tokens: int) -> str | Non
             {'role': 'user', 'content': user_prompt},
         ],
         'stream': False,
+        'enable_thinking': EXTRACTOR_ENABLE_THINKING,
         'max_tokens': min(EXTRACTOR_MAX_TOKENS, max(1, budget_tokens)),
     }
 
