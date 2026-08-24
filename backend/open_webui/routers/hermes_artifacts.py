@@ -13,7 +13,6 @@ from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
 from open_webui.utils.hermes_bridge import get_bridge_config
 from starlette.background import BackgroundTask
 
-
 log = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -22,13 +21,43 @@ SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_FILENAME_CHARS = 255
 FORWARDED_RESPONSE_HEADERS = frozenset(
     {
+        "accept-ranges",
         "cache-control",
         "content-disposition",
         "content-length",
+        "content-range",
         "content-type",
+        "etag",
+        "last-modified",
+        "referrer-policy",
+        "content-security-policy",
+        "permissions-policy",
+        "strict-transport-security",
+        "x-frame-options",
         "x-content-type-options",
+        "x-xss-protection",
     }
 )
+FORWARDED_REQUEST_HEADERS = frozenset(
+    {
+        "if-modified-since",
+        "if-none-match",
+        "if-range",
+        "range",
+    }
+)
+
+
+def build_artifact_request_headers(headers) -> dict[str, str]:
+    """Keep byte-range/cache validators while never forwarding browser origins."""
+    forwarded = {
+        name: value
+        for name in FORWARDED_REQUEST_HEADERS
+        if (value := headers.get(name)) is not None
+    }
+    # Prevent transparent content decoding from invalidating Content-Length/ranges.
+    forwarded["accept-encoding"] = "identity"
+    return forwarded
 
 
 def build_artifact_target(
@@ -89,6 +118,7 @@ async def proxy_signed_artifact(
         upstream = await session.request(
             request.method,
             target,
+            headers=build_artifact_request_headers(request.headers),
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
         )
     except Exception:

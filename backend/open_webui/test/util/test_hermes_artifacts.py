@@ -1,5 +1,7 @@
-from open_webui.routers.hermes_artifacts import build_artifact_target
-
+from open_webui.routers.hermes_artifacts import (
+    build_artifact_request_headers,
+    build_artifact_target,
+)
 
 ARTIFACT_ID = "a" * 32
 SIGNATURE = "b" * 64
@@ -34,3 +36,24 @@ def test_build_artifact_target_rejects_traversal_and_bad_capabilities():
     assert build_artifact_target(
         "file:///etc", ARTIFACT_ID, "memo.docx", 1, SIGNATURE
     ) is None
+
+
+def test_artifact_proxy_forwards_range_validators_but_not_browser_origin():
+    headers = build_artifact_request_headers(
+        {
+            "range": "bytes=100-199",
+            "if-range": '"artifact-etag"',
+            "if-none-match": '"artifact-etag"',
+            "origin": "https://any-browser-origin.example",
+            "host": "10.66.0.8:8083",
+            "x-forwarded-proto": "https",
+            "cookie": "session=must-not-leak",
+        }
+    )
+
+    assert headers == {
+        "range": "bytes=100-199",
+        "if-range": '"artifact-etag"',
+        "if-none-match": '"artifact-etag"',
+        "accept-encoding": "identity",
+    }
