@@ -104,6 +104,7 @@ from open_webui.utils.hermes_bridge import (
     model_uses_hermes_tool_harness,
     should_bypass_openwebui_memory_injection,
 )
+from open_webui.utils.hermes_progress import hermes_tool_status_event
 from open_webui.utils.files import (
     convert_markdown_base64_images,
     get_file_url_from_base64,
@@ -4543,6 +4544,7 @@ async def streaming_chat_response_handler(response, ctx):
                         int(metadata.get('params', {}).get('stream_delta_chunk_size') or 1),
                     )
                     last_delta_data = None
+                    hermes_tool_started_at = {}
 
                     async def flush_pending_delta_data(threshold: int = 0):
                         nonlocal delta_count
@@ -4596,6 +4598,12 @@ async def streaming_chat_response_handler(response, ctx):
                             )
 
                             if data:
+                                hermes_status = hermes_tool_status_event(
+                                    data, hermes_tool_started_at
+                                )
+                                if hermes_status:
+                                    await event_emitter(hermes_status)
+                                    continue
                                 if 'event' in data and not getattr(request.state, 'direct', False):
                                     await event_emitter(data.get('event', {}))
 

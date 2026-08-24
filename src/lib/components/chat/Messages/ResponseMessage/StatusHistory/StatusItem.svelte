@@ -1,5 +1,6 @@
 <script>
 	import { getContext } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	const i18n = getContext('i18n');
 	import WebSearchResults from '../WebSearchResults.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
@@ -7,6 +8,25 @@
 
 	export let status = null;
 	export let done = false;
+
+	let nowSeconds = Date.now() / 1000;
+	let elapsedTicker;
+	onMount(() => {
+		elapsedTicker = setInterval(() => {
+			nowSeconds = Date.now() / 1000;
+		}, 1000);
+	});
+	onDestroy(() => clearInterval(elapsedTicker));
+
+	$: elapsedSeconds =
+		status?.elapsed_seconds ??
+		(status?.started_at ? Math.max(0, nowSeconds - Number(status.started_at)) : null);
+	$: elapsedLabel =
+		elapsedSeconds === null || Number.isNaN(elapsedSeconds)
+			? ''
+			: elapsedSeconds < 60
+				? `${Math.floor(elapsedSeconds)}s`
+				: `${Math.floor(elapsedSeconds / 60)}m ${Math.floor(elapsedSeconds % 60)}s`;
 </script>
 
 {#if !status?.hidden}
@@ -141,7 +161,9 @@
 					{:else if status?.description === 'Searching the web'}
 						{$i18n.t('Searching the web')}
 					{:else}
-						{status?.description}
+						{status?.description}{#if elapsedLabel}<span class="tabular-nums">
+								· {elapsedLabel}</span
+							>{/if}
 					{/if}
 				</div>
 			</div>
