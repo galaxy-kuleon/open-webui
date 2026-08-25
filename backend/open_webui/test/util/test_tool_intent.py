@@ -9,6 +9,7 @@ from open_webui.utils.tool_intent import (
 def test_socv2_submit_tool_identity_is_suffix_based():
     assert is_socv2_submit_tool('socv2_submit_conversion')
     assert is_socv2_submit_tool('mcp_soc_v2_submit_conversion')
+    assert not is_socv2_submit_tool('socv2_resubmit_conversion')
     assert not is_socv2_submit_tool('socv2_conversion_status')
     assert not is_socv2_submit_tool('local_document_export')
 
@@ -63,7 +64,7 @@ def test_explicit_current_file_translation_bypasses_probabilistic_selector():
 
 
 def test_deterministic_selector_stays_narrow_and_file_bound():
-    tools = ['socv2_submit_conversion']
+    tools = ['socv2_submit_conversion', 'socv2_resubmit_conversion']
     assert forced_socv2_submit_call(tools, 'convert this PDF to DOCX', []) is None
     assert forced_socv2_submit_call(tools, 'convert this PDF to DOCX', ['a', 'b']) is None
     assert forced_socv2_submit_call(tools, 'summarize this PDF', ['a']) is None

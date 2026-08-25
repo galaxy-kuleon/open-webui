@@ -16,6 +16,7 @@ import re
 
 
 SOCV2_SUBMIT_TOOL_SUFFIX = "submit_conversion"
+SOCV2_RESUBMIT_TOOL_SUFFIX = "resubmit_conversion"
 
 _EXPLICIT_TOOL_RE = re.compile(r"(?:mcp[_-]?soc[_-]?v?2|submit_conversion)", re.I)
 _STRONG_CONVERSION_RE = re.compile(
@@ -41,7 +42,10 @@ _TARGET_LANGUAGES = (
 
 
 def is_socv2_submit_tool(tool_name: object) -> bool:
-    return str(tool_name or "").lower().endswith(SOCV2_SUBMIT_TOOL_SUFFIX)
+    normalized = str(tool_name or "").lower()
+    return normalized.endswith(SOCV2_SUBMIT_TOOL_SUFFIX) and not normalized.endswith(
+        SOCV2_RESUBMIT_TOOL_SUFFIX
+    )
 
 
 def has_explicit_conversion_intent(user_message: object) -> bool:
