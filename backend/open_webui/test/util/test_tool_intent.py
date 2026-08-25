@@ -1,5 +1,6 @@
 from open_webui.utils.tool_intent import (
     allow_selected_tool,
+    forced_socv2_submit_call,
     has_explicit_conversion_intent,
     is_socv2_submit_tool,
 )
@@ -41,3 +42,36 @@ def test_content_transformation_does_not_create_a_conversion_job():
 def test_non_conversion_tools_are_untouched_by_policy():
     assert allow_selected_tool('web_search', 'turn this note into a detailed note')
     assert allow_selected_tool('socv2_conversion_status', 'check progress')
+
+
+def test_explicit_current_file_translation_bypasses_probabilistic_selector():
+    call = forced_socv2_submit_call(
+        ['socv2_submit_conversion'],
+        'using mcp_soc_v2_submit_conversion: translate to Chinese',
+        ['file-123'],
+    )
+
+    assert call == {
+        'name': 'socv2_submit_conversion',
+        'parameters': {
+            'file_id': 'file-123',
+            'strict_file_id': True,
+            'translate': True,
+            'target_lang': 'zh-tw',
+        },
+    }
+
+
+def test_deterministic_selector_stays_narrow_and_file_bound():
+    tools = ['socv2_submit_conversion']
+    assert forced_socv2_submit_call(tools, 'convert this PDF to DOCX', []) is None
+    assert forced_socv2_submit_call(tools, 'convert this PDF to DOCX', ['a', 'b']) is None
+    assert forced_socv2_submit_call(tools, 'summarize this PDF', ['a']) is None
+    assert forced_socv2_submit_call(
+        tools, 'translate this PDF to Klingon', ['a']
+    ) is None
+
+    assert forced_socv2_submit_call(tools, 'convert this PDF to DOCX', ['a']) == {
+        'name': 'socv2_submit_conversion',
+        'parameters': {'file_id': 'a', 'strict_file_id': True},
+    }

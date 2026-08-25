@@ -29,6 +29,15 @@ _ARTIFACT_RE = re.compile(
     r"(?:可下載|可下载|下載連結|下载链接|文件|檔案|文檔|文档)",
     re.I,
 )
+_TRANSLATION_RE = re.compile(r"\btranslat(?:e|ed|ion)\b|(?:翻譯|翻译)", re.I)
+_TARGET_LANGUAGES = (
+    (re.compile(r"\b(?:traditional chinese)\b|(?:繁體中文|繁体中文)", re.I), "zh-tw"),
+    (re.compile(r"\b(?:simplified chinese)\b|(?:簡體中文|简体中文)", re.I), "zh-cn"),
+    (re.compile(r"\b(?:hong kong chinese)\b|(?:香港中文)", re.I), "zh-hk"),
+    (re.compile(r"\bchinese\b|中文", re.I), "zh-tw"),
+    (re.compile(r"\benglish\b|英文", re.I), "en"),
+    (re.compile(r"\bjapanese\b|日文|日本語", re.I), "ja"),
+)
 
 
 def is_socv2_submit_tool(tool_name: object) -> bool:
@@ -54,3 +63,38 @@ def allow_selected_tool(tool_name: object, user_message: object) -> bool:
     if not is_socv2_submit_tool(tool_name):
         return True
     return has_explicit_conversion_intent(user_message)
+
+
+def forced_socv2_submit_call(
+    tool_names: object,
+    user_message: object,
+    current_file_ids: object,
+) -> dict | None:
+    """Return one deterministic conversion call for one current attachment.
+
+    The small task-model selector is useful for fuzzy intent, but it must not
+    veto an explicit conversion request through sampling variance.  Keep this
+    deterministic path deliberately narrow: one SOCv2 submit tool, one file
+    attached to this turn, explicit conversion intent, and a supported target
+    when translation was requested.
+    """
+    names = [str(name) for name in (tool_names or []) if is_socv2_submit_tool(name)]
+    file_ids = [str(file_id) for file_id in (current_file_ids or []) if file_id]
+    text = str(user_message or "")
+    if (
+        len(names) != 1
+        or len(file_ids) != 1
+        or not has_explicit_conversion_intent(text)
+    ):
+        return None
+
+    parameters = {"file_id": file_ids[0], "strict_file_id": True}
+    if _TRANSLATION_RE.search(text):
+        target_lang = next(
+            (code for pattern, code in _TARGET_LANGUAGES if pattern.search(text)),
+            None,
+        )
+        if target_lang is None:
+            return None
+        parameters.update({"translate": True, "target_lang": target_lang})
+    return {"name": names[0], "parameters": parameters}

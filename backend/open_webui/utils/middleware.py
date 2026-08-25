@@ -93,7 +93,7 @@ from open_webui.utils.failure_surface import (
     PERSISTED_NOT_APPLICABLE,
     should_flag_empty,
 )
-from open_webui.utils.tool_intent import allow_selected_tool
+from open_webui.utils.tool_intent import allow_selected_tool, forced_socv2_submit_call
 from open_webui.utils.source_fidelity import (
     ATTACHMENT_SOURCE_FIDELITY_PROMPT,
     should_apply_attachment_source_fidelity,
@@ -1360,11 +1360,32 @@ async def chat_completion_tools_handler(
     tools_function_calling_prompt = tools_function_calling_generation_template(template, tools_specs)
     payload = get_tools_function_calling_payload(body['messages'], task_model_id, tools_function_calling_prompt)
 
+    current_file_ids = [
+        item.get('id')
+        for item in (metadata.get('files') or [])
+        if isinstance(item, dict) and item.get('type', 'file') == 'file'
+    ]
+    forced_tool_call = forced_socv2_submit_call(
+        tools.keys(),
+        get_last_user_message(body['messages']),
+        current_file_ids,
+    )
+
     try:
-        response = await generate_chat_completion(request, form_data=payload, user=user)
-        log.debug(f'{response=}')
-        content = await get_content_from_response(response)
-        log.debug(f'{content=}')
+        if forced_tool_call:
+            content = json.dumps(forced_tool_call)
+            log.info(
+                'deterministic SOCv2 selector accepted explicit current-file intent '
+                'tool=%r chat_id=%r message_id=%r',
+                forced_tool_call['name'],
+                metadata.get('chat_id'),
+                metadata.get('message_id'),
+            )
+        else:
+            response = await generate_chat_completion(request, form_data=payload, user=user)
+            log.debug(f'{response=}')
+            content = await get_content_from_response(response)
+            log.debug(f'{content=}')
 
         if not content:
             return body, {}
