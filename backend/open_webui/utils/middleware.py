@@ -1338,6 +1338,7 @@ async def chat_completion_tools_handler(
     event_caller = extra_params['__event_call__']
     event_emitter = extra_params['__event_emitter__']
     metadata = extra_params['__metadata__']
+    user_message = get_last_user_message(body['messages'])
 
     task_model_id = get_task_model_id(
         body['model'],
@@ -1367,7 +1368,7 @@ async def chat_completion_tools_handler(
     ]
     forced_tool_call = forced_socv2_submit_call(
         tools.keys(),
-        get_last_user_message(body['messages']),
+        user_message,
         current_file_ids,
     )
 
