@@ -1,5 +1,6 @@
 from open_webui.utils.source_fidelity import (
     ATTACHMENT_SOURCE_FIDELITY_PROMPT,
+    ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX,
     should_apply_attachment_source_fidelity,
 )
 
@@ -16,6 +17,11 @@ def test_direct_attachment_gets_source_fidelity_contract():
     assert 'even as a disclaimer' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'Do not define or expand a source term' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'Never make a plausible completion' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
+    assert 'stay within 900 words' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    assert 'name or claim supplied only by the user is an allegation' in (
+        ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    )
+    assert 'Do not fill the gap from memory' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
 
 
 def test_no_file_and_hermes_paths_are_unchanged():

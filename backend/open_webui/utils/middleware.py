@@ -96,6 +96,7 @@ from open_webui.utils.failure_surface import (
 from open_webui.utils.tool_intent import allow_selected_tool, forced_socv2_submit_call
 from open_webui.utils.source_fidelity import (
     ATTACHMENT_SOURCE_FIDELITY_PROMPT,
+    ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX,
     should_apply_attachment_source_fidelity,
 )
 from open_webui.utils.text_redaction import (
@@ -3163,10 +3164,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         except Exception as e:
             log.exception(e)
 
-    if should_apply_attachment_source_fidelity(
+    _attachment_source_fidelity = should_apply_attachment_source_fidelity(
         has_files=had_user_files,
         hermes_handoff=_is_hermes_handoff,
-    ):
+    )
+    if _attachment_source_fidelity:
         form_data['messages'] = add_or_update_system_message(
             ATTACHMENT_SOURCE_FIDELITY_PROMPT,
             form_data['messages'],
@@ -3184,6 +3186,17 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # If context is not empty, insert it into the messages
     if sources and prompt:
         form_data['messages'] = await apply_source_context_to_messages(request, form_data['messages'], sources, prompt)
+
+    # Path A injects the full attachment corpus into the last user message and
+    # returns no RAG ``sources``. Repeat the narrow answer boundary *after*
+    # either Path A or ordinary source injection so a long document cannot
+    # bury the current-turn contract at the far side of the context window.
+    if _attachment_source_fidelity:
+        form_data['messages'] = add_or_update_user_message(
+            ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX,
+            form_data['messages'],
+            append=True,
+        )
 
     # If there are citations, add them to the data_items
     sources = [

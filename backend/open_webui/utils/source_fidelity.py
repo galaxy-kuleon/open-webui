@@ -18,6 +18,16 @@ Attachment source-fidelity contract:
 """.strip()
 
 
+ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX = """
+Final-answer contract for this attachment-grounded turn:
+- Answer the user's current question directly and stay within 900 words unless the user explicitly requested a longer report.
+- The injected attachment text is the evidence boundary. A name or claim supplied only by the user is an allegation, not a verified fact.
+- Do not add statutes, section numbers, regulatory powers, bank-ownership claims, investment recommendations, numeric risk ratings, or other outside facts unless they appear in the injected attachment text.
+- If the requested conclusion needs outside facts, say exactly what the attachments do and do not establish, then list the smallest written evidence needed to verify the claim. Do not fill the gap from memory.
+- Return only the final answer. Do not expose private chain-of-thought or a hidden planning transcript.
+""".strip()
+
+
 def should_apply_attachment_source_fidelity(*, has_files: bool, hermes_handoff: bool) -> bool:
     """Direct models need this prompt; Hermes has its own answer/source gate."""
     return bool(has_files and not hermes_handoff)
