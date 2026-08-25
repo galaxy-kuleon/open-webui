@@ -17,6 +17,12 @@ def test_direct_attachment_gets_source_fidelity_contract():
     assert 'even as a disclaimer' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'Do not define or expand a source term' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'Never make a plausible completion' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
+    assert 'party-authored attachment as that author\'s claim' in (
+        ATTACHMENT_SOURCE_FIDELITY_PROMPT
+    )
+    assert 'does not prove ownership, agency, licensing, custody' in (
+        ATTACHMENT_SOURCE_FIDELITY_PROMPT
+    )
     assert 'stay within 900 words' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
     assert 'do not volunteer statute names or section numbers' in (
         ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
@@ -28,6 +34,11 @@ def test_direct_attachment_gets_source_fidelity_contract():
         ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
     )
     assert 'Do not fill the gap from memory' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    assert 'proves what the party represented, not that the representation is true' in (
+        ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    )
+    assert 'should not be the sole basis' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    assert 'categorical yes or no' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
 
 
 def test_no_file_and_hermes_paths_are_unchanged():
