@@ -93,6 +93,11 @@ from open_webui.utils.failure_surface import (
     PERSISTED_NOT_APPLICABLE,
     should_flag_empty,
 )
+from open_webui.utils.tool_intent import allow_selected_tool
+from open_webui.utils.source_fidelity import (
+    ATTACHMENT_SOURCE_FIDELITY_PROMPT,
+    should_apply_attachment_source_fidelity,
+)
 from open_webui.utils.file_coverage import (
     build_warning_payload,
     compute_turn_delivery_coverage,
@@ -1381,6 +1386,28 @@ async def chat_completion_tools_handler(
                     log.warning(f'Tool "{tool_function_name}" not found')
                     return
 
+                if not allow_selected_tool(tool_function_name, user_message):
+                    log.info(
+                        'tool_intent_guard suppressed selector call '
+                        'tool=%r chat_id=%r message_id=%r user_message=%r',
+                        tool_function_name,
+                        metadata.get('chat_id'),
+                        metadata.get('message_id'),
+                        user_message,
+                    )
+                    if event_emitter:
+                        await event_emitter(
+                            {
+                                'type': 'status',
+                                'data': {
+                                    'action': 'tool_intent_guard',
+                                    'description': 'Reading the attachment without creating a conversion job',
+                                    'done': True,
+                                },
+                            }
+                        )
+                    return
+
                 tool_function_params = tool_call.get('parameters', {})
 
                 tool = None
@@ -2609,6 +2636,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     # Model "Knowledge" handling
     user_message = get_last_user_message(form_data['messages'])
+    had_user_files = bool(form_data.get('files') or metadata.get('files'))
     model_knowledge = model.get('info', {}).get('meta', {}).get('knowledge', False)
 
     if model_knowledge and metadata.get('params', {}).get('function_calling') != 'native':
@@ -3099,6 +3127,16 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 sources.extend(flags.get('sources', []))
         except Exception as e:
             log.exception(e)
+
+    if should_apply_attachment_source_fidelity(
+        has_files=had_user_files,
+        hermes_handoff=_is_hermes_handoff,
+    ):
+        form_data['messages'] = add_or_update_system_message(
+            ATTACHMENT_SOURCE_FIDELITY_PROMPT,
+            form_data['messages'],
+            append=True,
+        )
 
     # Save the pre-RAG message state so the native tool call loop can
     # restore to the true original (before file-source injection) rather
