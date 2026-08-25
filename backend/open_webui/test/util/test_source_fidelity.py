@@ -7,12 +7,14 @@ from open_webui.utils.source_fidelity import (
 def test_direct_attachment_gets_source_fidelity_contract():
     assert should_apply_attachment_source_fidelity(has_files=True, hermes_handoff=False)
     assert 'Transcribe before interpreting' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
-    assert 'does not authorize new facts' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
+    assert 'or new facts' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
+    assert 'does not authorize definitions' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'clearly labelled source inventory' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'Inventory every visible region' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'perform a coverage pass' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'polished partial reading is not complete' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'even as a disclaimer' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
+    assert 'Do not define or expand a source term' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'Never make a plausible completion' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
 
 
