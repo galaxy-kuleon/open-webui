@@ -232,7 +232,7 @@ def test_cache_key_includes_extractor_model_chunk_and_prompt_identity(monkeypatc
     changed_thinking = extract._extract_cache_key('material', 'query', 900)
     monkeypatch.setattr(extract, 'EXTRACTOR_CHUNK_TOKENS', 777)
     changed_chunk = extract._extract_cache_key('material', 'query', 900)
-    monkeypatch.setattr(extract, 'EXTRACTOR_REPETITION_PENALTY', 1.1)
+    monkeypatch.setattr(extract, 'EXTRACTOR_REPETITION_PENALTY', 1.2)
     changed_sampling = extract._extract_cache_key('material', 'query', 900)
     monkeypatch.setattr(extract, '_EXTRACTION_PROMPT_VERSION', 'different-prompt')
     changed_prompt = extract._extract_cache_key('material', 'query', 900)
@@ -316,7 +316,7 @@ async def test_extractor_payload_disables_thinking_for_extraction(monkeypatch):
         'top_k': 20,
         'min_p': 0.0,
         'presence_penalty': 0.0,
-        'repetition_penalty': 1.0,
+        'repetition_penalty': 1.1,
     }
     assert captured['payload']['max_tokens'] == 321
 
