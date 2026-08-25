@@ -98,6 +98,10 @@ from open_webui.utils.source_fidelity import (
     ATTACHMENT_SOURCE_FIDELITY_PROMPT,
     should_apply_attachment_source_fidelity,
 )
+from open_webui.utils.text_redaction import (
+    TEXT_REDACTION_CONTRACT,
+    requests_text_redaction,
+)
 from open_webui.utils.file_coverage import (
     build_warning_payload,
     compute_turn_delivery_coverage,
@@ -2866,6 +2870,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         if fallback:
             set_last_user_message_content(fallback, form_data['messages'])
             prompt = fallback
+
+    if requests_text_redaction(prompt):
+        form_data['messages'] = add_or_update_system_message(
+            TEXT_REDACTION_CONTRACT,
+            form_data['messages'],
+            append=True,
+        )
     # TODO: re-enable URL extraction from prompt
     # urls = []
     # if prompt and len(prompt or "") < 500 and (not files or len(files) == 0):
