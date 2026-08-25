@@ -18,6 +18,12 @@ def test_direct_attachment_gets_source_fidelity_contract():
     assert 'Do not define or expand a source term' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'Never make a plausible completion' in ATTACHMENT_SOURCE_FIDELITY_PROMPT
     assert 'stay within 900 words' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    assert 'do not volunteer statute names or section numbers' in (
+        ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    )
+    assert 'unverified citation must not create a false impression' in (
+        ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    )
     assert 'name or claim supplied only by the user is an allegation' in (
         ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
     )
