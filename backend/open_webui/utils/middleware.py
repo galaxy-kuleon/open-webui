@@ -100,6 +100,7 @@ from open_webui.utils.source_fidelity import (
 )
 from open_webui.utils.text_redaction import (
     TEXT_REDACTION_CONTRACT,
+    focus_text_redaction_messages,
     requests_text_redaction,
 )
 from open_webui.utils.file_coverage import (
@@ -2872,6 +2873,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             prompt = fallback
 
     if requests_text_redaction(prompt):
+        form_data['messages'] = focus_text_redaction_messages(form_data['messages'])
         form_data['messages'] = add_or_update_system_message(
             TEXT_REDACTION_CONTRACT,
             form_data['messages'],
