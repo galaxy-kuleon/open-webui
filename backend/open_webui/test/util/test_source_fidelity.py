@@ -1,5 +1,8 @@
 from open_webui.utils.source_fidelity import (
+    ATTACHMENT_SOURCE_FIDELITY_MAX_EVIDENCE_ITEMS,
+    ATTACHMENT_SOURCE_FIDELITY_MAX_WORDS,
     ATTACHMENT_SOURCE_FIDELITY_PROMPT,
+    ATTACHMENT_SOURCE_FIDELITY_TARGET_WORDS,
     ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX,
     should_apply_attachment_source_fidelity,
 )
@@ -23,7 +26,12 @@ def test_direct_attachment_gets_source_fidelity_contract():
     assert 'does not prove ownership, agency, licensing, custody' in (
         ATTACHMENT_SOURCE_FIDELITY_PROMPT
     )
-    assert 'stay within 900 words' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    assert ATTACHMENT_SOURCE_FIDELITY_TARGET_WORDS == 650
+    assert ATTACHMENT_SOURCE_FIDELITY_MAX_WORDS == 800
+    assert ATTACHMENT_SOURCE_FIDELITY_MAX_EVIDENCE_ITEMS == 5
+    assert 'Target no more than 650 words' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    assert 'never exceed 800 words' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
+    assert 'no more than 5 items' in ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
     assert 'do not volunteer statute names or section numbers' in (
         ATTACHMENT_SOURCE_FIDELITY_TURN_SUFFIX
     )
