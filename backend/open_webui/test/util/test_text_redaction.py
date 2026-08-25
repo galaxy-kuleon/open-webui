@@ -10,7 +10,9 @@ def test_exact_observed_masking_prompt_gets_non_reversible_output_contract():
     )
     assert 'Never reproduce' in TEXT_REDACTION_CONTRACT
     assert 'visible reasoning section' in TEXT_REDACTION_CONTRACT
-    assert 'must not reveal the original values' in TEXT_REDACTION_CONTRACT
+    assert 'substitution-only transformation' in TEXT_REDACTION_CONTRACT
+    assert 'Return the transformed text only' in TEXT_REDACTION_CONTRACT
+    assert 'Do not paraphrase' in TEXT_REDACTION_CONTRACT
 
 
 def test_common_english_and_chinese_text_redaction_requests_are_detected():

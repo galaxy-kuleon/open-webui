@@ -11,13 +11,13 @@ import re
 
 TEXT_REDACTION_CONTRACT = """
 Text anonymisation contract for the current turn:
-- Return the transformed text with the requested identifiers replaced by neutral tokens or reference names.
+- Perform a substitution-only transformation: replace the requested identifiers with consistent neutral tokens or
+  reference names, while preserving every non-target word, character, quotation, citation, paragraph, and its order.
+- Return the transformed text only. Do not paraphrase, summarise, omit, reorder, explain, or add a legend, key, token
+  list, preface, note, commentary, or example unless the user explicitly requests that separate material.
 - Never reproduce, quote, explain, or map a replaced original identifier anywhere in the response, including a
   legend, key, table, preface, note, example, or visible reasoning section.
-- A token list may name the tokens only; it must not reveal the original values. Provide a reversible
-  token-to-original key only if the user explicitly asks for that separate key.
-- Preserve non-target text and meaning faithfully. Do not add legal analysis, commentary, or other material the user
-  did not request.
+- Provide a reversible token-to-original key only if the user explicitly asks for that separate key.
 """.strip()
 
 _UNAMBIGUOUS_REDACTION_RE = re.compile(
