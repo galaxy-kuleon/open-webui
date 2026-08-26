@@ -18,6 +18,16 @@ _DATE_DEFERRAL_PATTERNS = (
     re.compile(r"\bdates?\b.{0,24}\b(?:later|tbd|blank|placeholder)\b", re.IGNORECASE),
 )
 
+_SOURCE_BOUND_TEXT_INTENT_PATTERNS = (
+    re.compile(r"(?:比較|對照|差異|不同|哪裡不一樣|翻譯|改寫|改成|重寫|潤飾|修改|按.{0,12}內容|依照.{0,12}內容)", re.IGNORECASE),
+    re.compile(r"\b(?:compare|contrast|difference|translate|rewrite|revise|adapt|based on)\b", re.IGNORECASE),
+)
+
+_SOURCE_TEXT_REFERENCE_PATTERNS = (
+    re.compile(r"(?:中文|英文|中英|原文|原稿|這封|這段|上述|上面|以下|英文函|中文函|內容)", re.IGNORECASE),
+    re.compile(r"\b(?:source|text|passage|original|above|below|letter|email|version)\b", re.IGNORECASE),
+)
+
 
 DRAFT_DATE_DEFERRAL_CONTRACT = """
 Date-deferral contract for the requested draft:
@@ -29,6 +39,16 @@ Date-deferral contract for the requested draft:
 """.strip()
 
 
+USER_TEXT_SOURCE_FIDELITY_CONTRACT = """
+User-text source-fidelity contract:
+- The user asked to compare, translate, rewrite, or adapt text they supplied. Treat that supplied text as the evidence boundary unless the user explicitly requests external research.
+- Preserve what each supplied version actually says and clearly mark what it leaves unspecified. Do not turn language, writing style, a generic procedure, or a reference to a "local agent" into a country, jurisdiction, legal system, filing route, or other fact.
+- In particular, Chinese-language text does not establish China as the jurisdiction. Name a jurisdiction only when the supplied text names it.
+- Keep source statements separate from suggestions and bounded inferences. If a requested draft needs an unstated fact, use a clear placeholder or ask for it; do not complete it from plausibility.
+- Before answering, verify every concrete entity, jurisdiction, number, date, procedural stage, enclosure, and payment statement against the supplied text and the user's latest instructions.
+""".strip()
+
+
 def requests_draft_date_deferral(prompt: str | None) -> bool:
     """Return true only when the latest turn both drafts text and defers dates."""
     if not prompt:
@@ -36,3 +56,14 @@ def requests_draft_date_deferral(prompt: str | None) -> bool:
     return any(pattern.search(prompt) for pattern in _DRAFTING_INTENT_PATTERNS) and any(
         pattern.search(prompt) for pattern in _DATE_DEFERRAL_PATTERNS
     )
+
+
+def requests_user_text_source_fidelity(prompt: str | None) -> bool:
+    """Detect comparison or transformation of user-supplied text."""
+    if not prompt:
+        return False
+    has_intent = any(pattern.search(prompt) for pattern in _SOURCE_BOUND_TEXT_INTENT_PATTERNS)
+    has_source_reference = len(prompt) >= 300 or any(
+        pattern.search(prompt) for pattern in _SOURCE_TEXT_REFERENCE_PATTERNS
+    )
+    return has_intent and has_source_reference

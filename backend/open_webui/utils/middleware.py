@@ -101,7 +101,9 @@ from open_webui.utils.source_fidelity import (
 )
 from open_webui.utils.draft_fidelity import (
     DRAFT_DATE_DEFERRAL_CONTRACT,
+    USER_TEXT_SOURCE_FIDELITY_CONTRACT,
     requests_draft_date_deferral,
+    requests_user_text_source_fidelity,
 )
 from open_webui.utils.text_redaction import (
     TEXT_REDACTION_CONTRACT,
@@ -2887,6 +2889,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if requests_draft_date_deferral(prompt):
         form_data['messages'] = add_or_update_system_message(
             DRAFT_DATE_DEFERRAL_CONTRACT,
+            form_data['messages'],
+            append=True,
+        )
+    if requests_user_text_source_fidelity(prompt):
+        form_data['messages'] = add_or_update_system_message(
+            USER_TEXT_SOURCE_FIDELITY_CONTRACT,
             form_data['messages'],
             append=True,
         )
