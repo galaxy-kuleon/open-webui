@@ -35,10 +35,18 @@ WORKDIR /app
 # to store git revision in build
 RUN apk add --no-cache git
 
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci --force
 
-COPY . .
+# Keep backend-only edits outside the frontend cache key. This Mac deploys
+# backend fixes frequently; invalidating the Vite build for those edits turns
+# a small change into avoidable user-facing restart risk.
+COPY src ./src
+COPY static ./static
+COPY scripts ./scripts
+COPY CHANGELOG.md ./CHANGELOG.md
+COPY i18next-parser.config.ts postcss.config.js svelte.config.js ./
+COPY tailwind.config.js tsconfig.json vite.config.ts ./
 ENV APP_BUILD_HASH=${BUILD_HASH}
 RUN npm run build
 
