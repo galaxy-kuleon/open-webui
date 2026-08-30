@@ -249,6 +249,36 @@ def _split_tool_calls(
     return expanded
 
 
+def ensure_native_tool_task_streaming(
+    form_data: dict,
+    metadata: dict,
+) -> tuple[dict, bool]:
+    """Route stored native-tool tasks through the handler that owns the loop.
+
+    A stored chat request returns task IDs to its caller, so its provider-side
+    streaming choice is an internal execution detail.  The streaming response
+    handler owns native tool execution and continuation; the non-streaming
+    handler intentionally returns OpenAI-compatible ``tool_calls`` to inline
+    API clients and does not execute them.  Letting a background stored-chat
+    task use that inline path turns a valid tool call into a terminal empty
+    answer instead of continuing the user journey.
+
+    Return a new mapping so the admission payload remains observable and can be
+    compared with the execution payload without hidden in-place mutation.
+    """
+    managed_task = all(
+        metadata.get(field)
+        for field in ('session_id', 'chat_id', 'message_id')
+    )
+    native_tools = (
+        metadata.get('params', {}).get('function_calling') == 'native'
+        and bool(metadata.get('tools'))
+    )
+    if managed_task and native_tools and form_data.get('stream') is not True:
+        return {**form_data, 'stream': True}, True
+    return form_data, False
+
+
 def get_citation_source_from_tool_result(
     tool_name: str, tool_params: dict, tool_result: str, tool_id: str = ''
 ) -> list[dict]:
@@ -5646,7 +5676,12 @@ async def streaming_chat_response_handler(response, ctx):
                         # case, not an exotic branch.
                         raise
                     except Exception as e:
-                        log.debug(e)
+                        log.exception(
+                            'Native tool continuation failed for model=%s chat=%s message=%s',
+                            model_id,
+                            metadata.get('chat_id'),
+                            metadata.get('message_id'),
+                        )
                         break
 
                 if (

@@ -576,6 +576,7 @@ from open_webui.utils.embeddings import generate_embeddings
 from open_webui.utils.logger import start_logger
 from open_webui.utils.middleware import (
     build_chat_response_context,
+    ensure_native_tool_task_streaming,
     process_chat_payload,
     process_chat_response,
 )
@@ -2221,6 +2222,19 @@ async def chat_completion(
         response = None
         try:
             form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
+
+            form_data, streaming_promoted = ensure_native_tool_task_streaming(
+                form_data,
+                metadata,
+            )
+            if streaming_promoted:
+                log.info(
+                    'Promoted native-tool task to streaming execution '
+                    'model=%s chat=%s message=%s',
+                    form_data.get('model'),
+                    metadata.get('chat_id'),
+                    metadata.get('message_id'),
+                )
 
             response = await chat_completion_handler(request, form_data, user)
 
