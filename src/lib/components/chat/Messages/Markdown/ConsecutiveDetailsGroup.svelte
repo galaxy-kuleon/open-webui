@@ -47,6 +47,10 @@
 	$: hasPending =
 		!messageDone &&
 		tokens.some((t) => t?.attributes?.done !== undefined && t?.attributes?.done !== 'true');
+	$: isThinking =
+		hasPending &&
+		tokens.some((t) => t?.attributes?.type === 'reasoning' && t?.attributes?.done !== 'true') &&
+		!tokens.some((t) => t?.attributes?.type !== 'reasoning' && t?.attributes?.done !== undefined && t?.attributes?.done !== 'true');
 
 	$: codeInterpreterCount = tokens.filter((t) => t?.attributes?.type === 'code_interpreter').length;
 
@@ -101,12 +105,11 @@
 			}
 		}
 
-		const prefix = hasPending ? $i18n.t('Exploring') : $i18n.t('Explored');
 		const detail = parts.join(', ');
-		return detail;
+		return isThinking && detail ? `${$i18n.t('Explored')} ${detail}` : detail;
 	})();
 
-	$: prefixText = hasPending ? $i18n.t('Exploring') : $i18n.t('Explored');
+	$: prefixText = isThinking ? $i18n.t('Thinking...') : hasPending ? $i18n.t('Exploring') : $i18n.t('Explored');
 </script>
 
 <div {id} class="w-full">
