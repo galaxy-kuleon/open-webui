@@ -293,6 +293,8 @@ async def generate_follow_ups(request: Request, form_data: dict, user=Depends(ge
 
     try:
         return await generate_chat_completion(request, form_data=payload, user=user)
+    except HTTPException:
+        raise
     except Exception as e:
         log.error('Exception occurred', exc_info=True)
         return JSONResponse(
@@ -362,6 +364,8 @@ async def generate_chat_tags(request: Request, form_data: dict, user=Depends(get
 
     try:
         return await generate_chat_completion(request, form_data=payload, user=user)
+    except HTTPException:
+        raise
     except Exception as e:
         log.error(f'Error generating chat completion: {e}')
         return JSONResponse(

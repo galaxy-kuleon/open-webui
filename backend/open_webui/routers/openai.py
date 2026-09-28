@@ -1160,7 +1160,7 @@ async def generate_chat_completion(
         for field in ('max_tokens', 'max_completion_tokens'):
             value = payload.get(field)
             if value is not None:
-                payload[field] = min(int(value), BACKGROUND_TASK_MAX_TOKENS)
+                payload[field] = min(int(value), BACKGROUND_TASK_MAX_TOKENS) if int(value) > 0 else BACKGROUND_TASK_MAX_TOKENS
         if not any(payload.get(field) for field in ('max_tokens', 'max_completion_tokens')):
             payload['max_tokens'] = BACKGROUND_TASK_MAX_TOKENS
         request_timeout = min(AIOHTTP_CLIENT_TIMEOUT or BACKGROUND_TASK_TIMEOUT_SECONDS,
@@ -1168,7 +1168,7 @@ async def generate_chat_completion(
         target = urlparse(url)
         if target.hostname in {'host.docker.internal', '127.0.0.1', 'localhost'} and target.port in {31234, 31235, 31236, 31237}:
             payload['enable_thinking'] = False
-            payload['chat_template_kwargs'] = {**payload.get('chat_template_kwargs', {}), 'enable_thinking': False}
+            payload['chat_template_kwargs'] = {**(payload.get('chat_template_kwargs') or {}), 'enable_thinking': False}
         log.info('background_task_started task=%s model=%s chat=%s max_tokens=%s timeout_seconds=%s',
                  metadata['task'], payload['model'], metadata.get('chat_id'),
                  payload.get('max_completion_tokens', payload.get('max_tokens')), request_timeout)
