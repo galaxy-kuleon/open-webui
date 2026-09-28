@@ -21,7 +21,7 @@ from fastapi.responses import (
 from open_webui.config import (
     CACHE_DIR,
 )
-from open_webui.constants import ERROR_MESSAGES
+from open_webui.constants import ERROR_MESSAGES, TASKS
 from open_webui.env import (
     AIOHTTP_CLIENT_SESSION_SSL,
     AIOHTTP_CLIENT_TIMEOUT,
@@ -62,6 +62,14 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
+
+BACKGROUND_TASK_MAX_TOKENS = 1024
+BACKGROUND_TASK_TIMEOUT_SECONDS = 120
+BACKGROUND_TASKS = frozenset({
+    str(TASKS.TITLE_GENERATION),
+    str(TASKS.TAGS_GENERATION),
+    str(TASKS.FOLLOW_UP_GENERATION),
+})
 
 
 ##########################################
@@ -1146,6 +1154,25 @@ async def generate_chat_completion(
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
     key = request.app.state.config.OPENAI_API_KEYS[idx]
 
+    background_task = (metadata or {}).get('task') in BACKGROUND_TASKS
+    request_timeout = AIOHTTP_CLIENT_TIMEOUT
+    if background_task:
+        for field in ('max_tokens', 'max_completion_tokens'):
+            value = payload.get(field)
+            if value is not None:
+                payload[field] = min(int(value), BACKGROUND_TASK_MAX_TOKENS)
+        if not any(payload.get(field) for field in ('max_tokens', 'max_completion_tokens')):
+            payload['max_tokens'] = BACKGROUND_TASK_MAX_TOKENS
+        request_timeout = min(AIOHTTP_CLIENT_TIMEOUT or BACKGROUND_TASK_TIMEOUT_SECONDS,
+                              BACKGROUND_TASK_TIMEOUT_SECONDS)
+        target = urlparse(url)
+        if target.hostname in {'host.docker.internal', '127.0.0.1', 'localhost'} and target.port in {31234, 31235, 31236, 31237}:
+            payload['enable_thinking'] = False
+            payload['chat_template_kwargs'] = {**payload.get('chat_template_kwargs', {}), 'enable_thinking': False}
+        log.info('background_task_started task=%s model=%s chat=%s max_tokens=%s timeout_seconds=%s',
+                 metadata['task'], payload['model'], metadata.get('chat_id'),
+                 payload.get('max_completion_tokens', payload.get('max_tokens')), request_timeout)
+
     # Check if model is a reasoning model that needs special handling
     if is_openai_new_model(payload['model']):
         payload = openai_reasoning_model_handler(payload)
@@ -1226,7 +1253,7 @@ async def generate_chat_completion(
             headers=headers,
             cookies=cookies,
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
-            timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT),
+            timeout=aiohttp.ClientTimeout(total=request_timeout),
         )
 
         # Check if response is SSE
@@ -1273,7 +1300,15 @@ async def generate_chat_completion(
             if is_responses and isinstance(response, dict):
                 response = convert_responses_result(response)
 
+            if background_task:
+                log.info('background_task_completed task=%s model=%s chat=%s status=%s usage=%s',
+                         metadata['task'], model_id, metadata.get('chat_id'), r.status,
+                         response.get('usage') if isinstance(response, dict) else None)
             return response
+    except asyncio.TimeoutError:
+        log.warning('background_task_timeout task=%s model=%s chat=%s timeout_seconds=%s',
+                    (metadata or {}).get('task'), model_id, (metadata or {}).get('chat_id'), request_timeout)
+        raise HTTPException(status_code=504, detail='Model request exceeded its time limit')
     except Exception as e:
         log.exception(e)
 
