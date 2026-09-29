@@ -48,7 +48,7 @@ COPY CHANGELOG.md ./CHANGELOG.md
 COPY i18next-parser.config.ts postcss.config.js svelte.config.js ./
 COPY tailwind.config.js tsconfig.json vite.config.ts ./
 ENV APP_BUILD_HASH=${BUILD_HASH}
-RUN npm run build
+RUN APP_BUILD_HASH="$(find . -path ./node_modules -prune -o -type f -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1)" npm run build
 
 ######## WebUI backend ########
 FROM python:3.11-slim-bookworm AS base

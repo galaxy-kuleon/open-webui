@@ -1,7 +1,7 @@
 import adapter from '@sveltejs/adapter-static';
 import * as child_process from 'node:child_process';
 import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
-import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
@@ -20,19 +20,13 @@ const config = {
 		// poll for new version name every 60 seconds (to trigger reload mechanic in +layout.svelte)
 		version: {
 			name: (() => {
+				if (process.env.APP_BUILD_HASH && !process.env.APP_BUILD_HASH.startsWith('dev-')) {
+					return process.env.APP_BUILD_HASH;
+				}
 				try {
 					return child_process.execSync('git rev-parse HEAD').toString().trim();
 				} catch {
-					// if git is not available, fallback to package.json version
-					// or current timestamp
-					try {
-						return (
-							JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
-								?.version || Date.now().toString()
-						);
-					} catch {
-						return Date.now().toString();
-					}
+					return randomUUID();
 				}
 			})(),
 			pollInterval: 60000
