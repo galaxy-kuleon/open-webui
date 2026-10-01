@@ -1283,9 +1283,10 @@ async def generate_chat_completion(
                 log.error(e)
                 response = await r.text()
 
-            if r.status >= 400:
+            if r.status >= 400 or (isinstance(response, dict) and response.get('error')):
                 log.error('provider_request_error status=%s model=%s raw=%s', r.status, model_id, response)
-                return JSONResponse(status_code=r.status, content=public_provider_error(r.status))
+                public_status = r.status if r.status >= 400 else 502
+                return JSONResponse(status_code=public_status, content=public_provider_error(public_status))
 
             # Convert Responses API result to simple format
             if is_responses and isinstance(response, dict):
