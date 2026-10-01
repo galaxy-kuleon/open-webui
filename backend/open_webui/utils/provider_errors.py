@@ -37,7 +37,7 @@ def public_provider_line(line):
         payload = json.loads(line[5:])
     except (ValueError, UnicodeDecodeError):
         return line
-    if not isinstance(payload, dict) or 'error' not in payload:
+    if not isinstance(payload, dict) or not payload.get('error'):
         return line
     log.error('provider_stream_error raw=%s', payload)
     error = payload['error']
