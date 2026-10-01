@@ -47,12 +47,12 @@ from open_webui.utils.headers import (
 )
 from open_webui.utils.misc import (
     convert_logit_bias_input_to_json,
-    stream_chunks_handler,
 )
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_system_prompt_to_body,
 )
+from open_webui.utils.provider_errors import public_provider_error, public_provider_stream
 from open_webui.utils.session_pool import (
     cleanup_response,
     get_session,
@@ -1266,20 +1266,13 @@ async def generate_chat_completion(
                 log.error(
                     'Provider returned HTTP %d with SSE content-type: %s',
                     r.status,
-                    error_body[:1000],
+                    error_body,
                 )
-                try:
-                    error_json = json.loads(error_body)
-                    return JSONResponse(status_code=r.status, content=error_json)
-                except json.JSONDecodeError:
-                    return JSONResponse(
-                        status_code=r.status,
-                        content={'error': {'message': error_body, 'code': r.status}},
-                    )
+                return JSONResponse(status_code=r.status, content=public_provider_error(r.status))
 
             streaming = True
             return StreamingResponse(
-                stream_wrapper(r, content_handler=stream_chunks_handler),
+                stream_wrapper(r, content_handler=public_provider_stream),
                 status_code=r.status,
                 headers=_clean_proxy_headers(r.headers),
             )
@@ -1291,10 +1284,8 @@ async def generate_chat_completion(
                 response = await r.text()
 
             if r.status >= 400:
-                if isinstance(response, (dict, list)):
-                    return JSONResponse(status_code=r.status, content=response)
-                else:
-                    return PlainTextResponse(status_code=r.status, content=response)
+                log.error('provider_request_error status=%s model=%s raw=%s', r.status, model_id, response)
+                return JSONResponse(status_code=r.status, content=public_provider_error(r.status))
 
             # Convert Responses API result to simple format
             if is_responses and isinstance(response, dict):
