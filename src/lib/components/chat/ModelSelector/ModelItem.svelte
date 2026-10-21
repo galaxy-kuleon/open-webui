@@ -77,7 +77,7 @@
 
 		<div class="flex items-center gap-2">
 			<div class="flex items-center min-w-fit">
-				<Tooltip content={$user?.role === 'admin' ? (item?.value ?? '') : ''} placement="top-start">
+				<Tooltip content={item?.model?.meta?.description || item.label} placement="top-start">
 					<img
 						src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${item.model.id}&lang=${$i18n.language}`}
 						alt={$i18n.t('{{modelName}} profile image', { modelName: item.label })}
@@ -91,7 +91,7 @@
 			</div>
 
 			<div class="flex items-center">
-				<Tooltip content={`${item.label} (${item.value})`} placement="top-start">
+				<Tooltip content={item?.model?.meta?.description || item.label} placement="top-start">
 					<div class="line-clamp-1">
 						{item.label}
 					</div>

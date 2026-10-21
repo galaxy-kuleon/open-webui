@@ -3443,6 +3443,7 @@ def _soc_export_owner_ok(nonce: str, user, prefix: str = 'soc') -> bool:
 @app.get('/api/exports/{path:path}')
 async def serve_export_file(
     path: str,
+    download_partial: bool = False,
     user=Depends(get_verified_user),
 ):
     """Serve files from /handoff/exports/ for download.
@@ -3473,6 +3474,41 @@ async def serve_export_file(
         nonce = rel.parts[1] if len(rel.parts) > 1 else ''
         if not _soc_export_owner_ok(nonce, user, prefix=rel.parts[0]):
             raise HTTPException(status_code=404, detail='File not found')
+
+    if is_soc and len(rel.parts) >= 2 and not download_partial:
+        result_marker = exports_root / rel.parts[0] / rel.parts[1] / '.result.json'
+        try:
+            result = json.loads(result_marker.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            result = {}
+        except (OSError, ValueError):
+            raise HTTPException(status_code=503, detail='Conversion result unavailable')
+        if result.get('success') is False or result.get('completeness') == 'partial':
+            import html as _html
+            from urllib.parse import quote
+
+            warning = (
+                '翻譯尚未完整完成，部分或全部文字仍為原文。請回到聊天要求重新翻譯。'
+                ' Translation is incomplete; some or all text remains in the original language. '
+                'Return to the chat to retry the translation.'
+                if result.get('mode') == 'translated'
+                else '轉檔尚未完整完成。Conversion is incomplete.'
+            )
+            partial_link = '/api/exports/' + quote(path, safe='/') + '?download_partial=true'
+            return HTMLResponse(
+                status_code=409,
+                headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store'},
+                content=(
+                    '<!doctype html><html><head><meta charset="utf-8">'
+                    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                    '<title>結果未完成 / Incomplete result</title></head>'
+                    '<body><main><h1>結果未完成 / Incomplete result</h1>'
+                    f'<p>{_html.escape(warning)}</p>'
+                    f'<p><a href="{_html.escape(partial_link, quote=True)}">'
+                    '仍下載未完成版本 / Download the incomplete version</a></p>'
+                    '</main></body></html>'
+                ),
+            )
 
     if not file_path.is_file():
         # SOC links are handed out in chat BEFORE the conversion finishes (the
