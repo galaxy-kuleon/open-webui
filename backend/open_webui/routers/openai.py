@@ -1169,6 +1169,8 @@ async def generate_chat_completion(
         if target.hostname in {'host.docker.internal', '127.0.0.1', 'localhost'} and target.port in {31234, 31235, 31236, 31237}:
             payload['enable_thinking'] = False
             payload['chat_template_kwargs'] = {**(payload.get('chat_template_kwargs') or {}), 'enable_thinking': False}
+        if 'background_reasoning_effort' in api_config:
+            payload['reasoning_effort'] = api_config['background_reasoning_effort']
         log.info('background_task_started task=%s model=%s chat=%s max_tokens=%s timeout_seconds=%s',
                  metadata['task'], payload['model'], metadata.get('chat_id'),
                  payload.get('max_completion_tokens', payload.get('max_tokens')), request_timeout)
