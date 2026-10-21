@@ -1568,7 +1568,10 @@ async def chat_completion_tools_handler(
                         }
                     )
 
-                    if tools[tool_function_name].get('metadata', {}).get('file_handler', False):
+                    if (
+                        tools[tool_function_name].get('metadata', {}).get('file_handler', False)
+                        or (forced_tool_call and tool_function_name == forced_tool_call['name'])
+                    ):
                         skip_files = True
 
             # A selector may return {"name": null} to mean no tool. Treat it
