@@ -67,7 +67,7 @@ from pathlib import Path
 import httpx
 import tiktoken
 
-from open_webui.skiprag.sampling import LOCAL_MODEL_SAMPLING, LOCAL_MODEL_REASONING
+from open_webui.skiprag.sampling import LOCAL_MODEL_SAMPLING, LOCAL_MODEL_REASONING, LOCAL_MODEL_REASONING_TOKEN_RESERVE
 
 log = logging.getLogger(__name__)
 
@@ -470,6 +470,8 @@ def _extract_cache_key(item_text: str, query: str, target_tokens: int) -> str:
             _EXTRACTION_PROMPT_VERSION,
             EXTRACTOR_MODEL_ID,
             str(EXTRACTOR_ENABLE_THINKING),
+            str(LOCAL_MODEL_REASONING.get('reasoning_effort')),
+            str(LOCAL_MODEL_REASONING_TOKEN_RESERVE),
             str(EXTRACTOR_TEMPERATURE),
             str(EXTRACTOR_TOP_P),
             str(EXTRACTOR_TOP_K),
@@ -566,6 +568,8 @@ async def _call_extractor(doc: str, query: str, budget_tokens: int) -> str | Non
         budget_tokens,
     )
 
+    answer_budget = min(EXTRACTOR_MAX_TOKENS, max(1, budget_tokens))
+    reasoning_reserve = LOCAL_MODEL_REASONING_TOKEN_RESERVE if EXTRACTOR_ENABLE_THINKING else 0
     payload = {
         'model': EXTRACTOR_MODEL_ID,
         'messages': [
@@ -581,7 +585,7 @@ async def _call_extractor(doc: str, query: str, budget_tokens: int) -> str | Non
         'min_p': EXTRACTOR_MIN_P,
         'presence_penalty': EXTRACTOR_PRESENCE_PENALTY,
         'repetition_penalty': EXTRACTOR_REPETITION_PENALTY,
-        'max_tokens': min(EXTRACTOR_MAX_TOKENS, max(1, budget_tokens)),
+        'max_tokens': answer_budget + reasoning_reserve,
     }
 
     try:
@@ -596,6 +600,11 @@ async def _call_extractor(doc: str, query: str, budget_tokens: int) -> str | Non
             )
             resp.raise_for_status()
             data = resp.json()
+            log.info(
+                'skip-rag[extract]: answer_budget=%d reasoning_reserve=%d completion_budget=%d finish_reason=%s',
+                answer_budget, reasoning_reserve, payload['max_tokens'],
+                data['choices'][0].get('finish_reason'),
+            )
             content = data['choices'][0]['message'].get('content') or ''
             if not content:
                 log.warning(
