@@ -67,7 +67,7 @@ from pathlib import Path
 import httpx
 import tiktoken
 
-from open_webui.skiprag.sampling import LOCAL_MODEL_SAMPLING, LOCAL_MODEL_REASONING, LOCAL_MODEL_REASONING_TOKEN_RESERVE
+from open_webui.skiprag.sampling import LOCAL_MODEL_SAMPLING, LOCAL_MODEL_REASONING, LOCAL_MODEL_REASONING_TOKEN_RESERVE, LOCAL_MODEL_THINKING_TOKEN_BUDGET
 
 log = logging.getLogger(__name__)
 
@@ -472,6 +472,7 @@ def _extract_cache_key(item_text: str, query: str, target_tokens: int) -> str:
             str(EXTRACTOR_ENABLE_THINKING),
             str(LOCAL_MODEL_REASONING.get('reasoning_effort')),
             str(LOCAL_MODEL_REASONING_TOKEN_RESERVE),
+            str(LOCAL_MODEL_THINKING_TOKEN_BUDGET),
             str(EXTRACTOR_TEMPERATURE),
             str(EXTRACTOR_TOP_P),
             str(EXTRACTOR_TOP_K),
@@ -587,6 +588,8 @@ async def _call_extractor(doc: str, query: str, budget_tokens: int) -> str | Non
         'repetition_penalty': EXTRACTOR_REPETITION_PENALTY,
         'max_tokens': answer_budget + reasoning_reserve,
     }
+    if EXTRACTOR_ENABLE_THINKING and LOCAL_MODEL_THINKING_TOKEN_BUDGET is not None:
+        payload['thinking_token_budget'] = LOCAL_MODEL_THINKING_TOKEN_BUDGET
 
     try:
         async with httpx.AsyncClient(timeout=EXTRACTOR_TIMEOUT_SECONDS) as client:
