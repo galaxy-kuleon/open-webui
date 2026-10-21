@@ -3378,12 +3378,16 @@ def _soc_owner_matches(owner, uid: str) -> bool:
     return bool(owner) and (owner == uid or owner == f'handoff_{uid}')
 
 
-def _soc_courtesy_page(title: str, body: str, refresh: bool = False, status_code: int = 202) -> HTMLResponse:
+def _soc_courtesy_page(title: str, body: str, refresh: bool = False, status_code: int = 202, action: tuple[str, str] | None = None) -> HTMLResponse:
     """Human-readable page for SOC export links whose file is not (yet) there.
     Users open these links straight from chat, so a raw 404 JSON reads as
     breakage even while the conversion is still running."""
     import html as _html
     meta = '<meta http-equiv="refresh" content="15">' if refresh else ''
+    action_html = (
+        f'<p><a href="{_html.escape(action[0], quote=True)}">{_html.escape(action[1])}</a></p>'
+        if action else ''
+    )
     return HTMLResponse(
         status_code=status_code,
         headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store'},
@@ -3396,7 +3400,7 @@ def _soc_courtesy_page(title: str, body: str, refresh: bool = False, status_code
             '@media (prefers-color-scheme:dark){body{background:#111;color:#ddd}}'
             'main{max-width:34em;padding:2em;text-align:center}h1{font-size:1.3em}</style>'
             f'</head><body><main><h1>{_html.escape(title)}</h1>'
-            f'<p>{_html.escape(body)}</p></main></body></html>'
+            f'<p>{_html.escape(body)}</p>{action_html}</main></body></html>'
         ),
     )
 
@@ -3484,7 +3488,6 @@ async def serve_export_file(
         except (OSError, ValueError):
             raise HTTPException(status_code=503, detail='Conversion result unavailable')
         if result.get('success') is False or result.get('completeness') == 'partial':
-            import html as _html
             from urllib.parse import quote
 
             warning = (
@@ -3495,19 +3498,11 @@ async def serve_export_file(
                 else '轉檔尚未完整完成。Conversion is incomplete.'
             )
             partial_link = '/api/exports/' + quote(path, safe='/') + '?download_partial=true'
-            return HTMLResponse(
+            return _soc_courtesy_page(
+                '結果未完成 / Incomplete result',
+                warning,
                 status_code=409,
-                headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store'},
-                content=(
-                    '<!doctype html><html><head><meta charset="utf-8">'
-                    '<meta name="viewport" content="width=device-width, initial-scale=1">'
-                    '<title>結果未完成 / Incomplete result</title></head>'
-                    '<body><main><h1>結果未完成 / Incomplete result</h1>'
-                    f'<p>{_html.escape(warning)}</p>'
-                    f'<p><a href="{_html.escape(partial_link, quote=True)}">'
-                    '仍下載未完成版本 / Download the incomplete version</a></p>'
-                    '</main></body></html>'
-                ),
+                action=(partial_link, '仍下載未完成版本 / Download the incomplete version'),
             )
 
     if not file_path.is_file():
