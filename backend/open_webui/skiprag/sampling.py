@@ -5,12 +5,6 @@ LOCAL_MODEL_REASONING_TOKEN_RESERVE = int(os.environ.get("QWEN_REASONING_TOKEN_R
 if LOCAL_MODEL_REASONING_TOKEN_RESERVE < 0:
     raise ValueError("QWEN_REASONING_TOKEN_RESERVE must not be negative")
 
-_thinking_budget = os.environ.get("QWEN_THINKING_TOKEN_BUDGET", "").strip()
-LOCAL_MODEL_THINKING_TOKEN_BUDGET = int(_thinking_budget) if _thinking_budget else None
-if LOCAL_MODEL_THINKING_TOKEN_BUDGET is not None and not 0 < LOCAL_MODEL_THINKING_TOKEN_BUDGET <= LOCAL_MODEL_REASONING_TOKEN_RESERVE:
-    raise ValueError("QWEN_THINKING_TOKEN_BUDGET must be positive and no greater than QWEN_REASONING_TOKEN_RESERVE")
-
-
 LOCAL_MODEL_SAMPLING = {
     "temperature": float(os.environ.get("SKIP_RAG_EXTRACTOR_TEMPERATURE", "1.0")),
     "top_p": float(os.environ.get("SKIP_RAG_EXTRACTOR_TOP_P", "0.95")),
