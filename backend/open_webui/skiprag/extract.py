@@ -67,7 +67,7 @@ from pathlib import Path
 import httpx
 import tiktoken
 
-from open_webui.skiprag.sampling import LOCAL_MODEL_SAMPLING
+from open_webui.skiprag.sampling import LOCAL_MODEL_SAMPLING, LOCAL_MODEL_REASONING
 
 log = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ EXTRACTOR_API_KEY: str = os.environ.get(
     'SKIP_RAG_EXTRACTOR_API_KEY', 'change-me-local-key'
 )
 EXTRACTOR_ENABLE_THINKING: bool = _env_bool(
-    'SKIP_RAG_EXTRACTOR_ENABLE_THINKING', False
+    'SKIP_RAG_EXTRACTOR_ENABLE_THINKING', True
 )
 EXTRACTOR_TEMPERATURE = LOCAL_MODEL_SAMPLING["temperature"]
 EXTRACTOR_TOP_P = LOCAL_MODEL_SAMPLING["top_p"]
@@ -573,6 +573,7 @@ async def _call_extractor(doc: str, query: str, budget_tokens: int) -> str | Non
             {'role': 'user', 'content': user_prompt},
         ],
         'stream': False,
+        **LOCAL_MODEL_REASONING,
         'enable_thinking': EXTRACTOR_ENABLE_THINKING,
         'temperature': EXTRACTOR_TEMPERATURE,
         'top_p': EXTRACTOR_TOP_P,

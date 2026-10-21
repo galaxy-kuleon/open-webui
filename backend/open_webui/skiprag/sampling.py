@@ -9,3 +9,8 @@ LOCAL_MODEL_SAMPLING = {
     "presence_penalty": float(os.environ.get("SKIP_RAG_EXTRACTOR_PRESENCE_PENALTY", "0.0")),
     "repetition_penalty": float(os.environ.get("SKIP_RAG_EXTRACTOR_REPETITION_PENALTY", "1.0")),
 }
+
+LOCAL_MODEL_REASONING = {
+    "reasoning_effort": os.environ.get("QWEN_REASONING_EFFORT", "xhigh"),
+    "enable_thinking": True,
+}
