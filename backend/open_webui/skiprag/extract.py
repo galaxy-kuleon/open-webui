@@ -67,6 +67,8 @@ from pathlib import Path
 import httpx
 import tiktoken
 
+from open_webui.skiprag.sampling import LOCAL_MODEL_SAMPLING
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -87,10 +89,10 @@ def _env_bool(name: str, default: bool) -> bool:
     )
 
 EXTRACTOR_MODEL_ID: str = os.environ.get(
-    'SKIP_RAG_EXTRACTOR_MODEL_ID', 'qwen3.8-27b-mtplx-optimized-speed'
+    'SKIP_RAG_EXTRACTOR_MODEL_ID', 'ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:IQ3_S'
 )
 EXTRACTOR_API_BASE: str = os.environ.get(
-    'SKIP_RAG_EXTRACTOR_API_BASE', 'http://host.docker.internal:31234/v1'
+    'SKIP_RAG_EXTRACTOR_API_BASE', 'http://host.docker.internal:8235/v1'
 ).rstrip('/')
 EXTRACTOR_API_KEY: str = os.environ.get(
     'SKIP_RAG_EXTRACTOR_API_KEY', 'change-me-local-key'
@@ -98,24 +100,12 @@ EXTRACTOR_API_KEY: str = os.environ.get(
 EXTRACTOR_ENABLE_THINKING: bool = _env_bool(
     'SKIP_RAG_EXTRACTOR_ENABLE_THINKING', False
 )
-EXTRACTOR_TEMPERATURE: float = float(
-    os.environ.get('SKIP_RAG_EXTRACTOR_TEMPERATURE', '1.0')
-)
-EXTRACTOR_TOP_P: float = float(
-    os.environ.get('SKIP_RAG_EXTRACTOR_TOP_P', '0.95')
-)
-EXTRACTOR_TOP_K: int = int(
-    os.environ.get('SKIP_RAG_EXTRACTOR_TOP_K', '20')
-)
-EXTRACTOR_MIN_P: float = float(
-    os.environ.get('SKIP_RAG_EXTRACTOR_MIN_P', '0.0')
-)
-EXTRACTOR_PRESENCE_PENALTY: float = float(
-    os.environ.get('SKIP_RAG_EXTRACTOR_PRESENCE_PENALTY', '0.0')
-)
-EXTRACTOR_REPETITION_PENALTY: float = float(
-    os.environ.get('SKIP_RAG_EXTRACTOR_REPETITION_PENALTY', '1.1')
-)
+EXTRACTOR_TEMPERATURE = LOCAL_MODEL_SAMPLING["temperature"]
+EXTRACTOR_TOP_P = LOCAL_MODEL_SAMPLING["top_p"]
+EXTRACTOR_TOP_K = LOCAL_MODEL_SAMPLING["top_k"]
+EXTRACTOR_MIN_P = LOCAL_MODEL_SAMPLING["min_p"]
+EXTRACTOR_PRESENCE_PENALTY = LOCAL_MODEL_SAMPLING["presence_penalty"]
+EXTRACTOR_REPETITION_PENALTY = LOCAL_MODEL_SAMPLING["repetition_penalty"]
 EXTRACTOR_MAX_TOKENS: int = int(os.environ.get('SKIP_RAG_EXTRACTOR_MAX_TOKENS', '4096'))
 EXTRACTOR_CHUNK_TOKENS: int = int(os.environ.get('SKIP_RAG_EXTRACTOR_CHUNK_TOKENS', '12000'))
 EXTRACTOR_FLOOR_TOKENS: int = int(os.environ.get('SKIP_RAG_EXTRACTOR_FLOOR_TOKENS', '1000'))

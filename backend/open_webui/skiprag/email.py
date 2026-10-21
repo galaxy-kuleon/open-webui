@@ -19,6 +19,8 @@ from typing import cast
 
 import requests
 
+from open_webui.skiprag.sampling import LOCAL_MODEL_SAMPLING
+
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BIDI_RE = re.compile(r"[\u202a-\u202e\u2066-\u2069\u200f\u061c]")
 _WHITESPACE_RE = re.compile(r"[ \t\r\n]+")
@@ -357,7 +359,7 @@ def _extract_image_via_task_model(file_bytes: bytes, filename: str) -> tuple[boo
     try:
         api_base = os.environ.get(
             "SKIP_RAG_TASK_MODEL_API_BASE",
-            "http://host.docker.internal:31235/v1",
+            "http://host.docker.internal:1234/v1",
         ).rstrip("/")
         model = os.environ.get("SKIP_RAG_TASK_MODEL_ID", "qwen3.5-4b-mtp")
 
@@ -396,6 +398,7 @@ def _extract_image_via_task_model(file_bytes: bytes, filename: str) -> tuple[boo
                     },
                 ],
                 "max_tokens": 2000,
+                **LOCAL_MODEL_SAMPLING,
             },
             timeout=120,
         )
