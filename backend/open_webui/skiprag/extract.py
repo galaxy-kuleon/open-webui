@@ -584,7 +584,7 @@ async def _call_extractor(doc: str, query: str, budget_tokens: int) -> str | Non
         'top_k': EXTRACTOR_TOP_K,
         'min_p': EXTRACTOR_MIN_P,
         'presence_penalty': EXTRACTOR_PRESENCE_PENALTY,
-        'repetition_penalty': EXTRACTOR_REPETITION_PENALTY,
+        'repeat_penalty': EXTRACTOR_REPETITION_PENALTY,
         'max_tokens': answer_budget + reasoning_reserve,
     }
 
