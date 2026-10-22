@@ -124,6 +124,8 @@ EMAIL_EXTS: frozenset[str] = frozenset({'eml'})
 # the caller's generic Loader fallback and surfaces as `fallback_empty`, which
 # is a distinguishable failure kind rather than the old silent docling miss.
 MSG_EXTS: frozenset[str] = frozenset({'msg'})
+WORD_TEXT_CACHE_REVISION = 'soffice-text-v1'
+WORD_TEXT_EXTS: frozenset[str] = frozenset({'doc', 'docx'})
 
 # Extensions that are just plain text — read directly
 PLAINTEXT_EXTS: frozenset[str] = frozenset({'md', 'txt'})
@@ -174,6 +176,8 @@ def _ensure_cache_dir() -> None:
 
 def _cache_key(raw_bytes: bytes, ext: str) -> str:
     digest = hashlib.sha256(raw_bytes).hexdigest()
+    if ext in WORD_TEXT_EXTS:
+        return f'{digest}.{ext}.{WORD_TEXT_CACHE_REVISION}.md'
     if ext == 'eml':
         return f'{digest}.{ext}.attach-v1.md'
     return f'{digest}.{ext}.md'
@@ -568,13 +572,17 @@ def convert_to_markdown_outcome(
                 ext,
                 type(exc).__name__,
             )
-            md = _fallback_loader(raw_bytes, filename, request)
-            used_degraded_fallback = True
-            outcome = (
-                ConversionOutcome.complete(md)
-                if isinstance(md, str) and md.strip()
-                else ConversionOutcome.unavailable('fallback_empty')
-            )
+            if ext in WORD_TEXT_EXTS:
+                md = ''
+                outcome = ConversionOutcome.unavailable('word_text_conversion_failed')
+            else:
+                md = _fallback_loader(raw_bytes, filename, request)
+                used_degraded_fallback = True
+                outcome = (
+                    ConversionOutcome.complete(md)
+                    if isinstance(md, str) and md.strip()
+                    else ConversionOutcome.unavailable('fallback_empty')
+                )
 
     # Cache only the normal docling/soffice conversion. Do not cache degraded
     # fallback output under the content hash: a transient sidecar outage should
@@ -621,6 +629,10 @@ def _convert_uncached(raw_bytes: bytes, filename: str, ext: str, request=None) -
             request=request,
             attachment_converter=convert_to_markdown,
         )
+
+    elif ext in WORD_TEXT_EXTS:
+        log.info('skip-rag: converting .%s via soffice native text export', ext)
+        return _soffice_convert(raw_bytes, filename, 'txt').decode('utf-8-sig')
 
     elif ext in LEGACY_EXT_TO_TARGET:
         # Legacy → soffice → modern OOXML → docling
