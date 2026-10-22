@@ -50,6 +50,7 @@ RUN npm ci --force
 COPY src ./src
 COPY static ./static
 COPY scripts ./scripts
+COPY crypto ./crypto
 COPY CHANGELOG.md ./CHANGELOG.md
 COPY i18next-parser.config.ts postcss.config.js svelte.config.js ./
 COPY tailwind.config.js tsconfig.json vite.config.ts ./
