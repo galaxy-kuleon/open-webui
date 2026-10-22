@@ -41,6 +41,7 @@ from open_webui.models.users import Users
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.audio import transcribe
 from open_webui.routers.retrieval import ProcessFileForm, process_file
+from open_webui.skiprag.convert import convert_to_markdown_outcome
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.journey_archive import (
@@ -755,6 +756,45 @@ async def update_file_data_content_by_id(
 ############################
 # Get File Content By Id
 ############################
+
+
+@router.post('/{id}/source-text')
+async def get_file_source_text_by_id(
+    id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    file = await Files.get_file_by_id(id, db=db)
+    if not file or not (
+        file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'read', user, db=db)
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    if not file.path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    try:
+        file_path = Path(await asyncio.to_thread(Storage.get_file, file.path))
+        filename = (file.meta or {}).get('name') or file.filename
+
+        def convert():
+            raw = file_path.read_bytes()
+            outcome = convert_to_markdown_outcome(raw, filename, request)
+            return {
+                'file_id': file.id,
+                'original_sha256': hashlib.sha256(raw).hexdigest(),
+                'status': outcome.status.value,
+                'failure_kind': outcome.failure_kind,
+                'markdown': outcome.markdown,
+                'text_sha256': hashlib.sha256(outcome.markdown.encode()).hexdigest(),
+                'limitations': [
+                    'Converted text; original pagination, annotations, embedded objects and image-only content are not established.'
+                ],
+            }
+
+        return await asyncio.to_thread(convert)
+    except Exception:
+        log.exception('Source text conversion failed')
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Source text conversion unavailable')
 
 
 @router.get('/{id}/content')
