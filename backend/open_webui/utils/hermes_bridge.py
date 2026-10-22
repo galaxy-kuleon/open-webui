@@ -135,6 +135,8 @@ class HermesMemoryListPage:
 
 def get_bridge_config(app_config: Any = None) -> HermesBridgeConfig:
     """Return bridge config, with explicit env values overriding persisted config."""
+    if isinstance(app_config, HermesBridgeConfig):
+        return app_config
     base = HermesBridgeConfig()
     source = app_config if app_config is not None else object()
     return HermesBridgeConfig(
@@ -174,6 +176,22 @@ def get_bridge_config(app_config: Any = None) -> HermesBridgeConfig:
             env_names=("OPENWEBUI_HERMES_BRIDGE_TIMEOUT", "HERMES_BRIDGE_TIMEOUT"),
         ),
     )
+
+
+async def get_runtime_bridge_config() -> HermesBridgeConfig:
+    from types import SimpleNamespace
+    from open_webui.models.config import Config
+    keys = {
+        'HERMES_BRIDGE_ENABLED': 'hermes.bridge.enabled',
+        'HERMES_MEMORY_BRIDGE_ENABLED': 'hermes.bridge.memory_enabled',
+        'HERMES_OUTBOX_DRAIN_ENABLED': 'hermes.bridge.outbox_drain_enabled',
+        'HERMES_DELETE_PURGE_ENABLED': 'hermes.bridge.delete_purge_enabled',
+        'HERMES_BRIDGE_URL': 'hermes.bridge.url',
+        'HERMES_BRIDGE_API_KEY': 'hermes.bridge.api_key',
+        'HERMES_BRIDGE_TIMEOUT': 'hermes.bridge.timeout',
+    }
+    values = await Config.get_many(*keys.values())
+    return get_bridge_config(SimpleNamespace(**{name: values[key] for name, key in keys.items() if key in values}))
 
 
 def memory_bridge_enabled(app_config: Any = None) -> bool:

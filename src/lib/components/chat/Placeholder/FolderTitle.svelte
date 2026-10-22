@@ -30,6 +30,7 @@
 	import EmojiPicker from '$lib/components/common/EmojiPicker.svelte';
 
 	export let folder = null;
+	export let readOnly: boolean = false;
 
 	export let onUpdate: Function = (folderId) => {};
 	export let onDelete: Function = (folderId) => {};
@@ -40,14 +41,14 @@
 	let deleteFolderContents = true;
 
 	const updateHandler = async ({ name, meta, data }) => {
-		if (name === '') {
+		name = name?.trim();
+		if (!name) {
 			toast.error($i18n.t('Folder name cannot be empty.'));
 			return;
 		}
 
 		const currentName = folder.name;
 
-		name = name.trim();
 		folder.name = name;
 
 		const res = await updateFolderById(localStorage.token, folder.id, {
@@ -74,8 +75,9 @@
 				return null;
 			});
 
-			await selectedFolder.set(_folder);
-			onUpdate(_folder);
+			const updatedFolder = { ...folder, ..._folder };
+			await selectedFolder.set(updatedFolder);
+			onUpdate(updatedFolder);
 		}
 	};
 
@@ -99,8 +101,9 @@
 				return null;
 			});
 
-			await selectedFolder.set(_folder);
-			onUpdate(_folder);
+			const updatedFolder = { ...folder, ..._folder };
+			await selectedFolder.set(updatedFolder);
+			onUpdate(updatedFolder);
 		}
 	};
 
@@ -135,12 +138,11 @@
 	};
 
 	const createSubFolderHandler = async ({ name, meta, data, parent_id }) => {
-		if (name === '') {
+		name = name?.trim();
+		if (!name) {
 			toast.error($i18n.t('Folder name cannot be empty.'));
 			return;
 		}
-
-		name = name.trim();
 
 		const res = await createNewFolder(localStorage.token, {
 			name,
@@ -201,55 +203,69 @@
 
 	<div class="mb-3 px-6 @md:max-w-3xl justify-between w-full flex relative group items-center">
 		<div class="text-center flex gap-3.5 items-center">
-			<EmojiPicker
-				onClose={() => {}}
-				selected={folder?.meta?.icon ?? null}
-				onSubmit={(name) => {
-					console.log(name);
-					updateIconHandler(name);
-				}}
-			>
-				<button
-					aria-label={$i18n.t('Change folder icon')}
-					class=" rounded-full bg-gray-50 dark:bg-gray-800 size-11 flex justify-center items-center"
+			{#if readOnly}
+				<div
+					class="rounded-full bg-gray-50 dark:bg-gray-800 size-11 flex justify-center items-center"
 				>
 					{#if folder?.meta?.icon}
 						<Emoji className="size-6" shortCode={folder.meta.icon} />
 					{:else}
 						<Folder className="size-4.5" strokeWidth="2" />
 					{/if}
-				</button>
-			</EmojiPicker>
+				</div>
+			{:else}
+				<EmojiPicker
+					onClose={() => {}}
+					selected={folder?.meta?.icon ?? null}
+					onSubmit={(name) => {
+						console.log(name);
+						updateIconHandler(name);
+					}}
+				>
+					<button
+						aria-label={$i18n.t('Change folder icon')}
+						class="rounded-full bg-gray-50 dark:bg-gray-800 size-11 flex justify-center items-center outline-hidden focus:outline-hidden"
+					>
+						{#if folder?.meta?.icon}
+							<Emoji className="size-6" shortCode={folder.meta.icon} />
+						{:else}
+							<Folder className="size-4.5" strokeWidth="2" />
+						{/if}
+					</button>
+				</EmojiPicker>
+			{/if}
 
 			<div class="text-3xl line-clamp-1">
 				{folder.name}
 			</div>
 		</div>
 
-		<div class="flex items-center translate-x-2.5">
-			<FolderMenu
-				align="end"
-				onEdit={() => {
-					showFolderModal = true;
-				}}
-				onDelete={() => {
-					showDeleteConfirm = true;
-				}}
-				onExport={() => {
-					exportHandler();
-				}}
-				onCreateSubFolder={() => {
-					showCreateSubFolderModal = true;
-				}}
-			>
-				<button
-					class="p-1.5 dark:hover:bg-gray-850 rounded-full touch-auto"
-					aria-label={$i18n.t('Folder options')}
-					on:click={(e) => {}}
+		{#if !readOnly}
+			<div class="flex items-center translate-x-2.5">
+				<FolderMenu
+					align="end"
+					onEdit={() => {
+						showFolderModal = true;
+					}}
+					onDelete={() => {
+						showDeleteConfirm = true;
+					}}
+					onExport={() => {
+						exportHandler();
+					}}
+					onCreateSubFolder={() => {
+						showCreateSubFolderModal = true;
+					}}
 				>
-					<EllipsisHorizontal className="size-4" strokeWidth="2.5" />
-				</button>
-			</FolderMenu>
-		</div>
+					<button
+						class="p-1.5 dark:hover:bg-gray-850 rounded-full touch-auto"
+						aria-label={$i18n.t('Folder options')}
+						on:click={(e) => {}}
+					>
+						<EllipsisHorizontal className="size-4" strokeWidth="2.5" />
+					</button>
+				</FolderMenu>
+			</div>
+		{/if}
 	</div>
 {/if}

@@ -6,6 +6,8 @@
 	import ProfileImage from '../Messages/ProfileImage.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Heart from '$lib/components/icons/Heart.svelte';
+	import { getOutputText } from '../Messages/structuredOutput';
+	import { resolveLocalizedModelName } from '$lib/utils/localizedContent';
 
 	import { causeLabel, hasStructuredEmptyError } from '$lib/utils/empty_turn';
 
@@ -26,13 +28,20 @@
 	$: errorText = hasStructuredEmptyError(data?.message)
 		? `This turn ended without a final answer (${causeLabel(data.message.error.cause)}).`
 		: data?.message?.error?.content;
+	const getMessageContent = (nodeData: any) =>
+		getOutputText(nodeData?.message?.output) || nodeData?.message?.content || '';
+
+	$: messageContent = getMessageContent(data);
+	$: modelName = data?.model
+		? resolveLocalizedModelName(data.model, $i18n.language)
+		: (data?.message?.model ?? 'Assistant');
 </script>
 
 <div
 	class="px-4 py-3 shadow-md rounded-xl dark:bg-black bg-white border border-gray-100 dark:border-gray-900 w-60 h-20 group"
 >
 	<Tooltip
-		content={data?.message?.error ? errorText : data.message.content}
+		content={data?.message?.error ? errorText : messageContent}
 		class="w-full"
 		allowHTML={false}
 	>
@@ -42,9 +51,9 @@
 					src={`${WEBUI_API_BASE_URL}/users/${data.user.id}/profile/image`}
 					className={'size-5 -translate-y-[1px] flex-shrink-0'}
 				/>
-				<div class="ml-2">
+				<div class="ml-2 flex-1 min-w-0">
 					<div class=" flex justify-between items-center">
-						<div class="text-xs text-black dark:text-white font-medium line-clamp-1">
+						<div class="text-xs text-black dark:text-white font-normal line-clamp-1">
 							{data?.user?.name ?? 'User'}
 						</div>
 					</div>
@@ -52,7 +61,7 @@
 					{#if data?.message?.error}
 						<div class="text-red-500 line-clamp-2 text-xs mt-0.5">{errorText}</div>
 					{:else}
-						<div class="text-gray-500 line-clamp-2 text-xs mt-0.5">{data.message.content}</div>
+						<div class="text-gray-500 line-clamp-2 text-xs mt-0.5">{messageContent}</div>
 					{/if}
 				</div>
 			</div>
@@ -63,14 +72,14 @@
 					className={'size-5 -translate-y-[1px] flex-shrink-0'}
 				/>
 
-				<div class="ml-2">
+				<div class="ml-2 flex-1 min-w-0">
 					<div class=" flex justify-between items-center">
-						<div class="text-xs text-black dark:text-white font-medium line-clamp-1">
-							{data?.model?.name ?? data?.message?.model ?? 'Assistant'}
+						<div class="text-xs text-black dark:text-white font-normal line-clamp-1">
+							{modelName}
 						</div>
 
 						<button
-							class={data?.message?.favorite ? '' : 'invisible group-hover:visible'}
+							class={data?.message?.favorite ? '' : 'hover-reveal'}
 							aria-label={data?.message?.favorite
 								? $i18n.t('Remove from favorites')
 								: $i18n.t('Add to favorites')}
@@ -92,12 +101,20 @@
 							{errorText}
 						</div>
 					{:else}
-						<div class="text-gray-500 line-clamp-2 text-xs mt-0.5">{data.message.content}</div>
+						<div class="text-gray-500 line-clamp-2 text-xs mt-0.5">{messageContent}</div>
 					{/if}
 				</div>
 			</div>
 		{/if}
 	</Tooltip>
-	<Handle type="target" position={Position.Top} class="w-2 rounded-full dark:bg-gray-900" />
-	<Handle type="source" position={Position.Bottom} class="w-2 rounded-full dark:bg-gray-900" />
+	<Handle
+		type="target"
+		position={data?.direction === 'horizontal' ? Position.Left : Position.Top}
+		class="w-2 rounded-full dark:bg-gray-900"
+	/>
+	<Handle
+		type="source"
+		position={data?.direction === 'horizontal' ? Position.Right : Position.Bottom}
+		class="w-2 rounded-full dark:bg-gray-900"
+	/>
 </div>

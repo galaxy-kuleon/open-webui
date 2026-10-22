@@ -10,7 +10,7 @@ import aiohttp
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
-from open_webui.utils.hermes_bridge import get_bridge_config
+from open_webui.utils.hermes_bridge import get_bridge_config, get_runtime_bridge_config
 from starlette.background import BackgroundTask
 
 log = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ async def proxy_signed_artifact(
     request: Request,
 ):
     """Stream one signed artifact from the configured internal Hermes origin."""
-    config = get_bridge_config(request.app.state.config)
+    config = await get_runtime_bridge_config()
     target = build_artifact_target(
         config.url, artifact_id, filename, expires_epoch, signature
     )

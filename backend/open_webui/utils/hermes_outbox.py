@@ -12,6 +12,7 @@ from open_webui.utils.hermes_bridge import (
     HermesBridgeClient,
     feedback_delete_purge_enabled,
     get_bridge_config,
+    get_runtime_bridge_config,
     outbox_drain_enabled,
     outbox_worker_enabled,
 )
@@ -89,7 +90,7 @@ async def feedback_outbox_worker_loop(app: Any) -> None:
     batch_size = int(os.environ.get("OPENWEBUI_HERMES_OUTBOX_BATCH_SIZE", "50"))
     while True:
         try:
-            config = getattr(app.state, "config", None)
+            config = await get_runtime_bridge_config()
             if outbox_worker_enabled(config):
                 await drain_feedback_outbox_once(config, batch_size=batch_size)
         except asyncio.CancelledError:
