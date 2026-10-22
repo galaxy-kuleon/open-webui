@@ -1538,20 +1538,6 @@ async def update_chat_by_id(
 
         chat = await Chats.update_chat_by_id(id, merged, db=db, touch=('history' in form_data.chat or 'messages' in form_data.chat))
 
-        # Reconcile chat_message rows with the committed blob.
-        # This is the only caller where the frontend pushes a full
-        # history with potential edits, deletions, or new branches.
-        #
-        # SAME OBJECT as the blob write above, which is the point of the single
-        # merge: the two stores can no longer be fed different dicts by an edit
-        # to one branch. The `if messages:` asymmetry below is UNCHANGED and
-        # still open -- an empty-history payload replaces the blob and skips the
-        # reconcile -- because closing it changes deletion semantics and needs
-        # its own patch.
-        messages = (merged.get('history') or {}).get('messages') or {}
-        if messages:
-            await Chats.reconcile_messages_by_chat_id(id, user.id, messages)
-
         if form_data.variables is not None:
             chat = await Chats.update_chat_variables_by_id(id, form_data.variables, db=db, touch=False) or chat
         await publish_event(request, EVENTS.CHAT_UPDATED, actor=user, subject_id=id, data={'title': chat.title})
