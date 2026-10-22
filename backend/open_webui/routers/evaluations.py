@@ -1,9 +1,7 @@
 import logging
-import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.concurrency import run_in_threadpool
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.internal.db import get_async_session
 from open_webui.models.chats import Chats
@@ -119,22 +117,6 @@ async def _validate_feedback_binding(form_data: FeedbackForm, user: UserModel, d
 #    4. Feedbacks about unrelated topics (e.g., "cooking") contribute less
 #    This gives topic-specific leaderboards without needing separate data.
 
-EMBEDDING_MODEL_NAME = os.environ.get('AUXILIARY_EMBEDDING_MODEL', 'TaylorAI/bge-micro-v2')
-_embedding_model = None
-
-
-def _get_embedding_model():
-    global _embedding_model
-    if _embedding_model is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-
-            _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-        except Exception as e:
-            log.error(f'Embedding model load failed: {e}')
-    return _embedding_model
-
-
 def _calculate_elo(feedbacks: list[LeaderboardFeedbackData], similarities: dict = None) -> dict:
     """
     Calculate Elo ratings for models based on user feedback.
@@ -212,7 +194,7 @@ def _get_top_tags(feedbacks: list[LeaderboardFeedbackData], limit: int = 5) -> d
     }
 
 
-def _compute_similarities(feedbacks: list[LeaderboardFeedbackData], query: str) -> dict:
+async def _compute_similarities(feedbacks: list[LeaderboardFeedbackData], query: str, embedding_function, user) -> dict:
     """
     Compute how relevant each feedback is to a search query.
 
@@ -227,8 +209,7 @@ def _compute_similarities(feedbacks: list[LeaderboardFeedbackData], query: str) 
     """
     import numpy as np
 
-    embedding_model = _get_embedding_model()
-    if not embedding_model:
+    if embedding_function is None:
         return {}
 
     all_tags = list({tag for feedback in feedbacks if feedback.data for tag in feedback.data.get('tags', [])})
@@ -236,8 +217,9 @@ def _compute_similarities(feedbacks: list[LeaderboardFeedbackData], query: str) 
         return {}
 
     try:
-        tag_embeddings = embedding_model.encode(all_tags)
-        query_embedding = embedding_model.encode([query])[0]
+        embeddings = await embedding_function([*all_tags, query], user=user)
+        tag_embeddings = np.asarray(embeddings[:-1])
+        query_embedding = np.asarray(embeddings[-1])
     except Exception as e:
         log.error(f'Embedding error: {e}')
         return {}
@@ -272,6 +254,7 @@ class LeaderboardResponse(BaseModel):
 
 @router.get('/leaderboard', response_model=LeaderboardResponse)
 async def get_leaderboard(
+    request: Request,
     query: Optional[str] = None,
     user=Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_session),
@@ -281,7 +264,9 @@ async def get_leaderboard(
 
     similarities = None
     if query and query.strip():
-        similarities = await run_in_threadpool(_compute_similarities, feedbacks, query.strip())
+        similarities = await _compute_similarities(
+            feedbacks, query.strip(), request.app.state.EMBEDDING_FUNCTION, user
+        )
 
     elo_stats = _calculate_elo(feedbacks, similarities)
     tags_by_model = _get_top_tags(feedbacks)
