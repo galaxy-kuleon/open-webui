@@ -89,10 +89,10 @@ def _env_bool(name: str, default: bool) -> bool:
     )
 
 EXTRACTOR_MODEL_ID: str = os.environ.get(
-    'SKIP_RAG_EXTRACTOR_MODEL_ID', 'ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:IQ3_S'
+    'SKIP_RAG_EXTRACTOR_MODEL_ID', 'ornith-1.5-122b'
 )
 EXTRACTOR_API_BASE: str = os.environ.get(
-    'SKIP_RAG_EXTRACTOR_API_BASE', 'http://host.docker.internal:8235/v1'
+    'SKIP_RAG_EXTRACTOR_API_BASE', 'http://host.docker.internal:1234/v1'
 ).rstrip('/')
 EXTRACTOR_API_KEY: str = os.environ.get(
     'SKIP_RAG_EXTRACTOR_API_KEY', 'change-me-local-key'

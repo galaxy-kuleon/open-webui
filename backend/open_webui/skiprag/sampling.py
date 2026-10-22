@@ -10,11 +10,16 @@ LOCAL_MODEL_SAMPLING = {
     "top_p": float(os.environ.get("SKIP_RAG_EXTRACTOR_TOP_P", "0.95")),
     "top_k": int(os.environ.get("SKIP_RAG_EXTRACTOR_TOP_K", "20")),
     "min_p": float(os.environ.get("SKIP_RAG_EXTRACTOR_MIN_P", "0.0")),
-    "presence_penalty": float(os.environ.get("SKIP_RAG_EXTRACTOR_PRESENCE_PENALTY", "0.0")),
+    "presence_penalty": float(os.environ.get("SKIP_RAG_EXTRACTOR_PRESENCE_PENALTY", "1.5")),
     "repetition_penalty": float(os.environ.get("SKIP_RAG_EXTRACTOR_REPETITION_PENALTY", "1.0")),
 }
 
 LOCAL_MODEL_REASONING = {
     "reasoning_effort": os.environ.get("QWEN_REASONING_EFFORT", "xhigh"),
     "enable_thinking": True,
+}
+
+TASK_MODEL_SAMPLING = {
+    **LOCAL_MODEL_SAMPLING,
+    "presence_penalty": float(os.environ.get("SKIP_RAG_TASK_PRESENCE_PENALTY", "0.0")),
 }

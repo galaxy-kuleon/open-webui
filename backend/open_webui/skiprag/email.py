@@ -19,7 +19,7 @@ from typing import cast
 
 import requests
 
-from open_webui.skiprag.sampling import LOCAL_MODEL_SAMPLING, LOCAL_MODEL_REASONING
+from open_webui.skiprag.sampling import TASK_MODEL_SAMPLING, LOCAL_MODEL_REASONING
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BIDI_RE = re.compile(r"[\u202a-\u202e\u2066-\u2069\u200f\u061c]")
@@ -398,7 +398,7 @@ def _extract_image_via_task_model(file_bytes: bytes, filename: str) -> tuple[boo
                     },
                 ],
                 "max_tokens": 2000,
-                **LOCAL_MODEL_SAMPLING,
+                **TASK_MODEL_SAMPLING,
                 **LOCAL_MODEL_REASONING,
             },
             timeout=120,
