@@ -789,9 +789,6 @@ async def delete_folder_by_id(
                                 visible=not deleted,
                                 result='completed' if deleted else 'failed',
                             )
-                    else:
-                        await Chats.move_chats_by_user_id_and_folder_id(folder_owner_id, folder_id, None, db=db)
-
                     await Chats.move_chats_by_folder_id(folder_id, None, db=db)
 
                     # Clean up access grants for this folder
