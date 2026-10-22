@@ -116,7 +116,7 @@ async def cleanup_response(
                 await result
 
 
-async def stream_wrapper(response, session=None, passthrough=False):
+async def stream_wrapper(response, session=None, passthrough=False, content_handler=None):
     """Wrap a stream to ensure cleanup happens even if streaming is interrupted.
 
     This is more reliable than BackgroundTask which may not run if the client
@@ -127,7 +127,9 @@ async def stream_wrapper(response, session=None, passthrough=False):
     line. Only for streams no internal consumer parses line-by-line.
     """
     try:
-        if passthrough:
+        if content_handler is not None:
+            stream = content_handler(response.content)
+        elif passthrough:
             stream = response.content.iter_any()
         else:
             stream = stream_chunks_handler(response.content)

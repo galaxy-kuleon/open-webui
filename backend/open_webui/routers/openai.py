@@ -1667,12 +1667,13 @@ async def generate_chat_completion(
                         headers=retry_headers,
                     )
 
-            streaming = True
-            return StreamingResponse(
+            stream_response = StreamingResponse(
                 stream_wrapper(r, content_handler=public_provider_stream),
                 status_code=r.status,
                 headers=_clean_proxy_headers(r.headers),
             )
+            streaming = True
+            return stream_response
         else:
             try:
                 response = await r.json(loads=JSONCodec.loads)
