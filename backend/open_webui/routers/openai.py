@@ -62,7 +62,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
 
-BACKGROUND_TASK_MAX_TOKENS = 1024
 BACKGROUND_TASK_TIMEOUT_SECONDS = 120
 BACKGROUND_TASKS = frozenset({
     str(TASKS.TITLE_GENERATION),
@@ -1504,12 +1503,6 @@ async def generate_chat_completion(
     background_task = (metadata or {}).get('task') in BACKGROUND_TASKS
     request_timeout = AIOHTTP_CLIENT_TIMEOUT
     if background_task:
-        for field in ('max_tokens', 'max_completion_tokens'):
-            value = payload.get(field)
-            if value is not None:
-                payload[field] = min(int(value), BACKGROUND_TASK_MAX_TOKENS) if int(value) > 0 else BACKGROUND_TASK_MAX_TOKENS
-        if not any(payload.get(field) for field in ('max_tokens', 'max_completion_tokens')):
-            payload['max_tokens'] = BACKGROUND_TASK_MAX_TOKENS
         request_timeout = min(AIOHTTP_CLIENT_TIMEOUT or BACKGROUND_TASK_TIMEOUT_SECONDS,
                               BACKGROUND_TASK_TIMEOUT_SECONDS)
         target = urlparse(url)

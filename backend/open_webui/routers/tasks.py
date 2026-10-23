@@ -181,9 +181,6 @@ async def generate_title(request: Request, form_data: dict, user=Depends(get_ver
         template = DEFAULT_TITLE_GENERATION_PROMPT_TEMPLATE
 
     content = await title_generation_template(template, form_data['messages'], user)
-    task_model_params = task_model_params or {
-        'max_tokens': models[task_model_id].get('info', {}).get('params', {}).get('max_tokens', 1000)
-    }
 
     payload = {
         'model': task_model_id,
@@ -606,7 +603,7 @@ async def generate_emoji(request: Request, form_data: dict, user=Depends(get_ver
     except Exception as e:
         raise e
 
-    payload = apply_task_model_params(payload, models, task_model_id, {'max_tokens': 4})
+    payload = apply_task_model_params(payload, models, task_model_id)
 
     try:
         return await generate_chat_completion(request, form_data=payload, user=user)

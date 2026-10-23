@@ -315,11 +315,6 @@ async def title_generation_template(template: str, messages: list[dict], user: O
 async def follow_up_generation_template(
     template: str, messages: list[dict], user: Optional[Any] = None, *, use_default: bool = False
 ) -> str:
-    if use_default:
-        start = max(0, len(messages) - 4)
-        first_user = next((i for i, message in enumerate(messages) if message.get('role') == 'user'), None)
-        messages = ([messages[first_user]] if first_user is not None and first_user < start else []) + messages[start:]
-
     normalized = []
     for message in messages:
         content = message.get('content')
@@ -331,9 +326,6 @@ async def follow_up_generation_template(
             )
         else:
             content = get_content_from_message(message) or ''
-        if use_default and len(content) > 1000:
-            # truncate_content adds three characters for the omission marker.
-            content = truncate_content(content, 997)
         normalized.append({**message, 'content': content})
     messages = normalized
 
