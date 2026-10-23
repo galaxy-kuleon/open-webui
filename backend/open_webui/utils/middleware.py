@@ -6605,24 +6605,25 @@ async def streaming_chat_response_handler(response, ctx):
 
                     results = []
 
-                    delegate_calls = [
+                    parallel_call_names = {'delegate_task', 'legal_lookup', 'verify_citation'}
+                    parallel_calls = [
                         tool_call
                         for tool_call in response_tool_calls
-                        if tool_call.get('function', {}).get('name') == 'delegate_task'
+                        if tool_call.get('function', {}).get('name') in parallel_call_names
                     ]
                     tool_results = {}
                     for tool_call in response_tool_calls:
-                        if tool_call.get('function', {}).get('name') != 'delegate_task':
+                        if tool_call.get('function', {}).get('name') not in parallel_call_names:
                             tool_results[id(tool_call)] = await execute_tool_call(
                                 form_data, metadata, event_caller, tool_call
                             )
                     tool_results.update(
                         zip(
-                            [id(tool_call) for tool_call in delegate_calls],
+                            [id(tool_call) for tool_call in parallel_calls],
                             await asyncio.gather(
                                 *(
                                     execute_tool_call(form_data, metadata, event_caller, tool_call)
-                                    for tool_call in delegate_calls
+                                    for tool_call in parallel_calls
                                 )
                             ),
                         )
