@@ -62,7 +62,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
 
-BACKGROUND_TASK_TIMEOUT_SECONDS = 120
 BACKGROUND_TASKS = frozenset({
     str(TASKS.TITLE_GENERATION),
     str(TASKS.TAGS_GENERATION),
@@ -1491,7 +1490,12 @@ async def generate_chat_completion(
     prefix_id = api_config.get('prefix_id', None)
     payload['model'] = strip_provider_model_prefix(payload['model'], prefix_id)
 
-    # Add user info to the payload if the model is a pipeline
+    if 'max_output_tokens' in api_config:
+        for field in ('max_tokens', 'max_completion_tokens', 'max_output_tokens'):
+            payload.pop(field, None)
+        if api_config['max_output_tokens'] is not None:
+            payload['max_tokens'] = api_config['max_output_tokens']
+
     if 'pipeline' in model and model.get('pipeline'):
         payload['user'] = {
             'name': user.name,
@@ -1503,12 +1507,6 @@ async def generate_chat_completion(
     background_task = (metadata or {}).get('task') in BACKGROUND_TASKS
     request_timeout = AIOHTTP_CLIENT_TIMEOUT
     if background_task:
-        request_timeout = min(AIOHTTP_CLIENT_TIMEOUT or BACKGROUND_TASK_TIMEOUT_SECONDS,
-                              BACKGROUND_TASK_TIMEOUT_SECONDS)
-        target = urlparse(url)
-        if target.hostname in {'host.docker.internal', '127.0.0.1', 'localhost'} and target.port in {31234, 31235, 31236, 31237}:
-            payload['enable_thinking'] = False
-            payload['chat_template_kwargs'] = {**(payload.get('chat_template_kwargs') or {}), 'enable_thinking': False}
         if 'background_reasoning_effort' in api_config:
             payload['reasoning_effort'] = api_config['background_reasoning_effort']
         log.info('background_task_started task=%s model=%s chat=%s max_tokens=%s timeout_seconds=%s',
