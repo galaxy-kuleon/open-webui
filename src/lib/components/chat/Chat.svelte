@@ -4044,7 +4044,10 @@
 			if (model) {
 				const hasImages = createMessagesList(_history, parentId).some((message) =>
 					message.files?.some(
-						(file) => file.type === 'image' || isRasterImageContentType(file?.content_type)
+						(file) =>
+							file.type === 'image' ||
+							(!model.info?.meta?.capabilities?.raw_file_uploads &&
+								isRasterImageContentType(file?.content_type))
 					)
 				);
 
@@ -4160,6 +4163,7 @@
 	) => {
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
+		const rawFileUploads = !!model?.info?.meta?.capabilities?.raw_file_uploads;
 		const filesystemAttachment = userMessage?.files?.find(
 			(file: any) => file.type === 'filesystem'
 		);
@@ -4180,7 +4184,8 @@
 			...(userMessage?.files ?? []).filter(
 				(item) =>
 					['doc', 'text', 'note', 'chat', 'collection', 'folder'].includes(item.type) ||
-					(item.type === 'file' && !isRasterImageContentType(item?.content_type))
+					(item.type === 'file' &&
+						(rawFileUploads || !isRasterImageContentType(item?.content_type)))
 			)
 		);
 		// Remove duplicates
@@ -4231,7 +4236,9 @@
 			messages = messages
 				.map((message) => {
 					const imageFiles = (message?.files ?? []).filter(
-						(file) => file.type === 'image' || isRasterImageContentType(file?.content_type)
+						(file) =>
+							file.type === 'image' ||
+							(!rawFileUploads && isRasterImageContentType(file?.content_type))
 					);
 
 					if (message.output && message.role === 'assistant') {
