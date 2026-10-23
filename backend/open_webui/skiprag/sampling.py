@@ -1,10 +1,6 @@
 import os
 
 
-LOCAL_MODEL_REASONING_TOKEN_RESERVE = int(os.environ.get("QWEN_REASONING_TOKEN_RESERVE", "8196"))
-if LOCAL_MODEL_REASONING_TOKEN_RESERVE < 0:
-    raise ValueError("QWEN_REASONING_TOKEN_RESERVE must not be negative")
-
 LOCAL_MODEL_SAMPLING = {
     "temperature": float(os.environ.get("SKIP_RAG_EXTRACTOR_TEMPERATURE", "1.0")),
     "top_p": float(os.environ.get("SKIP_RAG_EXTRACTOR_TOP_P", "0.95")),

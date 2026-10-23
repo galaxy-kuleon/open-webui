@@ -113,7 +113,7 @@ def is_skip_rag_model(model: dict) -> bool:
         return False
 
     capabilities = (model.get('info', {}).get('meta', {}).get('capabilities') or {})
-    return bool(capabilities.get('skip_rag', False))
+    return bool(capabilities.get('skip_rag', False)) and not capabilities.get('raw_file_uploads', False)
 
 
 def _build_md_block(filename: str, md: str) -> str:

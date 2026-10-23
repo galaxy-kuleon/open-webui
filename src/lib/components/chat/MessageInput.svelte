@@ -64,6 +64,7 @@
 		isRasterImageContentType
 	} from '$lib/utils';
 	import { uploadFile } from '$lib/apis/files';
+	import { shouldProcessFileUpload, usesRawFileUploads } from '$lib/utils/fileUploads';
 	import { getCwd, uploadNewFileToTerminal } from '$lib/apis/terminal';
 	import { generateAutoCompletion } from '$lib/apis';
 	import { deleteFileById } from '$lib/apis/files';
@@ -868,22 +869,16 @@
 				(($terminalServers ?? []).some((t) => !t.id) ||
 					($settings?.terminalServers ?? []).some((s) => s.url))));
 
-	// Models that have skip_rag enabled (default OFF, unlike most caps).
-	// When ALL selected models have skip_rag, uploaded files must NOT be embedded at upload
-	// time — the chat path converts bytes via docling instead.  shouldProcessUpload gates this.
-	let skipRagModels = [];
-	$: skipRagModels = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels).filter(
-		(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.skip_rag ?? false
-	);
-
-	// true  → normal models: embed at upload time (pass ?process=true, the default)
-	// false → every selected model has skip_rag: skip embedding (?process=false)
 	let shouldProcessUpload = true;
-	$: {
-		const activeModelIds = atSelectedModel?.id ? [atSelectedModel.id] : selectedModels;
-		shouldProcessUpload =
-			activeModelIds.length === 0 || skipRagModels.length < activeModelIds.length;
-	}
+	let rawFileUploads = false;
+	$: shouldProcessUpload = shouldProcessFileUpload(
+		atSelectedModel?.id ? [atSelectedModel.id] : selectedModels,
+		$models
+	);
+	$: rawFileUploads = usesRawFileUploads(
+		atSelectedModel?.id ? [atSelectedModel.id] : selectedModels,
+		$models
+	);
 
 	let toggleFilters = [];
 	$: toggleFilters = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
@@ -1203,6 +1198,11 @@
 						maxSize: $config?.file?.max_size
 					})
 				);
+				return;
+			}
+
+			if (rawFileUploads) {
+				await uploadFileHandler(file, shouldProcessUpload);
 				return;
 			}
 
@@ -2336,7 +2336,9 @@
 																				}
 																			);
 
-																			await uploadFileHandler(file, shouldProcessUpload, { context: 'full' });
+																			await uploadFileHandler(file, shouldProcessUpload, {
+																				context: 'full'
+																			});
 																		}
 																	}
 																} else {

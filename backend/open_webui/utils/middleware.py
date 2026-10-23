@@ -3389,7 +3389,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     else:
         # Branch 3 — Normal RAG / file_context path
         try:
-            file_context_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('file_context', True)
+            capabilities = model.get('info', {}).get('meta', {}).get('capabilities') or {}
+            file_context_enabled = capabilities.get('file_context', True) and not capabilities.get('raw_file_uploads', False)
             if file_context_enabled:
                 form_data, flags = await chat_completion_files_handler(request, form_data, extra_params, user)
                 sources.extend(flags.get('sources', []))

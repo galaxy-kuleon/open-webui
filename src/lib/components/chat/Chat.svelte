@@ -71,6 +71,7 @@
 		isRasterImageContentType
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
+	import { shouldProcessFileUpload } from '$lib/utils/fileUploads';
 	import { RealtimeCall, getBridgeTurnState, type BridgeSubmission } from '$lib/utils/realtime';
 	import { acquireWakeLock } from '$lib/utils/wakeLock';
 	import { routeAvatarAnimation } from '$lib/utils/voice-avatar';
@@ -2137,7 +2138,15 @@
 
 			// Upload file to server
 			console.log('Uploading file to server...');
-			const uploadedFile = await uploadFile(localStorage.token, file, metadata);
+			const uploadedFile = await uploadFile(
+				localStorage.token,
+				file,
+				metadata,
+				shouldProcessFileUpload(
+					atSelectedModel?.id ? [atSelectedModel.id] : selectedModels,
+					$models
+				)
+			);
 
 			if (!uploadedFile) {
 				throw new Error('Server returned null response for file upload');
@@ -2964,7 +2973,6 @@
 				chatTasks = chat?.tasks ?? [];
 				serverContextUsage = chat?.context_usage ?? null;
 
-
 				autoScroll = true;
 				await tick();
 
@@ -3010,8 +3018,7 @@
 				const decision = reconcileTasks({
 					pendingTaskIds,
 					responseComplete,
-					assistantIncomplete:
-						currentMessage?.role === 'assistant' && !currentMessage.done
+					assistantIncomplete: currentMessage?.role === 'assistant' && !currentMessage.done
 				});
 				taskIds = decision.taskIds;
 				if (decision.markDone && currentMessage) {
